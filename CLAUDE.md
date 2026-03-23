@@ -39,7 +39,7 @@ Key deliverables:
 - Client offboarding/retention automation (quick win)
 
 Key constraints:
-- **WhatsApp** confirmed as the client communication channel
+- **Telegram** confirmed as the client communication channel (one supergroup per client with AI bot + client + account manager)
 - Meta Marketing API access needed for ~100 ad accounts; current API tier and system user token status unconfirmed
 - Campaign strategy is fluid and multi-layered — no static "strategy docs"; strategy communicated via Zoom calls, email summaries, Loom videos
 - Document formats: Google Docs, Google Sheets, Slides, Canva, email, Loom videos

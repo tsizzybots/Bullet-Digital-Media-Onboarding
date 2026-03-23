@@ -8,12 +8,13 @@
 
 ## 1. Overview
 
-Phase 1 delivers an AI-powered **internal client knowledge bank** for Bullet Digital Media's team, followed by a **client-facing WhatsApp AI agent** that answers campaign performance questions. The system ingests client documents, pulls live Meta campaign data, and uses AI to provide instant, accurate answers — with strict data isolation between all ~100 clients.
+Phase 1 delivers an AI-powered **internal client knowledge bank** for Bullet Digital Media's team, followed by a **client-facing Telegram AI bot** that answers campaign performance questions. Each client gets a dedicated Telegram group containing the AI bot, the client, and their assigned account manager. The system ingests client documents, pulls live Meta campaign data, and uses AI to provide instant, accurate answers — with strict data isolation between all ~100 clients.
 
 ### Phase 1 Goals
 - Staff can query any client's information instantly (documents, campaign data, history)
 - Faster client query responses, smoother handovers, holiday cover
-- WhatsApp channel for clients to ask campaign performance questions directly
+- Dedicated Telegram group per client where they can ask campaign performance questions directly
+- Account managers participate naturally in the same group and can step in at any time
 - Human escalation for complex, sensitive, or uncertain queries
 - Strict data isolation — no client ever sees another client's data
 
@@ -32,9 +33,9 @@ Phase 1 delivers an AI-powered **internal client knowledge bank** for Bullet Dig
 | **AI Retrieval** | LlamaIndex | Purpose-built for document RAG, 40% faster retrieval than alternatives, native Neon/pgvector support |
 | **AI Model** | Claude (Anthropic) | Primary AI for understanding questions and generating responses |
 | **Embeddings** | Voyage 4 (Anthropic's recommended partner) | Best-in-class accuracy for converting documents into searchable vectors |
-| **Backend API** | FastAPI (Python) | High-performance async API for handling WhatsApp webhooks and data processing |
+| **Backend API** | FastAPI (Python) | High-performance async API for handling Telegram webhooks and data processing |
 | **Admin Dashboard** | Next.js + Tailwind CSS + Framer Motion | Staff-facing web interface with utility-first styling and polished animations |
-| **Messaging** | WhatsApp Cloud API | Confirmed communication channel for client-facing AI |
+| **Messaging** | Telegram Bot API | Confirmed communication channel - free, instant setup, supports groups, inline keyboards, and bot commands |
 | **Caching** | Redis | Conversation history, message deduplication, performance caching |
 | **Background Jobs** | Celery | Scheduled Meta API polling, document processing |
 | **Hosting** | Render.com | Web services, background workers, deployment |
@@ -46,7 +47,7 @@ Phase 1 delivers an AI-powered **internal client knowledge bank** for Bullet Dig
 ```
                               EXTERNAL SERVICES
     ┌──────────────────┐  ┌───────────────────┐  ┌──────────────────┐
-    │ WhatsApp Cloud   │  │ Meta Marketing    │  │ Claude AI        │
+    │ Telegram Bot     │  │ Meta Marketing    │  │ Claude AI        │
     │ API              │  │ API               │  │ + Voyage AI      │
     └────────┬─────────┘  └─────────┬─────────┘  └────────┬─────────┘
              │                      │                      │
@@ -54,9 +55,11 @@ Phase 1 delivers an AI-powered **internal client knowledge bank** for Bullet Dig
     ┌────────┴─────────┐  ┌─────────┴─────────┐  ┌────────┴─────────┐
     │ Webhook Handler  │  │ Campaign Poller   │  │ RAG Engine       │
     │ (FastAPI)        │  │ (Background)      │  │ (LlamaIndex)     │
-    │ • Security       │  │ • Scheduled pulls │  │ • Document search│
+    │ • Secret verify  │  │ • Scheduled pulls │  │ • Document search│
     │ • Deduplication  │  │ • Rate management │  │ • Relevance rank │
-    │ • Client routing │  │ • Data caching    │  │ • Context build  │
+    │ • Group routing  │  │ • Data caching    │  │ • Context build  │
+    │ • Role resolve   │  │                   │  │                  │
+    │ • Pause check    │  │                   │  │                  │
     └────────┬─────────┘  └─────────┬─────────┘  └────────┬─────────┘
              │                      │                      │
              └──────────┬───────────┴──────────────────────┘
@@ -76,30 +79,37 @@ Phase 1 delivers an AI-powered **internal client knowledge bank** for Bullet Dig
     │ • Client  │ │ • Convo   │ │ • Queue   │
     │   data    │ │   history │ │ • Notify  │
     │ • Vectors │ │ • Dedup   │ │ • Resolve │
+    │ • Groups  │ │ • Pause   │ │           │
     └───────────┘ └───────────┘ └───────────┘
 
-    ┌──────────────────────────┐
-    │ Admin Dashboard (Web)    │
-    │ • Client management      │
-    │ • Phone number mapping   │
-    │ • Document management    │
-    │ • Escalation queue       │
-    │ • Campaign metrics view  │
-    │ • Internal AI query tool │
-    └──────────────────────────┘
+    ┌──────────────────────────────┐
+    │ Admin Dashboard (Web)        │
+    │ • Client management          │
+    │ • Telegram group management  │
+    │ • Document management        │
+    │ • Escalation queue           │
+    │ • Campaign metrics view      │
+    │ • Internal AI query tool     │
+    │ • Conversation history       │
+    └──────────────────────────────┘
 ```
 
 ---
 
 ## 4. How It Works
 
-### 4.1 Client Setup (Via Admin Dashboard)
+### 4.1 Client Setup (Via Admin Dashboard + Telegram)
 
 1. Staff creates a new client in the admin dashboard
 2. Staff adds the client's Meta ad account ID(s)
-3. Staff registers the client's WhatsApp phone number(s)
-4. Staff uploads relevant documents (onboarding docs, strategy briefs, notes)
-5. System automatically processes documents and begins pulling campaign data
+3. Staff clicks "Set Up Telegram Group" - the system generates a setup token
+4. The assigned account manager creates a Telegram supergroup on their phone/desktop and adds the bot
+5. Account manager sends `/setup [TOKEN]` in the group
+6. The bot automatically configures the group: renames it to "BDM - [Client Name] - Campaign Hub", sets a branded photo, registers commands, and generates a client invite link
+7. The invite link is displayed in the admin dashboard - the team distributes it to the client manually
+8. When the client joins, the bot sends a personalised welcome message with an inline keyboard menu
+9. Staff uploads relevant documents (onboarding docs, strategy briefs, notes)
+10. System automatically processes documents and begins pulling campaign data
 
 ### 4.2 Internal Knowledge Bank (Staff Query)
 
@@ -109,14 +119,14 @@ Phase 1 delivers an AI-powered **internal client knowledge bank** for Bullet Dig
 4. AI generates an answer with source citations and data freshness timestamps
 5. Staff uses this to respond to the client faster
 
-### 4.3 WhatsApp Client Query (Client-Facing)
+### 4.3 Telegram Client Query (Client-Facing)
 
-1. Client sends a WhatsApp message (e.g., "How much have we spent this month?")
-2. System identifies the client by their registered phone number
+1. Client sends a message in their Telegram group - using `/ask`, @mentioning the bot, or replying to a bot message (e.g., "/ask How much have we spent this month?")
+2. System identifies the client by the group's chat ID, which is mapped to a single client
 3. System retrieves only that client's documents and campaign data
-4. AI generates a response with clear data freshness indicators
-5. If the AI is uncertain or the topic is sensitive, it escalates to a team member
-6. Team member reviews and responds via the admin dashboard
+4. AI generates a response with clear data freshness indicators and inline keyboard buttons for follow-up actions
+5. If the AI is uncertain or the topic is sensitive, it escalates to the account manager - who is already in the group and can respond directly from Telegram
+6. For complex queries, the account manager can also use the admin dashboard for full context before responding
 
 ### 4.4 Campaign Data Pipeline
 
@@ -145,7 +155,7 @@ If a client were to receive answers about another client's campaigns, this would
 | Layer | Protection |
 |-------|-----------|
 | **Database** | PostgreSQL Row-Level Security (RLS) — the database itself enforces that queries can only return data for the current client, regardless of application logic |
-| **Phone Number Mapping** | Each WhatsApp phone number is mapped to exactly one client. This mapping is globally unique — the same number cannot belong to two clients |
+| **Group-to-Client Mapping** | Each Telegram group chat ID is mapped to exactly one client. This mapping is globally unique — the same group cannot belong to two clients |
 | **AI Retrieval** | Every document search and data query includes a mandatory client filter. The AI only ever sees one client's data at a time |
 | **Audit Logging** | Every data access is logged with who accessed what, when, and for which client |
 | **Automated Testing** | Before every deployment, automated tests attempt to access Client A's data from Client B's context — if any test passes, deployment is blocked |
@@ -153,69 +163,104 @@ If a client were to receive answers about another client's campaigns, this would
 ### Authentication & Access Control
 
 - **Admin Dashboard**: JWT-based authentication with role-based access (admin, manager, specialist)
-- **API Tokens**: All external service tokens (Meta, Claude, WhatsApp) stored encrypted in environment variables, never in code
-- **WhatsApp Webhooks**: Every incoming message is cryptographically verified using HMAC-SHA256 signatures
+- **API Tokens**: All external service tokens (Meta, Claude, Telegram) stored encrypted in environment variables, never in code
+- **Telegram Webhooks**: Every incoming update is verified using a secret token header set during webhook registration
 
 ---
 
-## 6. WhatsApp Integration Details
+## 6. Telegram Integration Details
 
-### Setup Requirements
+### 6.1 Group Architecture
 
-- WhatsApp Cloud API (Meta-hosted, no third-party middleware needed)
-- One WhatsApp Business Account (WABA) under Bullet Digital Media's Meta Business Manager
-- Business verification with Meta (2-10 business days)
-- Pre-approved message templates for any proactive outreach
+Each client gets a dedicated Telegram supergroup containing three participants:
 
-### How Client Identification Works
+1. **The AI bot** - answers campaign questions, provides reports, manages the menu system
+2. **The client** (and optionally their additional contacts)
+3. **The assigned account manager** - observes conversations and can step in at any time
 
-When a client sends a WhatsApp message, the system receives their phone number. This phone number is looked up against a database of pre-registered client contacts. Only registered phone numbers receive AI responses — unrecognised numbers get a message directing them to contact their account manager.
+Supergroups are used (not basic groups) because they support persistent invite links, granular admin permissions, and better message history management. Account managers can be members of unlimited groups simultaneously, so one account manager can monitor all their clients from their own Telegram app.
 
-### Pricing Model
+### 6.2 Bot Commands & Menu System
 
-- **Client-initiated conversations** (client messages first): Responses within 24 hours are **free** (service messages)
-- **Proactive outreach** (we message first): Requires pre-approved templates, charged per message (~£0.01-0.04 depending on type)
-- **First 1,000 service conversations per month**: Free
+The bot provides a `/menu` command that displays an interactive inline keyboard — buttons attached to the message that any group member can tap.
 
-### Human Escalation
+**Client menu (visible to clients):**
 
-The AI will escalate to a human team member when:
+| Command | Description |
+|---------|-------------|
+| `/menu` | Opens the main menu with interactive buttons |
+| `/ask` | Ask a question about campaigns (e.g., `/ask What's my CPC this week?`) |
+| `/report` | Get a campaign performance summary (sub-menu: today, this week, this month) |
+| `/help` | How to use the bot |
+
+**Account manager menu (additional commands, hidden from clients):**
+
+| Command | Description |
+|---------|-------------|
+| `/pause` | Pause the AI bot in this group (for private conversations with the client) |
+| `/resume` | Resume the AI bot |
+| `/status` | View bot status, client config, last data sync time |
+| `/escalate` | Flag the conversation for review in the admin dashboard |
+| `/note` | Add an internal note to the client's record (confirmation sent via DM, not shown in the group) |
+| `/refresh` | Trigger an immediate Meta data pull for this client |
+
+These account manager commands are hidden from the client's command list using Telegram's scoped command feature (`BotCommandScopeChatMember`). Clients literally do not see these commands in their menu.
+
+On group setup, the bot pins a welcome message with the main inline keyboard. This acts as a persistent "control panel" always visible at the top of the chat — clients can always scroll up or tap the pin to access the menu without remembering commands.
+
+### 6.3 When the Bot Responds
+
+The bot uses an **explicit-only** response model. It responds ONLY when:
+
+- A command is issued (e.g., `/ask`, `/menu`, `/report`)
+- Someone @mentions the bot by username
+- Someone replies directly to one of the bot's messages
+- An inline keyboard button is pressed
+
+The bot stays **completely silent** during conversations between the client and account manager. There is no auto-detection, no keyword monitoring, and no unsolicited nudges. This keeps the experience clean with zero false positives.
+
+### 6.4 Pause/Resume Mechanism
+
+When the account manager needs to have a private conversation with the client without the bot responding:
+
+**Pausing:**
+1. Account manager sends `/pause` or taps the "Pause Bot" button in the menu
+2. Bot verifies the sender is an account manager
+3. Bot sends a message: *"I'll step back and let you two talk. When you're ready for me again, just tap the button below."* with a **Resume Bot** inline keyboard button
+4. Bot pins this message so the resume button is always visible at the top of the chat
+5. Bot ignores all messages in the group except `/resume` and the Resume button
+
+**Resuming:**
+1. Account manager sends `/resume` or taps the "Resume Bot" button
+2. Bot unpins the pause message
+3. Bot sends: *"I'm back and ready to help. Ask me anything about your campaigns."* with an **Open Menu** button
+
+The pause state is stored in the database (not in memory), so it survives bot restarts and deployments. Optional: if the bot has been paused for more than 4 hours, the system can notify the account manager as a reminder.
+
+### 6.5 Pricing
+
+- **Telegram Bot API**: Completely free
+- No per-message charges
+- No template fees or approval processes
+- No monthly platform costs
+- No volume tiers or rate limit progression
+- Cost is limited to server infrastructure only
+
+For reference, WhatsApp was evaluated and rejected due to hard blockers (group chats require 100,000+ monthly conversations to unlock, AI chatbot policy risk, per-message costs). The full comparison is documented in `docs/whatsapp-vs-telegram.md`.
+
+### 6.6 Human Escalation
+
+The AI will escalate to a human when:
 - It is not confident in its answer (low retrieval quality)
 - The client explicitly asks to speak to someone
 - The topic is sensitive (billing, complaints, strategy, contracts)
 - No relevant data is found
 
-When escalated, the client receives: *"Great question. I've flagged this for your account manager to review. They'll get back to you shortly."*
+**Key advantage of Telegram groups**: the account manager is already in the group and sees the full conversation in real time. When the AI escalates, the account manager can respond directly from their Telegram app — no need to open the admin dashboard for quick interventions.
 
-The team member sees the full conversation, the AI's draft response, and can edit or replace it before sending.
+When escalated, the client sees: *"Great question. I've flagged this for [Account Manager Name] to take a look at. They're in this group and will get back to you shortly."*
 
-### WhatsApp Group Chats — Evaluated and Not Viable
-
-We investigated whether each client could have a dedicated WhatsApp group containing the AI bot, the client's contacts, and their assigned account manager. This would allow account managers to observe conversations and step in directly from their own number.
-
-**Finding: WhatsApp Business API groups are not viable for Phase 1.**
-
-| Constraint | Detail |
-|-----------|--------|
-| **Volume threshold** | Group functionality requires **100,000+ monthly business-initiated conversations** before it is unlocked. At launch, volume will be ~1,000/month (Tier 1). This is a hard blocker. |
-| **Max group size** | 8 members per group — workable for this use case, but irrelevant given the volume blocker. |
-| **No interactive messages** | Buttons, lists, and quick replies are **not supported** in group chats — only plain text and templates. |
-| **No analytics** | No message delivery or read analytics for group template messages. |
-| **Account manager in multiple groups** | Technically supported (one number can be in up to 10,000 groups), but moot given the volume threshold. |
-
-### Recommended Alternative: Account Manager Dashboard Access
-
-Instead of WhatsApp groups, account managers get full visibility and intervention capability through the admin dashboard:
-
-| Capability | How It Works |
-|-----------|-------------|
-| **See all client conversations** | Account managers view real-time WhatsApp conversations for all their assigned clients in the dashboard |
-| **Step in at any time** | Account managers can take over any conversation — their response sends from the business WhatsApp number |
-| **Full context** | When stepping in, the account manager sees the complete conversation history, the AI's draft response, and the data sources used |
-| **Escalation notifications** | When the AI escalates, the assigned account manager is notified immediately (dashboard + email) |
-| **No client confusion** | Clients interact with one consistent WhatsApp number rather than seeing messages from different sources in a group |
-
-This approach provides the same observability and intervention capability that groups would offer, without the platform restrictions. If WhatsApp unlocks group functionality at higher volumes in the future, this can be revisited.
+For complex responses requiring full data context, the account manager can use the admin dashboard to review the AI's draft response, data sources, and confidence scores before replying.
 
 ---
 
@@ -228,13 +273,13 @@ The admin dashboard is the primary interface for Bullet Digital Media's team to 
 | Feature | Description |
 |---------|-------------|
 | **Client Management** | Create, edit, and manage client profiles. Assign team members. Track status (onboarding, active, paused). |
-| **Phone Number Mapping** | Register and verify client WhatsApp numbers. Map phone numbers to specific clients for data isolation. |
+| **Telegram Group Management** | Set up client groups (generate setup tokens), view group status (active, paused, pending), generate invite links, manage members, pause/resume bot remotely. |
 | **Ad Account Configuration** | Link Meta ad account IDs to clients. Monitor connection status and sync health. |
 | **Document Management** | Upload client documents (PDFs, Google Docs exports, spreadsheets, transcripts). Track processing status. |
 | **Internal AI Query** | Ask questions about any client and get AI-powered answers from their knowledge base — the primary Phase 1 deliverable. |
 | **Escalation Queue** | View pending escalations, claim them, review AI drafts, and send responses. |
-| **Conversation History** | View all WhatsApp conversations per client, including AI confidence scores and data sources used. |
-| **System Health** | Monitor Meta API polling status, WhatsApp connection health, and data freshness per client. |
+| **Conversation History** | View all Telegram conversations per client, including AI confidence scores and data sources used. |
+| **System Health** | Monitor Meta API polling status, Telegram bot connection health, and data freshness per client. |
 
 ---
 
@@ -242,18 +287,24 @@ The admin dashboard is the primary interface for Bullet Digital Media's team to 
 
 ### Supported Formats
 
+**Documents:**
 - PDF documents
 - Word documents (.docx)
 - Google Docs (exported as text)
 - Spreadsheets (CSV, Google Sheets export)
-- Plain text (email content, Loom transcripts)
+- Plain text (email content, transcripts)
 - Presentations (Google Slides, PowerPoint — text extracted)
+
+**Video & Audio** (automatically transcribed to text):
+- Video files (MP4, MOV, WEBM) — Loom recordings, Zoom calls, training videos
+- Audio files (M4A, MP3, WAV) — voice memos, call recordings
 
 ### How Documents Are Processed
 
-1. **Upload** — Staff uploads a document via the admin dashboard and assigns it to a client
-2. **Parse** — System extracts text content based on file format
-3. **Summarise** — AI generates a brief summary of what the document covers (used to improve search accuracy)
+1. **Upload** — Staff uploads a document or video/audio file via the admin dashboard and assigns it to a client
+2. **Transcribe** (video/audio only) — Audio is extracted from video files, then transcribed to text using OpenAI Whisper API
+3. **Parse** — System extracts text content based on file format (or uses the transcript for video/audio)
+4. **Summarise** — AI generates a brief summary of what the document covers (used to improve search accuracy)
 4. **Chunk** — Document is split into searchable segments (~512 tokens each with overlap)
 5. **Embed** — Each segment is converted into a mathematical vector for semantic search
 6. **Store** — Vectors are stored in the database, tagged to the specific client
@@ -330,12 +381,12 @@ This section provides an honest assessment of all identified risks. Every system
 - **How we prevent it**: Campaign metrics are **never generated by the AI model**. They are fetched directly from Meta's API, cached in the database, and presented through structured templates. The AI's role is to contextualise and explain the data, not to produce it. All calculations are done in application code, not by the AI.
 - **Residual risk**: Edge cases where the AI interpolates between data points or calculates comparisons incorrectly. Mitigated by performing all calculations in application code.
 
-#### WhatsApp AI Chatbot Policy (January 2026)
-- **What could happen**: Meta's updated WhatsApp policy bans general-purpose AI chatbots. If our system is classified as general-purpose, the WhatsApp Business account could be suspended.
-- **Likelihood**: Medium
-- **Impact**: Complete loss of the client communication channel
-- **How we prevent it**: The system is architected as a **scoped campaign performance support tool**, not a general-purpose chatbot. It answers only campaign performance questions and escalates everything else. Message templates submitted for Meta approval explicitly describe the use case as "marketing campaign performance reporting." Human escalation is always available.
-- **Residual risk**: Meta's enforcement is opaque and may evolve. We maintain Telegram as a documented fallback channel that can be activated within days if needed.
+#### Client Telegram Adoption
+- **What could happen**: Some clients may resist downloading Telegram, as WhatsApp is more commonly used in the UK for business communication.
+- **Likelihood**: Low-Medium
+- **Impact**: Delayed onboarding for resistant clients; potential need for manual workaround
+- **How we prevent it**: Frame Telegram as a dedicated, professional campaign channel (not a replacement for existing messaging). Provide clear onboarding instructions - setup takes 2-3 minutes and uses the same phone number. The richer experience (interactive menus, instant responses, account manager in the same group) quickly demonstrates value.
+- **Residual risk**: A small number of clients may refuse entirely. For these cases, the account manager can relay information manually using the admin dashboard's internal query tool. If adoption proves to be a widespread barrier post-launch, WhatsApp integration can be added as a secondary channel.
 
 ### High Risks
 
@@ -344,8 +395,8 @@ This section provides an honest assessment of all identified risks. Every system
 | **Stale data causing wrong decisions** | Client acts on outdated metrics | Every response includes data freshness timestamps. Conversion data always caveated with "typically lags 1-3 days." |
 | **Meta API access uncertainty** | Cannot build campaign data pipeline | **Pre-development blocker.** Must be resolved before Sprint 3. We provide step-by-step guidance. |
 | **Outdated strategy documents** | AI references old strategies as current | Strategy questions escalated to humans in Phase 1. Documents flagged for review after 90 days. |
-| **Phone number spoofing** | Unauthorised access to campaign data | Only pre-registered, verified phone numbers receive responses. Unknown numbers are rejected. |
-| **API token compromise** | Unauthorised access to Meta/WhatsApp/AI services | All tokens stored encrypted in environment variables. Rotation schedule. Logging sanitisation. |
+| **Unauthorised group access** | Someone joins a client group uninvited | Invite links generated with member limits and tracked in the database. Unknown joiners are flagged automatically. Links can be revoked once expected members have joined. |
+| **API token compromise** | Unauthorised access to Meta/Telegram/AI services | All tokens stored encrypted in environment variables. Telegram webhook verified via secret token header. Rotation schedule. Logging sanitisation. |
 | **Database outage** | System unavailable | Graceful degradation — messages queued, clients notified of delay. Daily backups. |
 | **Claude AI outage** | No AI responses generated | Retry queue with backoff. Cached templates for common queries as fallback. |
 | **Cost escalation at scale** | Per-client cost exceeds value | Phased rollout validates costs before full deployment. Response caching. Cost monitoring from day 1. |
@@ -358,17 +409,15 @@ These are inherent limitations of the platforms we integrate with. They cannot b
 
 2. **Historical campaign data limited to 90 days via API** — Meta's API only serves the last 90 days of detailed metrics. For older data, historical reports must be uploaded as documents. Over time, our local database will accumulate more history.
 
-3. **WhatsApp 24-hour messaging window** — The AI can only respond for free within 24 hours of the client's last message. After that, proactive outreach requires pre-approved template messages (which cost ~£0.01-0.04 each and need Meta approval).
+3. **Telegram groups are not end-to-end encrypted** — Groups use client-server encryption, not end-to-end. Practical risk is low because the data shared (CPC, spend, ROAS) is business performance data, not sensitive personal information. This is the same data typically shared via email and dashboards.
 
-4. **WhatsApp template approval required for proactive messages** — Any new type of outbound message needs Meta approval (typically 1 minute to 24 hours). This limits how quickly new message types can be deployed.
+4. **No read receipts for Telegram bots** — Bots cannot confirm whether a client has read a message. The inline keyboard approach (requiring a button tap) provides an indirect engagement signal when needed.
 
-5. **WhatsApp rate limits start at 1,000 unique users/day** — New accounts start at Tier 1. The phased rollout (starting with a subset of clients) allows natural tier progression before full deployment.
+5. **Strategy documents require team maintenance** — The AI is only as current as the documents uploaded. Campaign strategy is fluid and the team must maintain document currency as part of their workflow. This is a shared responsibility.
 
-6. **Strategy documents require team maintenance** — The AI is only as current as the documents uploaded. Campaign strategy is fluid and the team must maintain document currency as part of their workflow. This is a shared responsibility.
+6. **Attribution window restrictions (January 2026)** — Meta removed support for 7-day and 28-day view-through attribution windows. This affects how conversion data is reported.
 
-7. **Attribution window restrictions (January 2026)** — Meta removed support for 7-day and 28-day view-through attribution windows. This affects how conversion data is reported.
-
-8. **Reach data limited to 13 months with breakdowns** — When breaking down reach by age, gender, or country, only the last 13 months of data is available.
+7. **Reach data limited to 13 months with breakdowns** — When breaking down reach by age, gender, or country, only the last 13 months of data is available.
 
 ---
 
@@ -388,13 +437,16 @@ These are inherent limitations of the platforms we integrate with. They cannot b
 
 **This is the core Phase 1 deliverable**: the internal knowledge bank that John defined as the success criteria.
 
-### Sprint 3 (Weeks 5-6): Campaign Data + WhatsApp
+### Sprint 3 (Weeks 5-6): Campaign Data + Telegram
 - Meta Marketing API polling service (all scheduled data pulls)
 - Campaign data display with freshness indicators
-- WhatsApp webhook (security, deduplication, client identification)
+- Telegram webhook handler (secret verification, deduplication, group routing, role resolution, pause check)
+- Group setup flow (setup token, auto-configuration, invite link generation)
+- Bot command system (`/menu`, `/ask`, `/report`, `/help`, `/pause`, `/resume`, `/status`, `/escalate`, `/note`, `/refresh`)
+- Inline keyboard menus and sub-menus
 - Message processing pipeline (combine documents + metrics, generate response)
 
-**Requires**: Meta API access confirmed (pre-development blocker)
+**Requires**: Meta API access confirmed (pre-development blocker), Telegram bot created via @BotFather
 
 ### Sprint 4 (Weeks 7-8): Escalation + Pilot
 - Escalation system (triggers, queue, staff notifications, resolve workflow)
@@ -413,11 +465,10 @@ Before development can begin, the following must be in place:
 | Meta Marketing API access confirmed | Bullet Digital Media | Unconfirmed | Yes (Sprint 3) |
 | System User token created in Meta BM | Bullet Digital Media | Not started | Yes (Sprint 3) |
 | Ad account ownership audit (~100 accounts) | Bullet Digital Media | Not started | Yes (Sprint 3) |
-| WhatsApp Business API application submitted | IzzyAgents + Bullet | Not started | Yes (Sprint 3) |
+| Telegram bot created via @BotFather | IzzyAgents | Not started | Yes (Sprint 3) — takes less than 2 minutes |
 | Claude API key obtained | Bullet Digital Media | John committed to obtaining | Yes (Sprint 2) |
 | Voyage AI API key obtained | IzzyAgents | Not started | Yes (Sprint 2) |
 | Initial client documents for testing | Bullet Digital Media | Not started | Helpful (Sprint 2) |
-| WhatsApp Business phone number registered | Bullet Digital Media | Not started | Yes (Sprint 3) |
 
 ---
 
@@ -430,7 +481,9 @@ As defined by John Limber during discovery:
 Phase 1 is complete when:
 - [ ] Staff can query any client's knowledge base and get accurate, sourced answers
 - [ ] Campaign metrics are pulled automatically and displayed with freshness indicators
-- [ ] WhatsApp AI responds to registered client phone numbers with correct, isolated data
+- [ ] Telegram AI bot responds in client groups with correct, isolated data
+- [ ] Bot pause/resume works correctly for account manager conversations
+- [ ] Menu system and inline keyboards provide intuitive navigation
 - [ ] Human escalation works for uncertain, sensitive, or complex queries
 - [ ] No cross-client data leakage in automated testing
 - [ ] 3-5 pilot clients successfully tested by staff
@@ -441,10 +494,11 @@ Phase 1 is complete when:
 
 1. **Review this document** — Confirm alignment on architecture, priorities, and approach
 2. **Resolve pre-development blockers** — Particularly Meta API access and Claude API key
-3. **Submit WhatsApp Business API application** — Apply early as approval takes 2-10 business days
+3. **Create Telegram bot via @BotFather** — Instant setup, takes less than 2 minutes
 4. **Identify pilot clients** — Select 3-5 clients for initial testing in Sprint 4
 5. **Gather initial documents** — Collect a sample set of client documents for testing the ingestion pipeline
-6. **Confirm investment scope** — Align on Sprint 1 start date
+6. **Prepare onboarding guidance** — Brief instructions for the team on distributing Telegram invite links to clients
+7. **Confirm investment scope** — Align on Sprint 1 start date
 
 ---
 

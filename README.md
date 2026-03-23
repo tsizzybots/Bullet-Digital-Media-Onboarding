@@ -29,7 +29,7 @@ The sole active phase. Building an internal client knowledge bank the team can q
 - Client offboarding/retention automation (quick win)
 
 **Key constraints:**
-- WhatsApp confirmed as client communication channel
+- Telegram confirmed as client communication channel (one group per client with AI bot + account manager)
 - Meta Marketing API access needed for ~100 ad accounts (tier and token status TBC)
 - Human-in-the-loop: AI flags uncertain answers to team before responding
 - Internal-facing first, client-facing once validated
