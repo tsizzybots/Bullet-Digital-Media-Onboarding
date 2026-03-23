@@ -26,6 +26,7 @@ These must be resolved before the sprint that requires them:
 |-------------|-----------|-------|--------|
 | Claude API key | Sprint 2 | Bullet Digital Media | John committed to obtaining |
 | Voyage AI API key | Sprint 2 | IzzyAgents | Not started |
+| OpenAI API key (Whisper transcription) | Sprint 2 | IzzyAgents | Not started |
 | Initial client documents for testing | Sprint 2 | Bullet Digital Media | Not started |
 | Meta Marketing API access confirmed | Sprint 3 | Bullet Digital Media | Unconfirmed |
 | System User token created in Meta BM | Sprint 3 | Bullet Digital Media | Not started |

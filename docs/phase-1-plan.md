@@ -468,6 +468,7 @@ Before development can begin, the following must be in place:
 | Telegram bot created via @BotFather | IzzyAgents | Not started | Yes (Sprint 3) — takes less than 2 minutes |
 | Claude API key obtained | Bullet Digital Media | John committed to obtaining | Yes (Sprint 2) |
 | Voyage AI API key obtained | IzzyAgents | Not started | Yes (Sprint 2) |
+| OpenAI API key (Whisper transcription) | IzzyAgents | Not started | Yes (Sprint 2) — needed for video/audio transcription |
 | Initial client documents for testing | Bullet Digital Media | Not started | Helpful (Sprint 2) |
 
 ---
