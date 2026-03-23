@@ -54,6 +54,11 @@ Key constraints:
 - All times must use 24-hour format (e.g., 14:30, not 2:30 PM)
 - Currency in USD ($) unless otherwise specified
 
+## GitHub
+- Account: `tsizzybots` - always use this account for this project
+- Repo: `tsizzybots/bullet_digital_media`
+- Before pushing, ensure active account: `gh auth switch --user tsizzybots`
+
 ## StrikeFlow Integration
 - Board Name: "Bullet Digital Media"
 - Board ID: c01081f2-c27c-4a8c-b7c5-0b2857254cd9
