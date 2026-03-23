@@ -1,0 +1,280 @@
+Mar 18, 2026
+IzzyAgents & Bullet Digital Media - AI Dept. Onboarding - Transcript
+00:00:00
+ 
+Chris Dunn: Yeah, there we go. Sure.
+John Limber: Yep.
+Joshua Lewthwaite: He's been with me for coming up six years now. So he's the one I want across all the all the ones that are really like clients that are through like m basis just checked him on them or really big complex one. So he's the one that built out AI that helps doctors prescribe choose what to prescribe to patients all that
+John Limber: Please.
+Joshua Lewthwaite: stuff. So in the scale of things this is a straightforward one comparatively especially around the client coms. He's the one who investigated into the meta AI API capabilities and validating things like that. So he's already well across it so you're aware. Then we have other people in the background that you won't really see working just support internally as you're familiar with. So yeah um skip through that one
+John Limber: I think But you can see
+Joshua Lewthwaite: Chris. Okay, so the exact plan wise in terms of the key priorities is outcomes increasing profitability
+John Limber: that
+Joshua Lewthwaite: per staff member and then the and future faster staff on boarding and training.
+ 
+ 
+00:01:21
+ 
+Joshua Lewthwaite: The other component for future is then AI marketing products for gyms or otherwise but we're just going to focus on those. So in order to achieve that we've got the client communication channel that you'll shared and just general other coms.
+John Limber: this is
+Joshua Lewthwaite: So how we're working together com structure we have a Trello board that's for communication each element just to break things down also that's a place to document future ideas you go hey we've thought about this okay put that in we're focused on the road map but I've got this idea this that's where you just put a backlog on
+John Limber: I think
+Joshua Lewthwaite: Trello email for the formal comms meetings we discuss finer details see and then WhatsApp for just quick hey let's just wonder about this wonder about that so that's the channel wise what we need
+John Limber: you want
+Joshua Lewthwaite: from you access to the appropriate platforms and documentation like we spoke to when required if we can jump on meetings whether you or your team feel like we need to understand this better can we just have a quick chat any questions about
+ 
+ 
+00:02:15
+ 
+John Limber: No,
+Joshua Lewthwaite: that easy okay so month one as I've shared is
+John Limber: sounds great.
+Joshua Lewthwaite: first part is that information questionnaire so we've got your access codes for that currently it's just you and Steven so as you take a look let us know anybody else you need on there for that information you will see all the questions so you know, we when we add your team members, they might only see certain questions that's relevant to them. So that's where the specialists in the team for certain parts of it, you just tell us and we'll get that information from them. All those answers go into our AI training model that's learning everything about the project. So it's getting trained on all of the scope documenting we've been done, all the recordings of our meetings, it's trained on that and all that filters in and through to it. So that's why even though they might email stuff through for the full onboarding of information collection, we like going through that method. It just gets the things trained on. Yeah.
+ 
+ 
+00:03:07
+ 
+Joshua Lewthwaite: Access wise that's fine. And and that's like with um the access for Claude, we just need the API um key. We don't actually need a login or anything like that. So you can keep that account for for your colleagues.
+John Limber: Okay. Do you know where where I find the exact key?
+Joshua Lewthwaite: We just need the key and we plug it in.
+John Limber: I can get that for you
+Joshua Lewthwaite: Uh top of I don't know top of mind.
+John Limber: today.
+Joshua Lewthwaite: Tim can send Tim can send it on. It's fairly straightforward. I will jokingly say if you ask where to find chords API,
+John Limber: Yeah. Yeah,
+Joshua Lewthwaite: I think Chris is used
+John Limber: that's actually a good shot.
+Joshua Lewthwaite: to ask it. Uh okay, next one there, Chris. Um so yeah, so that first focus is that client communication channel solution. Clients get faster answers. Staff are freed up for more time. They have more capacity. I'm curious to ask from a business side of things, how how you guys have quite a lot of leads that you want to work with, deals are coming to you.
+ 
+ 
+00:04:03
+ 
+Joshua Lewthwaite: What's how I guess how fast you think you'll be able to fill staff's capacity as we improve their capacity to work? I'm just think of impact
+John Limber: Um the impact is going to come in
+Joshua Lewthwaite: really.
+John Limber: in in in a couple of ways. Um so we've just we we we're kind of in terms of the layer of the layering of the company, we've got a couple of managers in place. Um one of which has just gone on long-term sick, which I think I told you about. Um so it's it's like this this pressure on the team and there is
+Joshua Lewthwaite: Yep.
+John Limber: um a lot of the pressure comes from the constant client cons. Um there's also there's also a need from the clients or desire from the clients to communicate via WhatsApp and we we basically eradicated WhatsApp because it was taking too much of the brain space of of the team. So there's there's going to be an immediate well not immediate obviously when we get when we get to a point where we've got a
+ 
+ 
+00:04:58
+ 
+Joshua Lewthwaite: Yeah.
+John Limber: an AI agent that is working to a degree there's going to be there just going to be a point of like d-stress which I think is the first milestone which is going to just going to take take some of the headache and take some of the kind of weight off the digital specialists and it's also going to provide a solution for the clients. So I see that as being milestone one. Um and then obviously as that AI agent gets better at answering questions and dealing with clients then it's obviously start it hopefully will start freeing up some actual time to increase capacity. So our digital specialist team are currently at capacity on around 20 to 22 clients. Yeah.
+Joshua Lewthwaite: Yeah.
+John Limber: So if we can increase that to 25 as a result of this or more
+Joshua Lewthwaite: Yeah.
+John Limber: um then obviously that's that's going to be in terms of profitability that's going to be pretty big for
+Joshua Lewthwaite: Yeah. Yeah. I'm just curious.
+John Limber: us.
+Joshua Lewthwaite: One is we're deciding whether we do WhatsApp or potentially a Telegram.
+ 
+ 
+00:06:07
+ 
+Joshua Lewthwaite: Do you need a Telegram channel? The reason why Telegram versus WhatsApp, there's a few reasons, but one of which is you have to pay for each message on WhatsApp. It's like 0.01 P, but it does stack up.
+John Limber: Yep.
+Joshua Lewthwaite: Something to keep an eye on. Also, the API capabilities a lot more on Telegram. So, that's something we're just thinking about.
+John Limber: Yep.
+Joshua Lewthwaite: We're going to do a proper evaluation and see what is the best fit. Most customers have WhatsApp. Most people don't have Telegram. That's my one core thing there.
+John Limber: Yeah.
+Joshua Lewthwaite: I don't think the cost will be too high, but it's just something you're aware of that we're considering.
+John Limber: Okay.
+Joshua Lewthwaite: Yeah. And then it's also the I had another idea there. Oh, yeah. What I think is a future point and Chris, I want us to really note this down is analysis and insights of themes per conversation. So, seeing what are clients asking most about effectively through that channel.
+ 
+ 
+00:07:01
+ 
+Joshua Lewthwaite: And so that can maybe shine a light on what do they care about most or what are they most concerned about? Anything like that. That's an insight we'll be able to gather from all those conversations of what is it most time. So maybe that means there's something in your process that can talk to that because it's clearly important to them. There's types of insights we'll be able to get out of it like that.
+John Limber: Yeah. Okay.
+Joshua Lewthwaite: Yeah. Okay.
+John Limber: Um,
+Joshua Lewthwaite: Cool.
+John Limber: yeah. I mean,
+Joshua Lewthwaite: All right.
+John Limber: I'm sure you're going to call this book to to sort of try and figure out where the best starting point is. Um, with I'm thinking maybe we start with a handful of clients and just just try and gather every single bit of your story. Where's your
+Joshua Lewthwaite: Yeah, it's especially the the deploy one is the deployment of it.
+John Limber: client?
+Joshua Lewthwaite: Two is the gathering of that information of what do they really care about?
+ 
+ 
+00:07:47
+ 
+Joshua Lewthwaite: What we usually lean on is your first kind of gut feel of here's all the things we want it to do. So subconsciously, you know, all the questions that they're getting.
+John Limber: Yeah.
+Joshua Lewthwaite: Might even just send a message to your team and say, "Guys, what are all the questions you get most about?" Okay, we can box that off and filter it and they go, "Yeah, this is what's most frustrating." It's a simple trick like that.
+John Limber: Yeah, the the reality there.
+Joshua Lewthwaite: It will just be FAQs and so
+John Limber: I think I think that's the way to look at it. I mean,
+Joshua Lewthwaite: on.
+John Limber: if if we ask the team what are the most frustrating questions, it's naturally the ones that are the hardest to answer. Um, which obviously is then going to be the latest that we can tackle in this in this project.
+Joshua Lewthwaite: Okay.
+John Limber: So,
+Joshua Lewthwaite: Yeah.
+John Limber: I think I think it if if we can if we can provide something that that at least takes care of the easy ones,
+ 
+ 
+00:08:32
+ 
+Joshua Lewthwaite: Yes.
+John Limber: then I think I think that's that's probably the better way to look at it.
+Joshua Lewthwaite: Exactly.
+John Limber: Um, I'm not sure how many easy questions they get. Speak to Stephen.
+Joshua Lewthwaite: Yep.
+John Limber: You know, they spend days on these on these calls getting random requests and unreasonable push back.
+Joshua Lewthwaite: Yeah. Just stuff.
+John Limber: So yeah,
+Joshua Lewthwaite: Yeah. Yeah. Okay.
+John Limber: I'm yet to understand how it could effectively help with those things, but at least having something that's taking care of the base level like contractual questions, questions about their history, questions about their results,
+Joshua Lewthwaite: Yeah,
+John Limber: like those sorts of things that that have finite answers, I think would
+Joshua Lewthwaite: exactly. It's black and white.
+John Limber: be
+Joshua Lewthwaite: Anything black and white basically going it just takes time for me to go and find it and it's interrupted to my day trying to go,
+John Limber: Yeah.
+Joshua Lewthwaite: oh, they want an answer. I need to reply within a certain time frame, but I was trying to work on something else more important.
+ 
+ 
+00:09:19
+ 
+Joshua Lewthwaite: that type of stuff. Yeah. Okay,
+John Limber: Yes.
+Joshua Lewthwaite: cool. Um Chris, I think just roll to the next slide there. That's fine. Yeah. What we need So these are your unique codes. Um Chris, you able to open the that web page. Actually, you might have to That's annoying. Sorry. I might have to jump out of that because you can't copy it. Open that up. And we'll put John's code on so he knows what that looks like. Um you'll have to share your other screen as well because it's just on that camera. Yeah. So, this is what you'll see, John, when you get there.
+John Limber: Yeah.
+Joshua Lewthwaite: I completely push now. So,
+Chris Dunn: Sorry,
+John Limber: Uh,
+Joshua Lewthwaite: if you go through,
+Chris Dunn: just realizes on mute the whole time.
+John Limber: I'm still on. Oh, yeah. Yeah.
+Chris Dunn: There we go.
+Joshua Lewthwaite: you'll put your access code
+Chris Dunn: Drop that code in
+ 
+ 
+00:10:05
+ 
+Joshua Lewthwaite: in.
+Chris Dunn: there.
+John Limber: Sure.
+Joshua Lewthwaite: So this is where once we finalize out that question, it's going to then go right this is your project that's assigned. You go into that and then it's going to roll through all the questions required for that as well.
+John Limber: Sure.
+Joshua Lewthwaite: But yeah, the whole thing showing here it's really simple.
+Chris Dunn: Sure.
+Joshua Lewthwaite: Super super simple, super super easy.
+John Limber: Yeah, I'll do that
+Joshua Lewthwaite: Yeah, cool. Yeah, at least once you log in,
+John Limber: now.
+Joshua Lewthwaite: you're logged in. All right, you jump back to Canva there, Chris.
+Chris Dunn: Oops.
+Joshua Lewthwaite: next one off. Yeah, I think months two and three, we'll see. Obviously, we got the Steve AI concept there, which we'll get to. I can see months two and three being an evolution of evolution of what we've already built iterations and then maybe then seeing right what is the next priority the Steve AI is a more complex bigger point but it could just be the onboarding experience for example so the onboarding is more consistent and that
+ 
+ 
+00:11:15
+ 
+John Limber: Yeah.
+Joshua Lewthwaite: information carries over and so then we create this AI knowledge hub of the whole onboarding that people can talk to and knows everything about the project like that's super helpful around if we can go from 25 to 28 that's the type of that would do that. And then this is the this is probably more a Steve AI is something like AI train on a library of gray area questions and your guys methodology too of there is no more great is this or is that we're not not even entertaining which is that wider conversation we had.
+John Limber: Yeah.
+Joshua Lewthwaite: So I think that's probably what I would foresee it being. Do the quick easy ones before tackling the beast.
+John Limber: Yeah.
+Joshua Lewthwaite: Okay, cool.
+John Limber: Okay.
+Joshua Lewthwaite: Yeah, if you've stuff that productiz tools, I think this is where we go just documenting in the trailer board as you kind of are thinking more and more about it and exposure is just documenting the ideas around that for future. I think just brain dump it so you can remember just in right I had this idea this idea can we add this to this you just throw everything in there nice and easy so you don't think about it
+ 
+ 
+00:12:24
+ 
+John Limber: probably filled the trailer board already. My brains can go.
+Joshua Lewthwaite: yeah free space mate yeah
+John Limber: Yeah.
+Joshua Lewthwaite: we were actually looking at one of the projects you know is we're looking at building up an AI Trello board where it's not actually using Trello But we'll have it as cla code again and everything you put in that trailer board is trained the AI agent immediately at the same time. So it's all down our own ecosystem. So you don't have to be paying very cool.
+John Limber: Cool.
+Joshua Lewthwaite: So the plan at the moment is and it comes down to if you want to or not. Usually we do weekly meetings. So weekly meetings it will be either myself, Tim and Chris. Um Chris can't join them as often just time zone wise, but that's where he manages everything in the back end. I just being me on it. But that's just weekly progress updates, anything we need from you, anything outstanding, you have questions for just a weekly check-in conversation. And then we have the monthly review, strategic look back of going, right, here's everything we've got, showing you the things, um writing conversations of challenges you're having, support from your team.
+ 
+ 
+00:13:31
+ 
+Joshua Lewthwaite: We need this isn't working. Need to tell us this or you guys share that with us. So that's the meeting structure. That's what a month looks like for the content. But yeah, I know you're really really busy going to need to be quick to on it. Sometimes go look there's nothing here to go through. I'd rather your team spend time doing this than meeting with us because that's that's the AI department time. We don't need to be using our time on a meeting when we're just waiting for things. We need this from you guys instead.
+John Limber: Yeah.
+Joshua Lewthwaite: So sometimes that comes
+John Limber: Okay. Sure. I mean, time zone wise,
+Joshua Lewthwaite: up.
+John Limber: um, I'm going to be in Asia, so it should be pretty easy for for me.
+Joshua Lewthwaite: You can be an Asian. That's fine then.
+John Limber: The rest of the team,
+Joshua Lewthwaite: Yeah.
+John Limber: not not so much,
+Joshua Lewthwaite: Cool.
+John Limber: but for me, yeah,
+Joshua Lewthwaite: Yeah, that's what I was thinking.
+ 
+ 
+00:14:12
+ 
+Joshua Lewthwaite: Yeah,
+John Limber: pretty
+Joshua Lewthwaite: exactly. As will I. All right, next one there, Chris. I think we're pretty much finished up. Yeah, cool. So, the immediate so you can answer those questions, send through this presentation. Invites for the weekly and monthly meetings. I think we look at that. I mean, why don't you leave Monday, don't you?
+John Limber: Yeah. All going well.
+Joshua Lewthwaite: Yeah,
+John Limber: Yeah. Got about a million missile warnings yesterday.
+Joshua Lewthwaite: Friday we're going.
+John Limber: I don't know about you.
+Joshua Lewthwaite: Yeah, dude. I My um my friend Ruby, I think she um she's like the airport's closed, UEI airspace is closed. My dad was saying the way they manage the backlog is if you've got your flight and your flight's in sit time, you get priority and then they just try and add people on.
+John Limber: Yeah,
+Joshua Lewthwaite: So two hours ducking and
+John Limber: I've got I've got someone at Emirates has said that it'll guarantee if the flight goes I
+ 
+ 
+00:14:59
+ 
+Joshua Lewthwaite: waiting.
+John Limber: get on, but I mean, who knows, man. Yeah. But yeah, Monday back in the UK, got a pretty busy week back there and then hopefully flying out to Barley on the 4th. So, so they're not being Asian till
+Joshua Lewthwaite: Nice.
+John Limber: July.
+Joshua Lewthwaite: Yeah, I'll be I'll be Vietnam until the 1 of April, I think, and then go over to Sydney and see how that rolls.
+John Limber: Where about you base, Chris?
+Chris Dunn: Sorry,
+John Limber: Where about you based?
+Chris Dunn: what was that? Where am I based?
+John Limber: Yeah.
+Chris Dunn: Yeah. Oh, I'm in Oakuckland, New
+John Limber: In
+Chris Dunn: Zealand.
+John Limber: Nice.
+Joshua Lewthwaite: Um, so then we'll send all that stuff through invite to Trello access. It's still just you and Steven. We'll add him too. So if he has ideas, you can just dump them there as well as just go, "Hey, department,
+John Limber: Yes.
+Joshua Lewthwaite: add this stuff in and then yeah,
+John Limber: Cool.
+Joshua Lewthwaite: complete the forms." Simple as that.
+ 
+ 
+00:15:53
+ 
+John Limber: Yeah.
+Joshua Lewthwaite: All right.
+John Limber: Nice.
+Joshua Lewthwaite: Any questions on the
+John Limber: No, mate. Um,
+Joshua Lewthwaite: job?
+John Limber: all sounds good. So, I I'll just I'll I'll rifle through that questionnaire today. And I did start dumping a load of information on Claude yesterday.
+Joshua Lewthwaite: Yeah.
+John Limber: So, I'll finish that as well and just get get that out there just so it's um just so you've got it.
+Joshua Lewthwaite: Nice.
+John Limber: Or I might even just put that into the Trello and break that up into little ideas to
+Joshua Lewthwaite: Yep. Yep. Okay. Cool. Yep. Amazing.
+John Limber: trust.
+Joshua Lewthwaite: If you ever want like tips or hacks around using the AI, just let me know. One of those is like say cowboy prompt. If you've heard of that, that's a good one to input. Yeah, use use that. It's pretty impressive how much it extrapolates things out because the the prompting is the power of using it. The other is um you take a look at perplexity computer. It's another one to play around with. You you'll get some quick wins out of that.
+John Limber: Yeah.
+Joshua Lewthwaite: Um it it is a matter of just I a few people using perplexity computer I've been teaching is they'll get it to 80% looks really impressive but 20% is where the value is and so it looks really cool but like or is it telling you
+John Limber: Yep.
+Joshua Lewthwaite: like it's not quite right like it's not right it's not actually giving you the value so a heads up on they not go too
+John Limber: Cool.
+Joshua Lewthwaite: complex with it but all right that's all you get
+John Limber: Awesome, fellas. Nice to meet you,
+Joshua Lewthwaite: through
+John Limber: Chris. Yeah, I'll get I'll get I'll get on with this right now. Uh, so just uh the the Have you sent the codes through to me somewhere? Yeah. Nice.
+ 
+ 
+Transcription ended after 00:17:52
+
+This editable transcript was computer generated and might contain errors. People can also change the text after it was created.
