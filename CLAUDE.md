@@ -47,6 +47,13 @@ Key constraints:
 - AI should flag uncertain answers to team members before responding (human-in-the-loop)
 - Internal-facing first, then client-facing once validated
 
+## Document Formatting Rules
+
+- Never use em dashes (-). Always use standard hyphens (-).
+- All dates must use UK format: DD/MM/YYYY (e.g., 23/03/2026)
+- All times must use 24-hour format (e.g., 14:30, not 2:30 PM)
+- Currency in USD ($) unless otherwise specified
+
 ## StrikeFlow Integration
 - Board Name: "Bullet Digital Media"
 - Board ID: c01081f2-c27c-4a8c-b7c5-0b2857254cd9
