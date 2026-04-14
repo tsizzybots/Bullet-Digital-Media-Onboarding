@@ -24,28 +24,25 @@ This is a **project planning and documentation workspace** for the IzzyAgents & 
 - **Current capacity**: 22-23 clients per team member, 18-month ramp to full capacity for new hires
 - **Primary communication**: Trello (backlog/ideas), email (formal), WhatsApp (quick check-ins)
 
-## Phase 1: Client Onboarding + Internal Knowledge Bank (Months 1-2)
+## Phase 1: Onboarding Process Automation (Months 1-2)
 
-This is the sole active phase. The goal is to build an internal client knowledge bank the team can query for:
-- Faster responses to client queries
-- Smoother client handovers between team members
-- Holiday cover support
-- Reducing time spent searching across platforms
+This is the sole active phase. The goal is to automate Bullet's end-to-end client onboarding process (sales call through campaign go-live) to compress agreement-to-go-live from ~2 weeks toward a single day. Source brief: `emails/Bullet Onboarding Process.pdf` (John Limber, 13/04/2026).
+
+Scope is defined in `docs/phase-1-plan.md`. Previous Phase 1 scope (internal knowledge bank + client-facing Telegram bot) is deferred to a later phase; archived under `docs/archive/`.
 
 Key deliverables:
-- AI-powered questionnaire processing and document generation
-- Central client knowledge hub per client
-- CRM setup guidance
-- Client offboarding/retention automation (quick win)
+- **Trigger orchestration layer** - a signed agreement fans out to Slack, Asana, Google Sheets/Drive/Docs/Calendar, Stripe, Xero, Timely, Gmail/GHL reliably and idempotently
+- **Onboarding status dashboard** - single view of every client's step, platform links, and action health
+- **Sales call intelligence** - transcript to structured summary written straight into the onboarding Google Doc
+- **Kick-off summary generator** - AI-drafted post-call summary + Stripe subscription activation
 
 Key constraints:
-- **Telegram** confirmed as the client communication channel (one supergroup per client with AI bot + client + account manager)
-- Meta Marketing API access needed for ~100 ad accounts; current API tier and system user token status unconfirmed
-- Campaign strategy is fluid and multi-layered — no static "strategy docs"; strategy communicated via Zoom calls, email summaries, Loom videos
-- Document formats: Google Docs, Google Sheets, Slides, Canva, email, Loom videos
-- Client agreed to host documents in-platform rather than external storage
-- AI should flag uncertain answers to team members before responding (human-in-the-loop)
-- Internal-facing first, then client-facing once validated
+- Platforms involved: HubSpot, PandaDoc, GoHighLevel, Asana, Stripe, Xero, Timely, Slack, Google Workspace (Sheets/Docs/Drive/Calendar/Gmail), Meta Business Manager, Canva, Loom
+- Agreement location (PandaDoc vs HubSpot) is under client review; orchestrator abstracts the signing-webhook source
+- GoHighLevel conditional email workflows are triggered, not replaced
+- Zoom to Google Meet migration in progress; transcript capture must work against whichever is live
+- Internal-facing tool; single-tenant (Bullet team only)
+- Every fan-out action is idempotent, retryable, and individually auditable - partial failures must be visible, never silent
 
 ## Document Formatting Rules
 
@@ -66,5 +63,6 @@ Key constraints:
 ## Future Phases (Not Yet Active)
 
 These phases are scoped but will only begin after Phase 1 is fully complete:
-- **Phase 2**: Client comms AI ("Steve AI") — digital twin for team query support, library of standard responses
-- **Phase 3**: Productised AI tools, AI-as-a-service to gym clients, staff training AI
+- **Phase 2 (originally planned Phase 1)**: Internal client knowledge bank + client-facing Telegram AI bot. Archived plan in `docs/archive/phase-1-plan-knowledge-bank.md` and `docs/archive/sprint-plan-knowledge-bank.md`
+- **Phase 3**: Client comms AI ("Steve AI") - digital twin for team query support, library of standard responses
+- **Phase 4**: Productised AI tools, AI-as-a-service to gym clients, staff training AI

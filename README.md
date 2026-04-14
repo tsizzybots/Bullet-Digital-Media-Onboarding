@@ -12,30 +12,34 @@ Bullet Digital Media faces capacity constraints that limit growth:
 
 - **Staff capacity ceiling** - each team member maxes out at 22-23 clients
 - **18-month ramp time** for new hires to reach full capacity
+- **Manual onboarding** spanning ~3 weeks across ~12 platforms (HubSpot, PandaDoc, GoHighLevel, Asana, Stripe, Xero, Timely, Slack, Google Workspace, Meta, Canva, Loom) with handoffs that leak time and information
 - **Repetitive client comms** consuming time that should go to strategy and campaign management
 - **Scattered client knowledge** across Google Docs, Sheets, email, Loom, and Canva
-- **Manual onboarding** that is solid but time-consuming, with information gaps
 
 ## Phased Development Plan
 
-### Phase 1: Client Onboarding + Internal Knowledge Bank (Months 1-2) `ACTIVE`
+### Phase 1: Onboarding Process Automation (Months 1-2) `ACTIVE`
 
-The sole active phase. Building an internal client knowledge bank the team can query to speed up onboarding, support client handovers, and reduce time searching across platforms.
+The sole active phase. Automating Bullet's end-to-end client onboarding - from sales call through campaign go-live - to compress agreement-to-go-live from ~2 weeks toward a single day. Full plan: [`docs/phase-1-plan.md`](docs/phase-1-plan.md). Source brief: [`emails/Bullet Onboarding Process.pdf`](emails/Bullet%20Onboarding%20Process.pdf).
 
 **Deliverables:**
-- AI-powered questionnaire processing and document generation
-- Central client knowledge hub per client
-- CRM setup guidance
-- Client offboarding/retention automation (quick win)
+- Trigger orchestration layer - a signed agreement fans out to Slack, Asana, Google Sheets/Drive/Docs/Calendar, Stripe, Xero, Timely, Gmail/GHL reliably and idempotently
+- Onboarding status dashboard - single view of every client's step, platform links, and action health
+- Sales call intelligence - transcript to structured summary written straight into the onboarding Google Doc
+- Kick-off summary generator - AI-drafted post-call summary + Stripe subscription activation
 
 **Key constraints:**
-- Telegram confirmed as client communication channel (one group per client with AI bot + account manager)
-- Meta Marketing API access needed for ~100 ad accounts (tier and token status TBC)
-- Human-in-the-loop: AI flags uncertain answers to team before responding
-- Internal-facing first, client-facing once validated
-- Documents hosted in-platform, not external storage
+- Integrates HubSpot, PandaDoc, GoHighLevel, Asana, Stripe, Xero, Timely, Slack, Google Workspace, Meta Business Manager, Canva, Loom
+- Agreement location (PandaDoc vs HubSpot) under client review
+- GoHighLevel conditional email workflows are triggered, not replaced
+- Every fan-out action idempotent, retryable, and individually auditable
+- Internal-facing tool; single-tenant for Bullet's team
 
-### Phase 2: Client Comms AI - "Steve AI" (Months 2-3+) `NOT STARTED`
+### Phase 2: Internal Knowledge Bank + Telegram Client Bot `NOT STARTED`
+
+Previously planned as Phase 1, now deferred. Internal knowledge bank the team can query for faster client responses, smoother handovers, and holiday cover, followed by client-facing Telegram bot per client group. Archived plan: [`docs/archive/phase-1-plan-knowledge-bank.md`](docs/archive/phase-1-plan-knowledge-bank.md).
+
+### Phase 3: Client Comms AI - "Steve AI" `NOT STARTED`
 
 A digital twin trained on company philosophy, past responses, and decision patterns. Team queries the AI before escalating. Handles simple, repeatable email responses immediately; advises on complex cases by citing prior decisions like legal precedent.
 
@@ -46,9 +50,9 @@ A digital twin trained on company philosophy, past responses, and decision patte
 
 **Data requirements:** 5+ years of email history (export and categorise), call transcriptions, response templates, documented decision-making philosophy from Steve and John.
 
-### Phase 3: Productised AI Tools & AI as a Service `NOT STARTED`
+### Phase 4: Productised AI Tools & AI as a Service `NOT STARTED`
 
-The strategic scale play, building on Phases 1-2:
+The strategic scale play, building on Phases 1-3:
 
 - **Internal AI Product** - Account managers use AI to manage 30-50 clients each (up from 22-23)
 - **External AI Product** - Productised gym marketing AI for 100,000+ gyms globally, white-label for other agencies
