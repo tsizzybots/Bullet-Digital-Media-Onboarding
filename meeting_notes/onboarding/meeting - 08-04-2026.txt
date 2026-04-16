@@ -1,0 +1,1122 @@
+Apr 8, 2026
+IzzyAgents | Bullet Digital Media - Transcript
+00:00:00
+ 
+Tim Shrieves: Hey Chris, how you doing?
+Chris Dunn: Good. Tim,
+Tim Shrieves: Yeah,
+Chris Dunn: how are you?
+Tim Shrieves: good, thanks.
+Chris Dunn: How's your day been so far?
+Tim Shrieves: Uh, yeah, just starting with the fix my running version two updates. Just been getting a load of that kind of planned and uh, well planned and started the first phase. So hopefully have that sorted for next week.
+Chris Dunn: Sweet. How is it is it a big
+Tim Shrieves: Um, yeah, relatively,
+Chris Dunn: task?
+Tim Shrieves: but there is a lot of the current build which is still uh kind of going to be in there and it's just updating some key key parts. So, um, hey Josh.
+Chris Dunn: Hey,
+Joshua Lewthwaite: Hey boys, how are you? Oh,
+Chris Dunn: Josh.
+Tim Shrieves: Good.
+Joshua Lewthwaite: I am zoomed in.
+Tim Shrieves: Good.
+Chris Dunn: Who's behind
+Joshua Lewthwaite: By the way, my computer is going very slowly.
+Chris Dunn: you?
+Joshua Lewthwaite: John,
+John Limber: How's it going, mate?
+Chris Dunn: Hey,
+Joshua Lewthwaite: what's up?
+John Limber: How you doing?
+ 
+ 
+00:01:28
+ 
+Chris Dunn: John.
+John Limber: Good.
+Joshua Lewthwaite: Doing good this year,
+Tim Shrieves: Yeah,
+Joshua Lewthwaite: mate. Doing good this I just walked in from meeting so I'm just getting my groundings again.
+John Limber: Oh, yeah. Nice. How How is everyone? Nice to meet you, Tim.
+Tim Shrieves: nice to meet you too,
+John Limber: How's it going?
+Tim Shrieves: John.
+John Limber: Where are you? Or you're in. Where are you, Josh?
+Joshua Lewthwaite: This is a very global call.
+John Limber: You in Sydney,
+Joshua Lewthwaite: I'm in Sydney right
+John Limber: I thought you So,
+Joshua Lewthwaite: now.
+Chris Dunn: Yeah.
+John Limber: you just went to um Where did you go? Malaysia.
+Joshua Lewthwaite: Went Vietnam. Yeah,
+John Limber: Vietnam.
+Joshua Lewthwaite: I went to Vietnam for a little bit and then did the boys trip. Played a lot of golf. Had a great time.
+John Limber: Nice.
+Joshua Lewthwaite: They made some memories and they got tattoos that stuck with them for life. drunk decisions. Some great ones. One of them got the tattoo on his ass cheek.
+ 
+ 
+00:02:11
+ 
+Joshua Lewthwaite: It's chocolate, not poop. Sorry.
+John Limber: Oh no.
+Joshua Lewthwaite: There's a wider story for another time with a less meeting recorded context.
+John Limber: Oh
+Joshua Lewthwaite: Yeah, it's very funny. So,
+John Limber: mate.
+Joshua Lewthwaite: yeah, it was it was a great trip. I I got away on ska fine. So, success on this part. Yeah. Where are you at the moment?
+John Limber: Nice barley,
+Joshua Lewthwaite: Are you in Bali or Yeah.
+John Limber: mate. Yeah. Yeah.
+Joshua Lewthwaite: Nice. Good to be there.
+John Limber: Very very barley. I'm just in a cafe.
+Joshua Lewthwaite: Yeah, there he is.
+John Limber: This is this just like B hotel. Well,
+Chris Dunn: Lost.
+John Limber: hotel got like an apartment.
+Joshua Lewthwaite: Yeah. Nice. Yeah. Good. How long are you there for?
+John Limber: Yeah.
+Joshua Lewthwaite: And then you Where you off to after that?
+John Limber: Six months,
+Joshua Lewthwaite: Yeah. That's a man who's got freedom.
+John Limber: mate.
+ 
+ 
+00:02:50
+ 
+Joshua Lewthwaite: Yeah.
+John Limber: Yeah.
+Joshua Lewthwaite: Good stuff.
+John Limber: Six months.
+Joshua Lewthwaite: I might see there.
+John Limber: Yeah. Come.
+Joshua Lewthwaite: I'll do Gold Coast for a bit and then I might do Bali.
+John Limber: Come on, mate. Get yourself over here. It's great.
+Joshua Lewthwaite: We'll see.
+John Limber: I'm in Oawatu.
+Chris Dunn: Oh,
+John Limber: I'm just I'm not not decided where I've uh where I'm going to stay yet,
+Chris Dunn: magic.
+John Limber: but I think maybe here. Um yeah,
+Joshua Lewthwaite: Yep.
+John Limber: just going to lock in and train and work. That's my plan whilst drinking drinking coconuts.
+Joshua Lewthwaite: It's a good place to lock in, man.
+John Limber: It really is like you can you can do obviously I've been coming obviously I've been coming here for about 10 years.
+Joshua Lewthwaite: Yeah.
+John Limber: Um and you can you can live so many different lives here. Like you can either come and go wild Or you can come and let literally lock in and
+Joshua Lewthwaite: Yeah. Yeah.
+John Limber: focus and work on yourself and you know just like
+ 
+ 
+00:03:33
+ 
+Joshua Lewthwaite: Yeah, I think um I know Chris has Chris's been there.
+John Limber: optimize.
+Joshua Lewthwaite: I know it's you can you can live like an Australian there or you can dial in one or the other.
+John Limber: Yeah.
+Joshua Lewthwaite: It is that way, isn't it? A lot of Aussies go there.
+John Limber: Yeah.
+Joshua Lewthwaite: They've got quite the reputation.
+John Limber: Yeah.
+Joshua Lewthwaite: Yeah. But we've got
+John Limber: But I'm working um yeah I'm working UK hours.
+Joshua Lewthwaite: um
+John Limber: So my day starts at 1 pm and it works on midnight. So kind of dictates what kind of what kind of life I
+Joshua Lewthwaite: Yep. Yep. options that you got. Yeah, I don't think those blend so well together.
+Chris Dunn: Good.
+John Limber: have.
+Joshua Lewthwaite: I think I'm working more like UAE hours and that that works pretty much fine. Pretty much fine. See, I haven't seen the Goldie because Tim's joining from Thailand, but he's over there and then New Zealand is where Chris is at. Chris is at home
+ 
+ 
+00:04:16
+ 
+John Limber: Where in Thailand are you are you Tim?
+Tim Shrieves: Uh, Bangkok.
+Joshua Lewthwaite: and
+John Limber: In Bangkok. Is that where you live? Yeah.
+Tim Shrieves: Yeah.
+John Limber: Nice. Okay, cool. Yeah,
+Chris Dunn: Do you surf, John?
+John Limber: proper intact.
+Chris Dunn: Cuz Uluad is the spot for that, man.
+John Limber: I know, mate.
+Chris Dunn: You got your morning's
+John Limber: I don't unfortunately I've I've got I've got Yeah,
+Joshua Lewthwaite: He's
+Chris Dunn: free.
+John Limber: this is not even that. I'd love to.
+Joshua Lewthwaite: British.
+John Limber: I've got um lifelong issues with like dislocating ankles and
+Chris Dunn: Oh.
+John Limber: uh knees and things. So, it's just not the best for me.
+Joshua Lewthwaite: Let's
+John Limber: In fact,
+Chris Dunn: Um,
+John Limber: I've tried it a few times and dislocated my dislocated my shoulder.
+Joshua Lewthwaite: go.
+John Limber: So I decided to give up
+Chris Dunn: you don't want to do that in Indonesia. E,
+Joshua Lewthwaite: No.
+Chris Dunn: restaurants are good, but the hospitals
+Joshua Lewthwaite: Not all the places you could choose.
+ 
+ 
+00:04:58
+ 
+John Limber: yeah
+Joshua Lewthwaite: No.
+Chris Dunn: aren't.
+Joshua Lewthwaite: No chance. No. Pass on that one. Some people got it, some people don't.
+John Limber: fortunately I would I would love it mate I think it would be something to do but it's just one of those
+Joshua Lewthwaite: Yeah.
+Chris Dunn: Yeah.
+Joshua Lewthwaite: How's um how's the workload been since leaving and us last catching up? How's Yep. That answer I if I was a guessing man, that's what I would have said. Figured I'd ask the question maybe if it was
+John Limber: Yeah, I mean this that since we started speaking like the whole the whole world of AI as well is
+Joshua Lewthwaite: different.
+John Limber: just it's just going crazy right now.
+Joshua Lewthwaite: Yeah.
+John Limber: like it's it just seems like it's all gone so fast since in the last two
+Joshua Lewthwaite: Big time.
+John Limber: months.
+Joshua Lewthwaite: Yeah.
+John Limber: Just rapid.
+Joshua Lewthwaite: And it's see it's just going to get faster. It's just going to get faster and faster and faster.
+John Limber: Yeah.
+ 
+ 
+00:05:44
+ 
+Joshua Lewthwaite: And that's one of the challen I mean with OpenAI now raising just over $120 billion valuing about 800 plus billion.
+John Limber: Yeah.
+Joshua Lewthwaite: They've got money to go even faster than that than all their competitors. Enthropics doing about $3 billion a month in revenue at the moment.
+John Limber: Well, everyone I speak to is moving everything over to claws and um it's just completely everything's just in the game is just changing.
+Joshua Lewthwaite: Yep.
+John Limber: We we got to figure out what what we what being an agency means years time.
+Joshua Lewthwaite: Yeah. And it's planning ahead on that. Yeah. Exactly. Exactly. Now,
+John Limber: Yeah.
+Joshua Lewthwaite: you mentioned that there's some some changes, things that you're seeing. be good to understand kind of where you're at now, what you're seeing,
+John Limber: Yeah. Yeah.
+Joshua Lewthwaite: and then make sure we we as a department do the right
+John Limber: Yes. Yeah. I mean,
+Joshua Lewthwaite: stuff.
+John Limber: I think it's it is it's very good timing to be starting this and it's almost better timing now having the last few weeks like development for the last few weeks have been crazy.
+ 
+ 
+00:06:45
+ 
+John Limber: Like there's there's been things released, multiple things released. Thank you. that um you can now like that thing where that that platform I sent you Josh and also with Claude now called code has just started just jumped around and started building entire marketing departments in claude so there's obviously from our perspective it's we got to figure out what is just noise like hype versus what is actually real and actually an
+Joshua Lewthwaite: Yeah.
+John Limber: immediate threat to us opportunity to Um obviously currently I think there's more opportunities than threats if we play it in the right way. Um but it also means that it's it's
+Joshua Lewthwaite: Yep.
+John Limber: figuring out what the what the best place to start is for us and what what the best end goal is shortterm and longterm. Um so I don't know if like where we're
+Joshua Lewthwaite: Yep.
+John Limber: at now. I think we we we were we were aiming to to sort of get to a point where we could build something that was hands off where you could kind of just go into platform and then plug in your website and then it it comes up with a with a marketing campaign.
+ 
+ 
+00:08:07
+ 
+John Limber: Um I actually think we could we could do that with third parties straight away.
+Joshua Lewthwaite: Yeah.
+John Limber: Um or with or with like Yeah.
+Joshua Lewthwaite: Yeah.
+John Limber: I mean there's multiple platforms we found where you can literally just go and it built within our system within high level now they've released two a week and a half ago they released this kind of builder AI builder where you just literally plug in your website upload a few images and it it builds the entire thing it builds funnels and landing pages and you know it produces work that
+Joshua Lewthwaite: Yeah.
+John Limber: would take us three weeks it does it in 30 seconds and it's better than what we've been doing is mad.
+Joshua Lewthwaite: Yeah. Lovely.
+John Limber: Yeah.
+Joshua Lewthwaite: Brilliant.
+John Limber: Which is obviously amazing right now.
+Joshua Lewthwaite: Yeah. Winning.
+John Limber: So, we we've been we've been chatting and I'd love to get your thoughts on it.
+Joshua Lewthwaite: Yeah.
+John Limber: I I I the thinking is maybe to switch back to your original idea,
+Joshua Lewthwaite: Yeah.
+ 
+ 
+00:09:02
+ 
+John Limber: Josh, and you use to to start with using your your like skills to build an onboarding process that will then feed it to high level. Meaning we it we can we can just completely like reduce the time of
+Joshua Lewthwaite: Yeah.
+John Limber: that on boarding. Like it currently is two weeks.
+Joshua Lewthwaite: Yeah.
+John Limber: I reckon we could get the whole thing down to a day if we had a slicker onboarding process that fed high level,
+Joshua Lewthwaite: Yeah.
+John Limber: fed all the platforms. Um and almost reverse the priority to getting that bit like saving time in that
+Joshua Lewthwaite: Yeah.
+John Limber: department just because we can now like before we were speaking
+Joshua Lewthwaite: Yeah.
+John Limber: even if we got a tighter onboarding process it would still be a load of leg work in the build or or like leg work in us trying to build something between us that would shorten the build for us now like if we can do it in 30 seconds anyway.
+Joshua Lewthwaite: Yeah.
+John Limber: So, we might as well just shorten that whole process.
+ 
+ 
+00:09:57
+ 
+Joshua Lewthwaite: Yeah. Yeah.
+John Limber: And um yeah,
+Joshua Lewthwaite: I think there's I was just going to add so I think the fundamentals is the short-term
+John Limber: thoughts on that.
+Joshua Lewthwaite: versus long-term like you said in the short term it's what's going to impact workload and profitability as fast as possible. that that's that's the basis of it and going how how are we going to increase profitability and how are we going to free up your time because that that's the biggest thing once you have more time it's more time to research into all of this other stuff as well it's just exponential upside so the short term is those outcomes whatever that looks like
+John Limber: Yeah.
+Joshua Lewthwaite: a longterm is then a wider point of planning of what does the agency look like in six months time 12 months time and then going right once we get the short-term win you've increased profitability you've got more time back means we can achieve the long term way faster way way faster so I
+John Limber: All right. Oh
+Joshua Lewthwaite: think we just need to tackle that short-term goal to begin with so that's looking at one we identified one of the areas that
+ 
+ 
+00:10:49
+ 
+John Limber: yeah.
+Joshua Lewthwaite: will impact profitability and time is the client coms about campaigns which is that telegram chat channel and that frees up the account managers the other ones like we spoke about is this AI system
+John Limber: Mhm.
+Joshua Lewthwaite: where an AI for the entire onboarding intake similarish to like what we've done with you with the questionnaire and it rolls through it, taking of all the sales call conversations to date, understanding the web, like whatever that looks like. It's just seeing which one will free up the most amount of time and is the shortest period for us to develop it. That that's the key question here.
+John Limber: Yeah. which
+Joshua Lewthwaite: Once we choose which one that is, then that's the one we roll with and we just execute on that.
+John Limber: is
+Joshua Lewthwaite: Once we get that done, then it's space and availability to focus on a long-term vision and start re-engineering how the business is set up for that.
+John Limber: Yep. Um, yeah, I totally agree. We we spoke about this internally and obviously thought about the building the long-term
+ 
+ 
+00:11:45
+ 
+Joshua Lewthwaite: Yeah,
+John Limber: goal is still the same and like we're I'm seeing this as a long-term partnership where there's always things that we can be doing considering the pace considering the pace of how fast things are moving.
+Joshua Lewthwaite: it's constant. Yeah. Yeah.
+John Limber: um we almost need to need to think about what's going to put us in the put us in the best position to be
+Joshua Lewthwaite: Yeah.
+John Limber: able to well yeah I mean it's to be able to capitalize on what's happening with regards to AI which I I think after thinking about it going like discussing obviously chat between the customers and and us answering questions um about the service. Yeah, mate. When we actually think about that, the the level of nuance there is in the answers that that the chatbot would need to provide, we we'd need to stress test it for months before we'd be confident to release that on onto clients
+Joshua Lewthwaite: Yeah.
+John Limber: because it could just end up causing s*** ton more work and frustration clients than in
+Joshua Lewthwaite: Yeah.
+ 
+ 
+00:12:59
+ 
+Joshua Lewthwaite: Okay.
+John Limber: initially than it would be a a help. Yeah. So that's a
+Joshua Lewthwaite: So the the would it would impact the profitability but it would take longer to
+John Limber: consideration.
+Joshua Lewthwaite: develop to a point where we have extreme confidence with it. So the speed to achieving that profitability is a little bit longer than initially expected.
+John Limber: Yeah.
+Joshua Lewthwaite: Even if it's like an MVP and it escalates, there's stages we could do it in which would speed it up
+John Limber: And I I think Yeah. I think I think like um I'd be I'd be good to I've obviously been trying
+Joshua Lewthwaite: definitely.
+John Limber: to trying to expedite learning from the AI But you get to understand more about how
+Joshua Lewthwaite: Yeah. Yeah.
+John Limber: you guys actually work and and where you know what you do within Claude um or anything else
+Joshua Lewthwaite: Yeah. Yeah.
+John Limber: as well. Uh just yeah to try and to try and understand the what the road map would be and and how this is going to look in six months time,
+ 
+ 
+00:13:53
+ 
+Joshua Lewthwaite: Yeah.
+John Limber: 12 months time.
+Joshua Lewthwaite: Yeah.
+John Limber: Um, but I I I think potentially like I know this is obviously I understand because
+Joshua Lewthwaite: Yeah.
+John Limber: clients do this to us all the time like shift the goalpost, but I wonder if it'd be better to shift focus back to building an onboarding process that feeds
+Joshua Lewthwaite: Okay.
+John Limber: into um like a campaign building.
+Joshua Lewthwaite: into the whole AI system and it just flows on,
+John Limber: Yeah.
+Joshua Lewthwaite: right? It's the AI conveyor belt of agents.
+John Limber: Is this one of those things where you're going to get off this call and you you're going for f***
+Joshua Lewthwaite: It's what we spoke about to be honest though.
+John Limber: sake?
+Joshua Lewthwaite: Yeah. It's somewhat I mean Chris is laughing in Tim's laughing because yes, but then me I'm going hey, whatever's best for the customer, right? And you understand the business where it's at. The other thing the beauty of how we work is going we are your department to do what's best for the business.
+ 
+ 
+00:14:32
+ 
+John Limber: Yeah.
+Joshua Lewthwaite: And if that changes then sure we don't finish what we originally planned but it's a shift as our department. So yeah let's just move and focus on the next thing. So yeah it's doesn't bother me fine by me.
+John Limber: Yeah, sorry guys.
+Joshua Lewthwaite: If that's highest impact just rather do that now than later.
+John Limber: We It's obviously better.
+Joshua Lewthwaite: Yeah that's all good.
+John Limber: That's what I mean.
+Joshua Lewthwaite: So
+John Limber: It's better that this couple things has happened. I mean, these things that have been released,
+Joshua Lewthwaite: 100%.
+John Limber: they weren't available when we first spoke, Josh. Like,
+Joshua Lewthwaite: Yeah.
+John Limber: we had no idea that this was coming so fast.
+Joshua Lewthwaite: Yeah. Okay. You got the awareness. Yeah.
+John Limber: We were sat in a room together. We used
+Joshua Lewthwaite: So the next step from here for us to understand the onboarding side of things really
+John Limber: it.
+Joshua Lewthwaite: we really need to know your current onboarding process.
+John Limber: Yep.
+ 
+ 
+00:15:14
+ 
+Joshua Lewthwaite: We need to know what information you need to gather.
+Tim Shrieves: Yeah,
+Joshua Lewthwaite: This meeting is all recorded so you don't have to worry too much about writing it all down but yeah your current onboarding process where that information
+John Limber: Yeah.
+Joshua Lewthwaite: is held what how that's kind of formatted. Also, what's important? Is it the pre-sales notes?
+John Limber: Yep.
+Joshua Lewthwaite: Is it the onboarding meeting? Like, what is your process currently? And what is the information you need that agent to be aware of? And then what do you do with it? When we understand that,
+John Limber: Right.
+Joshua Lewthwaite: that then helps us design out a new questionnaire and interview format for you for us to then get all that information in. So, yeah, Tim, I'm going to open the floor to you, mate. Anything you would add to that as well? What do we need? Well,
+Tim Shrieves: that's it.
+Joshua Lewthwaite: did I do a pretty good job with
+Tim Shrieves: No, no, you did. Yeah,
+ 
+ 
+00:15:58
+ 
+Joshua Lewthwaite: that?
+Tim Shrieves: we just need all all the information about how they currently do it and then we'll kind of evaluate that, come up with questions, um, and send that over once we got that
+Joshua Lewthwaite: Yeah.
+Tim Shrieves: ready.
+Joshua Lewthwaite: and what and different team members as well John because that's we're going where does that information get sent to per team member and where do we get that information in terms of location or maybe team member or maybe team member doesn't matter but the more we understand then we can scope out what plan out the schematics of what does that AI look like where's information coming in what does it do with it where does it put it out and what it needs to put it out as and then it goes all right now we can start building
+John Limber: Well, it fortunately that is a lot easier because we've got a pretty tight onboarding process that we just need to kind of replicate into a into into a different system, I guess. So,
+Joshua Lewthwaite: Yeah.
+John Limber: I can actually take you through everything and I can um or I can I can send you
+ 
+ 
+00:16:48
+ 
+Joshua Lewthwaite: Yeah.
+John Limber: guys through the process as if you're a customer. Um and you you can kind of experience experience that
+Joshua Lewthwaite: What's easiest for you? what's easiest for us to get what we need.
+John Limber: yourselves.
+Joshua Lewthwaite: I I partly think it's a combination of both to a
+Tim Shrieves: Um yeah, for sure. Um any documentation that covers it like you mentioned that would help a lot.
+Joshua Lewthwaite: degree.
+Tim Shrieves: We'll we can analyze that and um I'm sure we'll probably have some questions as well. So it might be better to do it that way first.
+Joshua Lewthwaite: Yeah. Yeah.
+John Limber: Can I Do you want me to How long have you got on this call,
+Joshua Lewthwaite: Sensor them.
+John Limber: guys? Obviously, we've got 10.
+Joshua Lewthwaite: We got the time allocated this one.
+John Limber: We got 15 minutes scheduled. Are you hard stop after?
+Joshua Lewthwaite: I'm okay. Chris
+John Limber: Right.
+Tim Shrieves: I'm good.
+Chris Dunn: Yeah, as well.
+John Limber: I can give you I can give you a quick overview now and then I can basically send you well I can set the So right let me just let me kind of run you through what happens.
+ 
+ 
+00:17:44
+ 
+Joshua Lewthwaite: You're welcome.
+John Limber: So first I can I can also write this or I'm guessing you're recording this so if I dictate it I'm guessing it would um you'll be able to get notes on it.
+Joshua Lewthwaite: Yeah. What I Yeah. What I'd say is just for the purpose of the recording,
+John Limber: Right.
+Joshua Lewthwaite: just have this as very key highlighted notes and sectioned out.
+John Limber: Yeah. So, first step is a sales call where we we have a we have a 60-minute consultation where it's usually 60 minutes, 45 to 60 minute consultation with the client. Um, obviously ask them a bunch of questions and then take them through a sales p. Uh, that's then the sales notes, the initial sales notes that they recorded. They're just manually recorded, but we're we're trying to we started basically putting the transcript into Claude manually and getting notes from Claude. Um, once the client says yes, right, so the the client information is recorded in HubSpot. Let me just let me just try and give you a quick whip through of this.
+ 
+ 
+00:18:46
+ 
+John Limber: Never used Google Meets before. Uh, okay. Um, right. I need to go with the screen. So, right, we got let's say uh let's use this one for example, right? So, currently how it works, you can see my screen, right? You can see HubSpot. Yeah, currently how it works,
+Joshua Lewthwaite: Yep.
+John Limber: we have um all the client information saved in in HubSpot. Um we then once we've got a yes, we create an agreement and it's via an integration between HubSpot and Panda Docs is where we keep our agreements. Okay, so we we click on this five Panda docs. I've obviously already done one for these guys which is here. Okay. So this is this is the agreement which got all the details of the scope of
+Joshua Lewthwaite: Hang on. You just got to You're just sharing a different tab.
+John Limber: work.
+Joshua Lewthwaite: You just got to hit at the top. It should say share this
+John Limber: Yeah. Yeah.
+ 
+ 
+00:20:11
+ 
+Joshua Lewthwaite: tab.
+John Limber: Yeah. Yeah.
+Joshua Lewthwaite: Yeah.
+John Limber: Okay.
+Joshua Lewthwaite: Got it.
+John Limber: So, this is the agreement. It's got all the details of the scope of work in here. I mean, we're actually updating this among us. Um, but you got details of what's included. This is all pretty standard. And then sometimes we'll build we'll kind of put in different terms for the client depending on what they're what they're getting. All the price information. Um and then T's and C's blah blah blah. This goes to the client. When they complete this this document, um it triggers our onboarding process. And so the client will get a link to an onboarding portal. Uh give me a second. Let me find one. Yeah. Two
+Joshua Lewthwaite: Yeah,
+John Limber: sex.
+Joshua Lewthwaite: you're good.
+John Limber: Okay, let me share this tab. So, the client would get an email like this. Okay, you see this? Yeah.
+ 
+ 
+00:21:44
+ 
+Tim Shrieves: Yep.
+Joshua Lewthwaite: Yep.
+John Limber: Which would give them a link to start that on boarding. Show this time instead. Right. So then it then it takes them through a funnel that is built within high level our high
+Joshua Lewthwaite: Yep.
+John Limber: level. Um we we've actually got in fact this is one of our old ones but this you get the sense
+Joshua Lewthwaite: Okay.
+John Limber: of process here. So um yeah this is actually our old one on click funnels I think.
+Joshua Lewthwaite: Okay, it's basically going to a form that they
+John Limber: Yeah. So it goes through this and then they they complete a load of information about their business.
+Joshua Lewthwaite: complete.
+John Limber: So these are the we basically got the questions that we need pre-written like we've got this already. Um so this you get all this information from them. I'm just going to try and do this. In fact I don't need to. You can see all the questions right?
+Joshua Lewthwaite: Yeah.
+John Limber: This is this is the kind of process they go through.
+ 
+ 
+00:22:41
+ 
+John Limber: Submit my responses. The next stage then is to book a kickoff call. So, it's just a calendar link and they book a kickoff call with the marketing team and then in the background uh the background They have a cold. Okay, in the background um there's a a document created essentially that uh you can see now shared
+Joshua Lewthwaite: Mhm.
+John Limber: right. Yeah.
+Joshua Lewthwaite: Yep.
+John Limber: So in the background there's a a Google doc gets created um that kind of populates with all that information they've given us and um this is this is then what we use we base the onboarding from. So this is this is manually been added by the team like they can add things in here that's relevant ahead of the the
+Joshua Lewthwaite: Okay.
+John Limber: onboarding call. Um there's there's sales notes as well that we can add which is not
+Joshua Lewthwaite: Yeah.
+John Limber: in here. This is an old one. Uh yeah that's like this. So there's a section so sorry.
+ 
+ 
+00:24:43
+ 
+Joshua Lewthwaite: Just think I think it's open in a different tab. So John Yeah.
+John Limber: Yeah. Right. So this there's a document that gets populated.
+Joshua Lewthwaite: Okay.
+John Limber: Um there's a space then for the saleserson goes and manually adds his sales notes into this. That's a manual step. Once this has been created,
+Joshua Lewthwaite: Okay.
+John Limber: obviously we get notified and the client signing their agreement. We get notified when they've completed their onboarding. Then that prompts the salesperson to go and add the sales notes.
+Joshua Lewthwaite: Mhm.
+John Limber: They go into this document um the the campaign manager and then go and do some research and start adding bits of research in here ahead of the call. And then it's got all of the answers that they've completed from their survey in
+Joshua Lewthwaite: Just just on the research,
+John Limber: here.
+Joshua Lewthwaite: what what do they do as research?
+John Limber: Um, this is this is actually for an event, so it's a bit different, but they would research like the gym, what offers they're running currently.
+ 
+ 
+00:25:39
+ 
+John Limber: They look at the website,
+Joshua Lewthwaite: So
+John Limber: they look at some competitors as like look at the area and see who's what competing gyms are around there,
+Joshua Lewthwaite: they scan they scan the website.
+John Limber: what offers.
+Joshua Lewthwaite: They scan the internet.
+John Limber: Yes. Yeah. Exactly. Scan the internet. We we do some research they do some research on the owners then maybe add them on LinkedIn.
+Joshua Lewthwaite: Sorry.
+John Limber: Um yeah competitors is one of the main things like look at the area like do a population like s search on the meta to see how many people are in the area like we we'd have a little think about what offer would work for them what campaign structure would work for them and then put any notes in this document. So then this is we all jump on the kick up floor and this is the document that we all kind of have in the background to work through and then they will also add any any further notes to this document as well.
+Joshua Lewthwaite: Yep.
+ 
+ 
+00:26:27
+ 
+John Limber: So this is all kind of manual. Um and then off the back of that obviously we do the kickoff call which is about 45 minutes where we kind of run through all the stuff clarify anything we need to clarify.
+Joshua Lewthwaite: So you go through the
+John Limber: We will work the the main thing is to negotiate the offer, negotiate the ad budget, um discuss any creative that that we might need. It's a chance for us
+Joshua Lewthwaite: So they're not using something physical there.
+John Limber: to
+Joshua Lewthwaite: They're they're referring to this document as context for the onboarding meeting.
+John Limber: Yes.
+Joshua Lewthwaite: The onboarding meeting they've got questions they're running through to get answered. Well, there's not a presentation.
+John Limber: There's no presentation on the onboarding corner. Uh it's the kickoff call.
+Joshua Lewthwaite: Okay.
+John Limber: It's it's mainly there to obviously first touch point between the client and the team. Um and we the the main goal is to really like negotiate and agree on campaign structure and the offer the budget and sort of set expectations for results and
+ 
+ 
+00:27:23
+ 
+Joshua Lewthwaite: Okay.
+John Limber: just that's the starting point and then from there the team goes and builds a campaign but in
+Joshua Lewthwaite: Okay. And
+John Limber: reality now you could just basically populate.
+Joshua Lewthwaite: team define team.
+John Limber: Yeah. Yeah. Exactly.
+Joshua Lewthwaite: our internal intellectual property gets this outcome.
+John Limber: Yeah.
+Joshua Lewthwaite: Okay.
+John Limber: So so like Yeah.
+Joshua Lewthwaite: And the that information from the meeting, how is that taken across into the next
+John Limber: So the information from the meeting is a combination of um obviously we'll be writing notes in this document or the team
+Joshua Lewthwaite: steps?
+John Limber: will on the call. Um we've got the we'll have the zoom call transcript that we can we can use although we don't really use that very effectively currently. Um, and then then the the next step is the the digital specialist or the campaign manager will then put together an like an email follow-up email from the kickoff call like confirming everything that's been discussed and what the offer is going to be and what the setup time's going to be and any any sometimes there's things we need to go away and discuss and clarify which then goes into the into the into the followup email.
+ 
+ 
+00:28:36
+ 
+John Limber: Um once that's then been kind of signed off by the client,
+Joshua Lewthwaite: Yeah.
+John Limber: then we go and build.
+Joshua Lewthwaite: Okay. Anything else after this document? I'm conscious I jumped in on that process there, but anything else? Basically using this to refer to they do the onboarding meeting.
+John Limber: Uh
+Joshua Lewthwaite: They put their notes from the onboarding meeting in this. Then they use this document as center of truth to then create the campaign because then now you've got AI getting involved with that. That's good.
+John Limber: yeah. Yeah. So currently this is like this this process is I mean it's pretty good and it's pretty comprehensive um but there's it's also clunky
+Joshua Lewthwaite: Yeah,
+John Limber: in some ways like there's a lot of manual
+Joshua Lewthwaite: there's opportunities all over. There are opportunities everywhere. And then it's it's just making it far less manual,
+John Limber: yeah
+Joshua Lewthwaite: but also an AI trained on all that knowledge as a central piece to be used. We'll see over time how that can be used.
+ 
+ 
+00:29:32
+ 
+Joshua Lewthwaite: But that's a that's a key
+John Limber: Yeah,
+Joshua Lewthwaite: point.
+John Limber: I mean I I I sense that from your perspective, although this is a shift, I get the sense that this is a much clearer process um to to then like re re-engineer, right?
+Joshua Lewthwaite: I think they're um it's it is a good process.
+John Limber: Is that right? Would you think would you
+Joshua Lewthwaite: I mean Tim,
+John Limber: say
+Joshua Lewthwaite: you want to comment on that
+Tim Shrieves: Yeah,
+Joshua Lewthwaite: particularly?
+Tim Shrieves: I think it is I think it's a good starting point. Um the um the previous uh scope although it's definitely achievable is definitely a bit more complex
+Joshua Lewthwaite: It is
+Tim Shrieves: as well. So um it's doable like I said um but something like this yeah like Josh says there's a lot of opportunity
+John Limber: Yeah.
+Tim Shrieves: for optimizing it and automating a lot of it and um yeah presenting a better user experience in a quicker time.
+Joshua Lewthwaite: Do you what what's important here because it is more complex to a degree versus an AI that's integrated into meta
+ 
+ 
+00:30:17
+ 
+John Limber: Yeah.
+Joshua Lewthwaite: and all other things to answer questions. It's a bit more complex to a degree, but going what do you know what you would see as an MVP version? Because the goal we want is going how can we how can we get the fastest version live that adds value versus getting it perfect and then just doing it at the end. Do you have an idea of what you think that MVP should be or you want us to assess it?
+John Limber: for this particular
+Joshua Lewthwaite: This this use case.
+John Limber: um
+Joshua Lewthwaite: Yeah. The onboarding experience.
+John Limber: Um, I guess I guess the biggest wins in this process would be Yeah. Like I guess replicating the survey So I think I think basic MVP that would that would help us would be getting having a place that we can take information like this. Um whether that's to start with a a mixture of manual and um automated and then getting to a point where this would automatically generate the follow-up email and then use like integrate with high level to to to build the campaign.
+ 
+ 
+00:32:04
+ 
+Joshua Lewthwaite: Yep. Yep.
+John Limber: I
+Joshua Lewthwaite: I I'd also see I'd also see throwing out like rebuilding this
+John Limber: think
+Joshua Lewthwaite: in a way that an AI agent is trained on all of it.
+John Limber: yeah,
+Joshua Lewthwaite: So you have a claude that's trained on that entire customer in that experience.
+John Limber: I think that would be amazing. Yeah. Like the the other thing that would be great would be to like you know the process
+Joshua Lewthwaite: Yeah.
+John Limber: from sales call like zoom call say zoom call we're now going to switch we're going to switch to um Google meets I think um so getting the process
+Joshua Lewthwaite: Yep.
+John Limber: from sales consultation and then those notes combined with the agreement going into a document that's like succinct and got all the information in there obviously would be would be a great step forward. Um, and then like if if there'd be a way of then automatically updating that document
+Joshua Lewthwaite: Yep.
+John Limber: from the kickoff call information which
+Joshua Lewthwaite: Immediately
+John Limber: I I think I've been using core to do things like this already like pretty sure that would be be fairly straightforward.
+ 
+ 
+00:33:15
+ 
+Joshua Lewthwaite: when you said that they're manually updating and you're not using the transcript as well as part I was like you just get the AI to put
+John Limber: Yeah.
+Joshua Lewthwaite: it all in here. Basically what what I'm envisioning Tim add your comments here as well.
+John Limber: Yeah.
+Joshua Lewthwaite: What I'm envisioning is we rebuild that whole form intake system where just like you completed the interview questions in our portal that we've made that's all Claude code that interview process directly puts all the information into Claude and then that's like an agent that's dedicated to that customer to a degree then that produces the document but then when you have the kickoff meeting that goes into the same agent which then makes the updates the document as well and so everything comes back to the enter agent that knows everything about the entire onboarding and then within that so that's it.
+John Limber: Good
+Joshua Lewthwaite: So you've got the onboarding side of things,
+John Limber: night.
+Joshua Lewthwaite: then you got the kickoff, and then you have your research agent, and it's all filtering into this one that goes, I know everything these three do.
+ 
+ 
+00:34:13
+ 
+Joshua Lewthwaite: And then that's a resource that can be used. Then that filters into delivery of the whole product as well, because now you're building AI out on that. So this then passes it over to that whole system. So just a flywheel. So, you've just got staff talking to people and that's it.
+John Limber: Yeah.
+Joshua Lewthwaite: That's what I see as the vision for what an agency is.
+John Limber: uh like if we're talking future I think that like oh it's so hard to try and predict but I don't think I think agencies will be very
+Joshua Lewthwaite: I don't I don't actually think it's going to be too hard.
+John Limber: different.
+Joshua Lewthwaite: Like my viewers, I know we're getting a little bit sidetracked here, but towards this vision point, I think it's literally just AI doing every single step of what you're already doing. Because a customer,
+John Limber: Yeah.
+Joshua Lewthwaite: they a customer is paying for an outcome. How that outcome's delivered doesn't matter. They need members or they need this, they need that. They need people more people come to their events when they do a launch.
+ 
+ 
+00:35:08
+ 
+Joshua Lewthwaite: And so the way you deliver that changes, but what you're delivering is the same value.
+John Limber: Yeah.
+Joshua Lewthwaite: And so really it's going you've already proven a manual approach to it and the strategy and everything. Now it's just how do you create an AI conveyor belt where we've got your onboarding department and that does research all the information from the contract what's been sold and then it also does the kickoff meeting notes.
+John Limber: All
+Joshua Lewthwaite: That is the onboarding agent. There's a sales agent too which is a whole other thing.
+John Limber: right.
+Joshua Lewthwaite: maybe getting leads, providing proposals, doing all the updates. So, you got sales agent, your onboarding agent, then you have your fulfillment agent, and then you just got people just being a human front face of, hey, here's how the campaign's going in case you wanted to talk to me, but there's also an agent you can talk to as well. You're achieving the same outcome with a 24-hour turnaround, if not immediate. And then it's basically SAS with human contact.
+Tim Shrieves: Um,
+ 
+ 
+00:36:02
+ 
+John Limber: That's that's yeah I mean that's what where we need to get to. I I I mean I think where we would stand in the future I mean potentially I would like to be able to
+Joshua Lewthwaite: Yeah.
+John Limber: offer a a product that is barely any human contact which is lower price point and a gateway into our full service but I think the core agency at its core I think will always you know always means but I would like to think that we we
+Joshua Lewthwaite: Yeah. That's right.
+John Limber: would stay true to being premium and I think premium in the future and in the near future premium will mean there's humans involved.
+Joshua Lewthwaite: Yeah. Yeah. There's humans involved and that's going you can have two tiers.
+John Limber: Um
+Joshua Lewthwaite: One is no human intervention, no human input, no human access. Another one is pick which one you want.
+John Limber: that's that's the difference.
+Joshua Lewthwaite: So you have the both. Yeah.
+John Limber: Yeah. So, um look,
+Joshua Lewthwaite: Yeah.
+John Limber: I I'm I'm very very it's really important to me that we have a we have a a good relationship.
+ 
+ 
+00:36:59
+ 
+John Limber: I, you know,
+Joshua Lewthwaite: Yeah,
+John Limber: we definitely won't be one of these clients that keeps jumping and changing things,
+Joshua Lewthwaite: for sure.
+John Limber: but I think considering what's what's happened,
+Joshua Lewthwaite: No, you're good.
+John Limber: I think this was a pretty necessary shift. Doesn't change the long-term goal,
+Joshua Lewthwaite: Yeah. Yeah,
+John Limber: and I think everything we spoke about is still very relevant.
+Joshua Lewthwaite: that's fine.
+John Limber: Um, it's just like where's the where's the quickest win?
+Joshua Lewthwaite: Yeah.
+John Limber: And I think this is probably the quickest win now. And
+Joshua Lewthwaite: Yeah. Okay, cool. What's the most painful parts or most damaging or most
+John Limber: um
+Joshua Lewthwaite: valuable improvements to be made to this process, do you think?
+John Limber: so this process the
+Joshua Lewthwaite: Yeah. Like what what's the downfall of this process that we're really looking to improve on?
+John Limber: the time like the the process is solid.
+Joshua Lewthwaite: Yeah. Two
+John Limber: Um the process works really well like we've refined it like we get great feedback on the onboarding
+ 
+ 
+00:37:39
+ 
+Joshua Lewthwaite: weeks
+John Limber: process. Um it's the time it's the time and the the manual work that's involved. It's we we could realistically take this process from being a three week it's like a three-we turnaround from even in in the quickest cases it's probably three weeks from sales call to getting live. Um, I wouldn't want to reduce that from a client's perspective too much,
+Joshua Lewthwaite: Yeah.
+John Limber: but we I think we could get that down to we could get that down to a day like with with the
+Joshua Lewthwaite: Save value.
+John Limber: with the with the things that are available now.
+Joshua Lewthwaite: Yeah.
+John Limber: I think we could get that down to a day. That's our our Q two goal is to is to get on boarding like from kickoff call to go live. Reduce that to a day. That's our that's our metric.
+Joshua Lewthwaite: Yeah.
+John Limber: Q Q2
+Joshua Lewthwaite: Yeah. And then this is really the our part in playing that is the efficiency of deal close to kickoff call being the lowest amount of time as possible most efficient because there's even part there like you're saying the sales rep then has to add on their notes like handover notes that I immediately see as a interviewing that same
+ 
+ 
+00:38:50
+ 
+John Limber: instantly.
+Joshua Lewthwaite: agent that gets going right this deal's closed contract is closed one form for
+John Limber: Yeah.
+Joshua Lewthwaite: the customer one form for the sales rep answer it and then it just brings this all in and the sales rep's
+John Limber: Please don't
+Joshua Lewthwaite: job's and they've done it once contract is signed like yo contract signed yeah I'll do the notes the other thing is we just pull the notes existing from HubSpot but that relies on them taking notes all relies on
+John Limber: worry.
+Joshua Lewthwaite: sales input at that point which is why a sales AI agent at the beginning means that the staff member we're not relying on their notes anymore it's in every meeting and that does notes for them so then that
+John Limber: Yep.
+Joshua Lewthwaite: guarantees that flow over okay the next step here is us getting really clear on what an MVP
+John Limber: Yeah, that's that's
+Joshua Lewthwaite: looks and what the what our end vision is with the onboarding AI setup
+John Limber: Everybody
+Joshua Lewthwaite: and then what's the stages of development release we want to do to get to that final version.
+ 
+ 
+00:39:43
+ 
+Joshua Lewthwaite: So that would be our next step. Tim, anything you'll add to
+Tim Shrieves: yeah, I just got a question.
+Joshua Lewthwaite: that?
+Tim Shrieves: Does it have to live in a document or are you looking to present this in a different way?
+Joshua Lewthwaite: Good question. Very good question.
+John Limber: Um I mean
+Tim Shrieves: Yeah.
+John Limber: I don't know um what what would be alternatives?
+Joshua Lewthwaite: What are other ways?
+Tim Shrieves: Well,
+Joshua Lewthwaite: Yeah.
+Tim Shrieves: the way I see it and kind of some of the things I've been working on um for my own projects and in the background is kind of like
+John Limber: Yeah.
+Tim Shrieves: aentic systems that are have a front end where we can plug in tools at the back end to do lots of different things like for instance the research that you mentioned in this could be done agentically um once something comes into the system. the the reason for asking is just like whether this is something that you actually you know is ever client facing
+John Limber: I think I'm the
+ 
+ 
+00:40:36
+ 
+Tim Shrieves: or if this is just for reference and if it's just for reference then this could easily be somewhere else like the information in the database and
+John Limber: right
+Tim Shrieves: there'd be a front end that that that conveys it um the the benefit of that is that once it's in a database AI can access it much better than a Google sheet is in a better form like a better
+John Limber: Yeah,
+Tim Shrieves: format um and that enables other things in the future like AI you know like chat AI is where someone can just ask
+Joshua Lewthwaite: Yep.
+John Limber: absolutely.
+Tim Shrieves: a question about a project and the AI will answer them. So I I I personally don't really use Google Docs for anything AI related apart from his what the plan is and then let's build it in different systems.
+John Limber: Yeah. So,
+Tim Shrieves: Um I I would see there could be a lot of value in that side of things.
+John Limber: you could live in a dashboard.
+Tim Shrieves: Um, so having this information in a dashboard,
+John Limber: Not yet.
+ 
+ 
+00:41:17
+ 
+Tim Shrieves: having various tools in the background that are triggered at certain times that do certain operations and populate that dashboard with that information because then you've got a cohesive system that that works well based on good tech. Uh, not having to integrate with old tech, which is what essentially Google Sheets is. It's a legacy system.
+John Limber: Yeah, that that that makes a lot of sense.
+Joshua Lewthwaite: It's cuz
+John Limber: And would that like with where you're currently at would that be built and like within is that
+Tim Shrieves: Yeah,
+John Limber: we thinking like the dashboard in in core code the
+Tim Shrieves: we' use claw code. There's there like there's plenty of tools that do that type of thing.
+John Limber: dashboard.
+Tim Shrieves: So, it's not really the tool itself. It's really the approach, the tech stack that we use for that, the backend um tools that we implement there.
+John Limber: Yeah.
+Tim Shrieves: So, that that whole thing has access to various tools on an AI layer that uh understands what data is needed, understands what task is uh taking place and then fires off the correct agent with the correct tool.
+ 
+ 
+00:42:07
+ 
+Joshua Lewthwaite: Yeah,
+Tim Shrieves: So it's more the backend architecture rather than the the the actual tool we use to build it. Um
+John Limber: Yeah, sure.
+Tim Shrieves: yeah.
+John Limber: Okay. Um, that would be much better. Yeah.
+Joshua Lewthwaite: that also filters into that long-term vision where like I was saying,
+Tim Shrieves: Okay.
+Joshua Lewthwaite: you got an AI agent that's trained on all of that, but then it's one agent for that entire customer and your whole business.
+John Limber: Let's
+Joshua Lewthwaite: But that then means so to give example of extended value. One is that any team member could just query that agent and find anything. you can query that agent, find anything.
+John Limber: go
+Joshua Lewthwaite: The other is that that agent can be queried by other agents.
+John Limber: back.
+Joshua Lewthwaite: So, they're all talking to each other. But when you have all that information together, you can go, hey, what are all the themes across these clients and yeah, or this agent can just break it all apart and see everything. And so, it's like having visibility across every single part of every single customer.
+ 
+ 
+00:43:04
+ 
+Joshua Lewthwaite: So, it just puts it more towards that system and not held back by old legacy Google Docs and stuff.
+John Limber: Yeah. Right. Um
+Joshua Lewthwaite: And that's where you get a open claw starting to come onto the
+John Limber: yeah, yeah,
+Joshua Lewthwaite: picture.
+John Limber: yeah. That's I like the more we talk about this, I think this is this is the best starting point, which to be fair, Josh, is what you said at the start. So should you
+Tim Shrieves: Nothing
+John Limber: actually
+Joshua Lewthwaite: I appreciate that. I got you. No stress. I appreciate it. Okay, cool. Uh,
+John Limber: um yeah this also means it's
+Joshua Lewthwaite: anything else?
+Tim Shrieves: explained.
+John Limber: it's much easier for us to start because the the process is there like we can you know we've got such a solid
+Joshua Lewthwaite: Sorry.
+John Limber: base preference to then you know start
+Joshua Lewthwaite: Y I I can't help but say as well it means we're doing less work with Meta,
+John Limber: from
+ 
+ 
+00:43:52
+ 
+Joshua Lewthwaite: which is a nightmare to work with with all kinds of issues that tend to come up.
+John Limber: Yeah. Yeah. Yeah. No, definitely.
+Joshua Lewthwaite: We all know Meta is a Meta is the only company who gets away with the worst experience in the
+John Limber: Especially with Oh,
+Joshua Lewthwaite: world.
+John Limber: it's terrible, mate. It's terrible.
+Joshua Lewthwaite: Yep.
+John Limber: We built our whole whole business on metal. It's It's a nightmare.
+Joshua Lewthwaite: Yeah,
+John Limber: The amount of times that's
+Joshua Lewthwaite: we used to we're shifting away from that most of the terms like
+John Limber: Yeah. Yeah.
+Joshua Lewthwaite: Yeah.
+John Limber: With the amount of times our whole business is ground to a halt. It's met disabled our ad account. like 100 clients all their campaigns stop in an instant.
+Joshua Lewthwaite: Yeah.
+John Limber: You can't speak to anyone or do anything about it.
+Joshua Lewthwaite: Yeah.
+John Limber: Like it's is insane.
+Joshua Lewthwaite: Literally. Yeah. Literally it's Yeah. Nobody else can get away with it.
+ 
+ 
+00:44:31
+ 
+Joshua Lewthwaite: Else would go under but not matter.
+John Limber: Um so uh yeah,
+Joshua Lewthwaite: Okay. Anything else?
+John Limber: I one one other thing is obviously we've got time zone issues here. I would love to be able to get my business partner Steve on these calls. you met. Um he's he's he's going to be pretty important to this process.
+Joshua Lewthwaite: Yeah.
+John Limber: He built this whole on boarding process. So, he's gonna know much more about it and be able to spot things that I
+Joshua Lewthwaite: I I don't think the time zone is going to be too bad to be honest because Tim,
+John Limber: won't
+Joshua Lewthwaite: what time is it with you now?
+Tim Shrieves: me. Sorry.
+Joshua Lewthwaite: Yeah. What time is it with you right now?
+Tim Shrieves: Uh just past 1:00. So quart.
+Joshua Lewthwaite: Yeah. Quart and then it's just quarter 4 for me.
+John Limber: Yeah. All right.
+Joshua Lewthwaite: You know, I work late anyway cuz I'm working UAE hours, which is 10:15 in the morning.
+ 
+ 
+00:45:30
+ 
+Joshua Lewthwaite: It's 7:15 a.m.
+John Limber: Yeah.
+Joshua Lewthwaite: in London. So, what that means is for Tim's 2:00,
+John Limber: Yeah,
+Joshua Lewthwaite: it's Steven's 8:00 and then so it I don't think it's much of a problem.
+John Limber: that'll be perfect.
+Joshua Lewthwaite: also so you know we're hiring more resource at the moment as well which crosses time zones more and Chris doesn't have to be on all the calls either that's where I can kind of jump in as project managing it and then Chris is managing it in the back end because the New Zealand and the UK is the most challenging one um so that's where that's not it's not so much of a
+John Limber: Okay. Um, so yeah,
+Joshua Lewthwaite: requirement
+John Limber: could we do call at 8 a.m. UK from now if we have any regular calls
+Joshua Lewthwaite: Yeah. Yeah.
+John Limber: and um we'll invite Steve that that would that would definitely
+Joshua Lewthwaite: Set that up as the regular time, which would be Yep.
+John Limber: work.
+Joshua Lewthwaite: So, that would be in 45 minutes from now.
+ 
+ 
+00:46:19
+ 
+John Limber: Yep.
+Joshua Lewthwaite: Yeah, I think that'll be fine. All good,
+John Limber: Um,
+Joshua Lewthwaite: boys.
+John Limber: okay. Great. And also just to be like like upfront about this. We as an agency we we need to build our knowledge in in this, you know, in this in this realm as well. And in the future,
+Joshua Lewthwaite: Yeah.
+John Limber: I the way I see this, I want to keep this partnership for the long term. Um, but we we really need to sort of be learn about this process and understand what's being built. Um, so yeah, I just want to sort of get give you that like I I really appreciate
+Joshua Lewthwaite: Make sure you guys
+John Limber: like trust and transparency on what's
+Joshua Lewthwaite: totally Yeah,
+John Limber: possible.
+Joshua Lewthwaite: it doesn't work.
+John Limber: By the way,
+Joshua Lewthwaite: Yeah,
+John Limber: on that I've been following Stanley Henry, mate. He's doing some mad things.
+Joshua Lewthwaite: bro.
+John Limber: I'm on his I signed up to his webinar next
+Joshua Lewthwaite: Stanley, I yeah, I said to Stan,
+ 
+ 
+00:47:18
+ 
+John Limber: week.
+Joshua Lewthwaite: I was like, "Stan, are you a Tik Tok creation agency still or are you in the AI education space?" He goes, "Mate, that is a great question." I was like,
+John Limber: Yeah,
+Joshua Lewthwaite: "Cuz I can see what you're enjoying." He's a real tech nerd.
+John Limber: can see that,
+Joshua Lewthwaite: So,
+John Limber: mate.
+Joshua Lewthwaite: he's I've been telling him,
+John Limber: It scares me.
+Joshua Lewthwaite: "Dive into this." He's right into it.
+John Limber: Terrifies me. That's what we're up against.
+Joshua Lewthwaite: Yeah. Yeah. And that's that's the thing of like he's just so all about it. We actually have an arrangement with him where he's getting all these people coming in going, "Can you just do this for me?" He goes, "Yeah, talk to Joel." So,
+John Limber: Oh,
+Joshua Lewthwaite: you've kind of segueed that already. Yeah. Yeah. So,
+John Limber: really?
+Joshua Lewthwaite: cuz Stan's like I Stan is very much like I'm over the agency model. I'm over it. It's just really high costs,
+ 
+ 
+00:48:02
+ 
+John Limber: Yeah.
+Joshua Lewthwaite: really high risk,
+John Limber: Yeah.
+Joshua Lewthwaite: and like okay reward and just lots of headaches and clients and all this stuff. So he I see I'm kind of speaking for him here which he's realizing is he's in AI education.
+John Limber: the
+Joshua Lewthwaite: I think that's his future and doing digital products webinars with like 300 people turning up paying for a ticket.
+John Limber: milk.
+Joshua Lewthwaite: He's like I got a great business make tons of money. I just get to be a nerd which is who he is.
+John Limber: Yeah.
+Joshua Lewthwaite: And then if it comes to development of that he wants nothing to do with it and he goes talk to Josh. Josh will do it all for you. So you've kind of skipped the process with him in a way and jumped ahead.
+John Limber: Yeah, I think um like there's there's definitely opportunities to do what he's done as well
+Joshua Lewthwaite: So
+John Limber: for us. Like I I one thing we we've been thinking about for years is building a like there's so many gym
+ 
+ 
+00:48:45
+ 
+Joshua Lewthwaite: yeah.
+John Limber: owners out there that like want to know how to market their gym, want to know everything we know but can't afford to pay for agency or don't really see the value in that yet. um for years.
+Joshua Lewthwaite: Yeah.
+John Limber: In fact, when we first started this business again, we was the second run at an agency doing this. We were like, our goal has got to be to create an online course where, you know, we can sell it for for £150 and and um sell it to everybody.
+Joshua Lewthwaite: Yeah.
+John Limber: Um now I feel like there's a massive opportunity to do that and just like distill everything we're doing and just put it in a course and AI can help
+Joshua Lewthwaite: Yeah.
+John Limber: you build it like way way quicker than we can.
+Joshua Lewthwaite: 100%.
+John Limber: So that's that's a kind of a side project that we'll be looking at as well.
+Joshua Lewthwaite: 100%.
+John Limber: Um whether or not you help with that or
+Joshua Lewthwaite: Yep. Yeah. And then you got the And then you can do the distribution,
+ 
+ 
+00:49:29
+ 
+John Limber: not.
+Joshua Lewthwaite: too. Yeah. We'll just we'll just see around that time. I think that should could be very very straightforward. Yeah,
+John Limber: Yeah.
+Joshua Lewthwaite: very straight. It can be quite as simple.
+John Limber: Yeah.
+Joshua Lewthwaite: Doesn't have to be complex at all. Especially making like I I shared with you my um AI advisory
+John Limber: Exactly.
+Joshua Lewthwaite: foundations portal, didn't I? Or do I not send that to you?
+John Limber: I think so. I think you did. Maybe I didn't look at it.
+Joshua Lewthwaite: I'll send it through basic like I I built No,
+John Limber: Sorry. I defin Oh,
+Joshua Lewthwaite: you're safe. Yeah, I built that in like one night and it's just a complete portal for everything you need to know about getting into
+John Limber: yeah. Yeah, yeah, yeah. Yes, you did show me. Sorry. Yeah,
+Joshua Lewthwaite: AI.
+John Limber: yeah, yeah. Yeah, you did. Sorry, mate. Yeah,
+ 
+ 
+00:50:03
+ 
+Joshua Lewthwaite: So like building out the core stuff.
+John Limber: you did. I I gave you feedback on it.
+Joshua Lewthwaite: Yeah.
+John Limber: I looked through it,
+Joshua Lewthwaite: Cool.
+John Limber: of course. Yeah. So many things happen.
+Joshua Lewthwaite: Yeah. Yeah.
+John Limber: I can't
+Joshua Lewthwaite: So, so yeah,
+John Limber: remember.
+Joshua Lewthwaite: that's a that's a prime example of the stuff that I'm kind of playing around with myself as a business what we're doing and the stuff Tim plays around with as well. So yeah know there's tons of things there. The other stuff around education side. So obviously as your department we've got a certain amount of resource that we use each month that covers in and with those numbers and then going if you're ever needing more than that and that that's covering hey look we want to move faster so we can put more resource in that's increasing it but also going hey look we want we want
+John Limber: Are you
+Joshua Lewthwaite: workshops every single month and you're and you're actually teaching us how to be doing this and building
+ 
+ 
+00:50:40
+ 
+John Limber: sure?
+Joshua Lewthwaite: this ourselves too. then that's the type of stuff we can look at as the department is like an education series to be teaching you guys. So that's where all the staff know maybe that enables you to go more into it. It also enables you to understand more of what we've built too. So there's all those types of things started off like this now but as that develops out we just see what feels right for the business and we go that way.
+John Limber: Yes,
+Joshua Lewthwaite: Easy.
+John Limber: sounds great. I mean, we we obviously want to scale it.
+Joshua Lewthwaite: Nice.
+John Limber: Like the way we're seeing this this budget we're we're giving you guys is like a
+Joshua Lewthwaite: Yeah.
+John Limber: salary and as this grows, we're going to need more people working on this. So, that's how we look at it.
+Joshua Lewthwaite: Yeah. Yeah. It becomes the core of the
+John Limber: Um maybe maybe we reduce our actual account and spend more on you guys.
+Joshua Lewthwaite: same.
+ 
+ 
+00:51:29
+ 
+John Limber: Like I I uh see that's potentially the way it's going to go.
+Joshua Lewthwaite: Yeah.
+John Limber: So, yeah.
+Joshua Lewthwaite: Over time.
+John Limber: Yeah.
+Joshua Lewthwaite: Nice.
+John Limber: Um All right.
+Joshua Lewthwaite: All right.
+John Limber: Great.
+Joshua Lewthwaite: Carissa, anything else? You're good. clear on next steps. Okay, cool.
+Tim Shrieves: Yeah.
+Joshua Lewthwaite: Thanks very much, boys. John, thanks for taking us through all that right now and coming in with the intention of the shift and we got it done and now we move.
+John Limber: Yeah. Um,
+Joshua Lewthwaite: We like fast
+John Limber: thank thank you for your understanding and patience,
+Joshua Lewthwaite: movement.
+John Limber: guys. Um, is if there's anything if there's anything I can what can I send you now?
+Joshua Lewthwaite: We're good, dude.
+John Limber: Like what what would be useful? Do you want me to put you through this process?
+Joshua Lewthwaite: I think send us the process and send us all these documents that you have taken us through as well. The meeting recorder can record our conversation, but terms of recording the visual, it's not capturing that as well.
+ 
+ 
+00:52:16
+ 
+Joshua Lewthwaite: So, you can send us through these actual documents or template versions, whatever you prefer versus actual clients,
+John Limber: Yeah.
+Joshua Lewthwaite: completely up to you. And then that means we have reference points and Tim can analyze it more.
+John Limber: um question on the um currently the the the agreement is is like one of the pivotal points in the process. It's in Panda dos.
+Joshua Lewthwaite: Yes. The dogs.
+John Limber: I don't know if that needs to I don't know if it's as pivotal as I think it is. I think we could probably just It's currently everything's just built on Zapia at the moment, right? Zapia links between everything. Um,
+Joshua Lewthwaite: Yeah.
+John Limber: so my question was going to be is there a better way of doing the agreement which is not Pandandaox? Maybe that could live in HubSpot. I don't know. Like do you guys work
+Joshua Lewthwaite: I wouldn't that's not something I think so incremental to be changing around because then you're changing your whole
+John Limber: within
+Joshua Lewthwaite: entire contract process remaking contracts for what game so long as Pandidox is able to communicate to other systems using Zapia it can then it triggers the AI my immediate thought is do we need to analyze the contract for information that's the the key thing and if we do it's going well does Panda docs let us if we're not needing that doesn't we just need to know the contract is fine which we can't
+ 
+ 
+00:53:37
+ 
+John Limber: Yeah, you would it would need to not not for the MVP, but if we get to a point where this is then feeding an agent that knows everything about the
+Joshua Lewthwaite: do
+John Limber: client. Um, one of the questions that we get asked is what's my what are the terms around cancellation? what are the you know what are my what's my minimum um service period or you know like this changes agreement by agreement we you manually change this sometimes depending on the conversation of the client or we negotiate so that would need to be in
+Joshua Lewthwaite: I think that's a that's a very laser thing though
+John Limber: there
+Joshua Lewthwaite: such as Yeah, I think that's a later thing to look at because that's where customers now talking to the AI agent to understand things which
+John Limber: Yeah.
+Joshua Lewthwaite: comes back to the original Telegram scope that's a whole later thing after this.
+John Limber: Yeah.
+Joshua Lewthwaite: So I think that's where the recreation of hey we should change systems I think isn't needed now
+John Limber: Okay.
+Joshua Lewthwaite: but we can look at when we need to do that type of build but for the short term it's not
+ 
+ 
+00:54:36
+ 
+John Limber: Yeah. I mean, we're potentially we're potentially looking at it anyway.
+Joshua Lewthwaite: needed.
+John Limber: Um but I mean, as long as don't hinder this process as it is,
+Joshua Lewthwaite: Okay.
+John Limber: we can we can switch that further down the line.
+Joshua Lewthwaite: Yeah. Yeah. For the key value we're looking to achieve.
+John Limber: Yeah.
+Joshua Lewthwaite: I don't think it does. Tim, if Tim discovers halfway through that it does, then he'll say and then we can share that with you.
+John Limber: Yeah. So, if we let's obviously think in longer term if we were aiming to you know we'd still be aiming to build an
+Joshua Lewthwaite: Yeah.
+John Limber: agent that answer questions from a client in the future. Um by having the obviously we're starting to build agents
+Joshua Lewthwaite: Yeah.
+John Limber: as soon as somebody goes through the new onboarding process.
+Tim Shrieves: What are you saying?
+John Limber: Essentially, we've got the early stages of an agent that's that's starting to gather knowledge on that client.
+Joshua Lewthwaite: Nice.
+John Limber: Um, with with that agent going through a process that has pandocks in our old agreements, is that then going to, you know, can we retrospectively switch out that agreement at a later date and and access new information on a new agreement?
+ 
+ 
+00:55:44
+ 
+Joshua Lewthwaite: I think it depends on I think Tim,
+John Limber: I love
+Joshua Lewthwaite: you're probably best to answer this. I got my thoughts on it, but I'll let you go
+John Limber: it.
+Tim Shrieves: Yeah. So, I've not used Panda Dos before,
+Joshua Lewthwaite: first.
+Tim Shrieves: but uh potentially we might be able to do that. Uh we would need to look into it and see what kind of APIs they've got and also where all of that data is
+Joshua Lewthwaite: Yeah.
+Tim Shrieves: stored. Um because we'd obviously need to populate the equivalent of that document that you've shared. So, uh, as long as we got access to the data, then yeah, we could do it historically, but we would need to
+Joshua Lewthwaite: I
+John Limber: Um,
+Tim Shrieves: check
+Joshua Lewthwaite: Hey.
+John Limber: so how how um easy is it to work with HubSpot looking forward?
+Tim Shrieves: uh, it will be easy enough. They're a big company. They they'll have a comprehensive API. So,
+John Limber: Yeah. Okay.
+Tim Shrieves: I I would have thought that's that straightforward.
+ 
+ 
+00:56:24
+ 
+John Limber: Yeah, I'm pretty sure they are. Okay. Yeah.
+Joshua Lewthwaite: Yeah,
+John Limber: I mean,
+Tim Shrieves: Yeah.
+Joshua Lewthwaite: hopefully have one of the better
+John Limber: we're thinking about getting our agreements into HubSpot.
+Joshua Lewthwaite: ones.
+John Limber: It's got it's got that it's got that natively now. It didn't when we started. Um, so yeah, good. Just questions just considering, you know, we're thinking
+Joshua Lewthwaite: What what I would say is if you are getting if you're like hey look we're changing platforms here's our
+John Limber: about
+Joshua Lewthwaite: current infrastructure we're thinking of changing for these outcomes give us an opportunity to share our comments on it so that way we can make sure it's AI proof I end of the day everything's going
+John Limber: Yeah. Mhm.
+Joshua Lewthwaite: to be AI proof for the future it's seeing what's AI proof right now to be utilizing that's the
+John Limber: Yeah. Yeah. Well, if you do know Yeah.
+Joshua Lewthwaite: because we could investigate hotspots API off the bat and just say don't do that yet.
+John Limber: That'd be great. I mean,
+Joshua Lewthwaite: Wait.
+John Limber: obviously the HubSpot is part of this process currently anyway, like this is that's where our CRM is.
+Joshua Lewthwaite: Yeah.
+John Limber: That's where our clients have are kept and we we're going to be sort of do using that much more going
+Joshua Lewthwaite: It's your hub. Yeah.
+John Limber: forward. So yeah, if you if you are doing research on how easy it is to integrate with HubSpot and APIs and things, then it'd be good to know the level of uh kind of capability you've got of getting in there.
+Joshua Lewthwaite: That looks like Yeah.
+John Limber: Um, sweet. Okay, thank you fellas. Good call.
+Joshua Lewthwaite: Cool. Yeah, we'll we'll keep it really focused on the the most important things and then get this off the bat and then we're
+John Limber: Cheers.
+Joshua Lewthwaite: moving.
+John Limber: Thanks.
+Joshua Lewthwaite: Cool. Okay. All right. We'll be in touch with the plan in just two things.
+ 
+ 
+Transcription ended after 00:58:18
+
+This editable transcript was computer generated and might contain errors. People can also change the text after it was created.
