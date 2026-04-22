@@ -12,10 +12,14 @@ This is a **project planning and documentation workspace** for the IzzyAgents & 
 
 ## Directory Structure
 
-- `scope/` — Project scope documents and development priorities
-- `meeting_notes/` — Onboarding and meeting transcripts/summaries
-- `questionnaire_responses/` — Client discovery questionnaire data (CSV)
-- `docs/` — Additional documentation
+- `scope/` - Project scope documents and development priorities
+- `meeting_notes/` - Onboarding and meeting transcripts/summaries (subdirs per topic, e.g. `meeting_notes/onboarding/`)
+- `questionnaire_responses/` - Client discovery questionnaire data (CSV)
+- `emails/` - Source email briefs from Bullet (e.g. `Bullet Onboarding Process.pdf`)
+- `docs/` - Plan documents, Loom summaries, and other project documentation
+  - `docs/phase-1-plan.md` and `docs/phase-1-plan-client.md` - current Phase 1 plans (internal + client-facing)
+  - `docs/loom-video-summaries/` - Steve's walkthroughs of the current onboarding mechanics (OB-Phase-1, OB-Phase-2)
+  - `docs/archive/` - Deferred earlier-scope plans (knowledge bank, Telegram bot)
 
 ## Client Context
 
@@ -26,23 +30,43 @@ This is a **project planning and documentation workspace** for the IzzyAgents & 
 
 ## Phase 1: Onboarding Process Automation (Months 1-2)
 
-This is the sole active phase. The goal is to automate Bullet's end-to-end client onboarding process (sales call through campaign go-live) to compress agreement-to-go-live from ~2 weeks toward a single day. Source brief: `emails/Bullet Onboarding Process.pdf` (John Limber, 13/04/2026).
+This is the sole active phase. The goal is to automate Bullet's end-to-end client onboarding process (sales call through campaign go-live) to compress agreement-to-go-live from ~2 weeks toward a single day.
 
-Scope is defined in `docs/phase-1-plan.md`. Previous Phase 1 scope (internal knowledge bank + client-facing Telegram bot) is deferred to a later phase; archived under `docs/archive/`.
+Primary sources of truth for the plan:
+- `docs/phase-1-plan.md` (internal plan, current version v3 - 22/04/2026)
+- `docs/phase-1-plan-client.md` (client-facing version)
+- `emails/Bullet Onboarding Process.pdf` (John Limber, 13/04/2026 - original brief)
+- `meeting_notes/onboarding/` (most recent: IzzyAgents & Bullet Digital Media 21/04/2026)
+- `docs/loom-video-summaries/` (Steve's OB-Phase-1 and OB-Phase-2 walkthroughs of the current onboarding mechanics - authoritative source for today's Zapier chains, GHL workflows, and manual workarounds)
+
+Previous Phase 1 scope (internal knowledge bank + client-facing Telegram bot) is deferred to a later phase; archived under `docs/archive/`.
 
 Key deliverables:
-- **Trigger orchestration layer** - a signed agreement fans out to Slack, Asana, Google Sheets/Drive/Docs/Calendar, Stripe, Xero, Timely, Gmail/GHL reliably and idempotently
-- **Onboarding status dashboard** - single view of every client's step, platform links, and action health
-- **Sales call intelligence** - transcript to structured summary written straight into the onboarding Google Doc
-- **Kick-off summary generator** - AI-drafted post-call summary + Stripe subscription activation
+- **Database + dashboard as the central source of truth** - Postgres holds all client data; dashboard is live from Sprint 1 (not a Sprint 4 polish item). Google Sheets, Google Docs, and GoHighLevel custom fields become optional mirrors, never the primary store
+- **Trigger orchestration layer** - a PandaDoc signing event fans out to Slack, Asana, Google Sheets/Drive/Calendar, Stripe, Xero, Timely, Gmail/GHL reliably and idempotently; retires the current Zapier + Pabbly chain
+- **Onboarding status dashboard** - single view of every client's step, platform links, knowledge profile, and per-action health; live asset checklist per client replacing the 16-branch GHL Outstanding Elements workflow
+- **Sales call intelligence** - transcript to structured summary stored in the client's knowledge profile in the database and surfaced in the dashboard
+- **Kick-off follow-up email generator** - AI-drafted post-call email with deterministic offer pricing (75% membership anchor + consultation + body scan + bring-a-friend/MBG framing); Stripe subscription activation after sign-off
+- **Client research agent** (Sprint 4) - website scraping, competitor identification, Meta audience sizing, offer suggestions stored in the knowledge profile
+
+Key decisions (confirmed 21/04/2026):
+- **Agreement platform: PandaDoc stays** (HubSpot does not offer the document handling Bullet needs; PandaDoc is already natively integrated with HubSpot). No abstraction layer.
+- **Client onboarding portal: GHL portal retained for Phase 1**. Custom-branded portal is a Phase 2 engagement deliverable.
+- **Pabbly middleman: retired**. Direct GoHighLevel API for sub-account creation, with returning-client existence check.
+- **Loom videos as documentation standard**: Steve continues to record Loom walkthroughs of team processes to feed future AI agents.
+
+Long-term vision (from 21/04/2026 call):
+- **AI agent conveyor belt**: individual agents per step (sales, onboarding, research, post-onboarding) reporting to one orchestrator agent
+- **Agnostic interface**: clients interact only with the IzzyAgents front-end; underlying tools (Meta, GHL, Canva, etc.) can be swapped without clients feeling the churn ("Perplexity for gyms and fitness")
+- Phase 1's database, orchestration layer, and knowledge profile are the concrete foundation for this vision
 
 Key constraints:
-- Platforms involved: HubSpot, PandaDoc, GoHighLevel, Asana, Stripe, Xero, Timely, Slack, Google Workspace (Sheets/Docs/Drive/Calendar/Gmail), Meta Business Manager, Canva, Loom
-- Agreement location (PandaDoc vs HubSpot) is under client review; orchestrator abstracts the signing-webhook source
-- GoHighLevel conditional email workflows are triggered, not replaced
+- Platforms involved: HubSpot, PandaDoc, GoHighLevel, Asana, Stripe, Xero, Timely, Slack, Google Workspace (Sheets/Docs/Drive/Calendar/Gmail), Meta Business Manager, Canva, Loom, Leadsy (for one-click Facebook asset access)
+- GoHighLevel conditional email workflows are triggered where they still make sense; the 16-branch Outstanding Elements tech follow-up workflow is replaced with a DB-driven dashboard checklist and single conditional email template
 - Zoom to Google Meet migration in progress; transcript capture must work against whichever is live
 - Internal-facing tool; single-tenant (Bullet team only)
-- Every fan-out action is idempotent, retryable, and individually auditable - partial failures must be visible, never silent
+- Every fan-out action is idempotent, retryable, and individually auditable - partial failures must be visible in the dashboard, never silent
+- Every job writes its outcome (success/failure, external ID, retry count) back to Postgres - nothing is inferred from live platform state at view-time
 
 ## Document Formatting Rules
 

@@ -1,8 +1,8 @@
 # Bullet Digital Media - Phase 1 Plan: Onboarding Process Automation
 
 **Prepared by**: IzzyAgents Technical Team
-**Date**: 16/04/2026
-**Status**: Draft v2 - Revised after 08/04/2026 meeting
+**Date**: 22/04/2026
+**Status**: Draft v3 - Revised after 21/04/2026 meeting and Steve's process Loom walkthroughs (OB-Phase-1, OB-Phase-2)
 
 ---
 
@@ -33,7 +33,7 @@ Previous Phase 1 scope (internal knowledge bank and client-facing Telegram bot) 
 
 ## 2. Current Onboarding Process (As-Is)
 
-Reproduced from John's email and confirmed during the 08/04/2026 meeting walkthrough. Each step has platform touchpoints that are candidates for automation.
+Reproduced from John's 13/04/2026 email, confirmed during the 08/04/2026 meeting walkthrough, and expanded with the platform-level mechanics from Steve's 21/04/2026 Loom walkthroughs (`docs/loom-video-summaries/OB-Phase-1.md` and `docs/loom-video-summaries/OB-Phase-2.md`). Each step has platform touchpoints that are candidates for automation.
 
 | # | Step | Platforms | Typical Duration |
 |---|------|-----------|------------------|
@@ -59,33 +59,38 @@ Phase 1 is structured around an **MVP milestone at the end of Sprint 2** (see Se
 
 ### 3.1 Trigger Orchestration Layer (Primary Deliverable)
 
-A central orchestration service that listens for the signing event (PandaDoc webhook or HubSpot event - see Section 3.1.2 on the agreement platform decision) and fans out to every downstream platform in parallel. Today this is a mixture of manual and semi-manual Zapier automations; Phase 1 replaces most of these with direct API integrations for reliability, observability, and retry control.
+A central orchestration service that listens for the PandaDoc signing event (Section 3.1.2) and fans out to every downstream platform in parallel. Today this is a 47+ step Zapier chain with a Pabbly bridge for GoHighLevel sub-accounts; Phase 1 replaces it with direct API integrations for reliability, observability, and retry control.
 
 #### 3.1.1 Zapier: Replace vs Retain
 
-Bullet's current automation runs entirely through Zapier. For Phase 1, the default approach is to build direct API integrations - this gives us idempotency, retry logic, per-action status tracking in the dashboard, and eliminates Zapier as a single point of failure. However, some integrations may be better left in Zapier where the effort of a direct integration outweighs the benefit:
+Bullet's current automation runs entirely through Zapier, with a Pabbly webhook bolted on to cover the one thing Zapier cannot do (create a GoHighLevel sub-account). Steve's Loom walkthroughs (OB-Phase-1, OB-Phase-2) give us the full inventory. For Phase 1, the default approach is to build direct API integrations - this gives us idempotency, retry logic, per-action status tracking in the dashboard, and eliminates Zapier (and Pabbly) as a single point of failure.
 
-**Build directly (recommended for most)**:
-- HubSpot, Stripe, Xero, Google Workspace (Sheets/Docs/Drive/Calendar), Slack, Asana - these are core to the orchestration flow and need retry/status visibility
-- Any integration where we need to read data back (bidirectional)
+**Current Zap inventory (from Loom walkthroughs)**:
 
-**Evaluate for Zapier delegation**:
-- Timely - if their API is limited or poorly documented, a webhook to Zapier may be simpler
-- Any one-off notification or simple write-only action where Zapier already works reliably
+| Zap | Trigger | Actions | Status |
+|-----|---------|---------|--------|
+| `Document Completed` fan-out | PandaDoc agreement signed | 47+ sequential actions: Pabbly (sub-account), Google Sheet row, Slack notification, Xero contact + draft invoice, ~25 Google Drive folders, GHL contact + custom fields, Asana project + finance task, Timely client | Partly unreliable; folder tree partly legacy |
+| `OB Survey Complete` | GHL survey submission | Pabbly (sub-account again - possibly duplicating), Google Doc from template + appended survey answers, Slack, pipeline stage update, sheet update, kick-off email | Pabbly step likely broken |
+| `Kickoff Call Booked - Update CSS` | HGL webhook on kickoff booking | Find Asana finance task, update due date to kickoff date | Sync is irregular - Steve manually corrects every Monday |
+| `Payment Received - Update CSS` | Stripe new charge | Lookup sheet row by email, update status to "Payment Received" | Working |
 
-The decision per integration should be made during Sprint 2 when we have hands on each API. For any Zapier-delegated action, the orchestrator still sends the webhook and tracks success/failure - Zapier becomes a transparent execution layer rather than the orchestration layer.
+**Build directly (recommended)**:
+- HubSpot, Stripe, Xero, Google Workspace (Sheets/Docs/Drive/Calendar), Slack, Asana, Timely, GoHighLevel - all core to the orchestration flow and all need retry/status visibility
+- Pabbly is retired entirely: we call the GHL API directly for sub-account creation (this also fixes the current duplicate-sub-account behaviour when a returning client signs for a second site)
+- Leadsy (used today for one-click Facebook asset access) stays as a link emitted by our system
 
-**Question for Steve (added to Section 11)**: Which Zapier automations exist today, what do they connect, and which ones have been unreliable?
+**Where Zapier might remain**:
+- Truly one-off, write-only notifications where building a direct integration adds effort without reliability benefit. No such candidates have emerged yet from the Looms - default position is retire Zapier.
 
-#### 3.1.2 Agreement Platform: PandaDoc vs HubSpot
+Every fan-out action, whether direct or delegated, writes its outcome (success, failure, retry count, external ID) back to Postgres. The database is the source of truth; the dashboard reads from it.
 
-Bullet currently uses PandaDoc for agreements, integrated with HubSpot via Zapier. During the 08/04/2026 meeting, John mentioned they are considering moving agreements into HubSpot natively. This decision affects the signing-event trigger at the heart of the orchestration layer.
+#### 3.1.2 Agreement Platform: PandaDoc (Confirmed)
 
-**Current plan**: Build for PandaDoc as the signing trigger (webhook on agreement completion). PandaDoc webhooks are best-effort, so the orchestrator pairs them with polling/reconciliation to ensure no signing events are missed.
+**Decision confirmed at the 21/04/2026 meeting**: Bullet stays on PandaDoc. HubSpot does not offer the level of document handling they need, and PandaDoc is already natively integrated with HubSpot. Phase 1 builds directly against the PandaDoc signing webhook with no abstraction layer for a future HubSpot switch.
 
-**If Bullet confirms the move to HubSpot**: We would build for HubSpot agreement events instead, removing the PandaDoc integration entirely. This is the preferred outcome - it eliminates a platform dependency, simplifies the webhook architecture (HubSpot webhooks are more reliable), and means one fewer API to maintain. Building around two systems when one is being retired adds unnecessary complexity.
+PandaDoc webhooks are best-effort, so the orchestrator pairs them with polling/reconciliation against the PandaDoc API to ensure no signing events are missed. Client details continue to flow from HubSpot into the PandaDoc template at document creation time; the signing event then becomes our orchestrator trigger.
 
-**Recommendation**: Confirm the timeline for moving agreements to HubSpot before Sprint 1 begins. If the move will happen during or before the Phase 1 build window, we should build for HubSpot only and skip PandaDoc. If PandaDoc will remain in use beyond Phase 1, we build for PandaDoc now with an abstraction layer that makes the future switch straightforward.
+PandaDoc currently holds two templates (UK and International); the orchestrator treats both as the same trigger and uses the legal entity captured in the document to route Xero and Stripe accordingly.
 
 On a successful signing event, the orchestrator performs:
 
@@ -129,31 +134,46 @@ A lightweight internal dashboard (web) that surfaces a single row per client wit
 
 This becomes the single source of truth for "where is this client?" replacing scattered lookups across Google Docs and platform-specific views.
 
-### 3.4 Client Onboarding Portal (Evaluate / Supporting Deliverable)
+### 3.4 Client Onboarding Portal (Decision: GHL Portal Retained for Phase 1)
 
-Bullet's current onboarding portal is built in GoHighLevel and presents a basic form-style experience for new clients to submit business information after signing. There is an opportunity to replace this with a custom-built portal that:
+**Decision confirmed at the 21/04/2026 meeting**: A custom-branded client portal is planned as a Phase 2 engagement deliverable (not Sprint 2 of Phase 1). John immediately supported the custom portal concept for the customer-facing product experience, but framed it as phase two work to avoid bloating Phase 1 scope.
 
-- Provides a polished, branded onboarding experience with better UX than the current GHL form
-- Captures all the same information the GHL portal does today, writing it directly into our database
-- Syncs the captured data to GoHighLevel via webhook so GHL automations continue to work as before
-- Gives the internal team visibility on portal progress - whether the client has started, how far through they are, and which sections are incomplete
-- Feeds the per-client knowledge profile (Section 3.9) immediately on submission rather than requiring a separate data extraction step
+**Phase 1 approach**:
+- Keep the current GoHighLevel onboarding portal (OB V2 survey) in place
+- Ingest submitted data into our database via the GHL webhook already fired on survey completion
+- Surface the submitted data in the dashboard and in the per-client knowledge profile (Section 3.9) immediately on submission
+- Show portal progress in the dashboard based on the GHL contact's tag/stage state (started, in progress, sections incomplete)
 
-**Advantages over keeping the GHL portal**:
-- Data lands in our database first, not in GHL's system where it needs to be pulled out
-- We control the design and can match Bullet's brand standards
-- Progress tracking is native to the dashboard rather than requiring GHL API polling
-- Future AI features (e.g. smart field suggestions, progressive disclosure based on business type) are straightforward to add
+**Known limitations of the current GHL portal that we accept for Phase 1** (from Steve's OB-Phase-1 walkthrough):
+- Redundant questions (name and business name asked in both PandaDoc and the portal; small-group/large-group asked in up to three separate sections due to form layout)
+- Brand asset questions (fonts, slogans, colours) that could be derived from the website
+- Convoluted offer-pricing flow
 
-**Trade-off**: This is additional build effort in Sprint 2. If Bullet is satisfied with the current GHL portal, we can keep it and ingest the data via GHL webhooks/API instead. The data-first benefits still apply either way - the question is whether the improved client experience justifies the build.
+These are real UX issues but replacing the portal is not the lever for a single-day onboarding in Phase 1. The orchestration and knowledge-profile work deliver the time saving; Phase 2's custom portal then delivers the customer-facing product experience on top of a stable backend.
 
-**Pending confirmation from Bullet** (see Section 11, question 14): Is refreshing the onboarding portal a priority? If yes, we scope it into Sprint 2 alongside the core fan-out. If no, we keep the GHL portal and pull data via their API.
+**What Phase 1 still delivers on the portal side**:
+- Live visibility in the dashboard of which clients have and have not completed the survey
+- No manual "did they do it?" lookups in GHL
+- Automated chase emails continue to run in GHL (we do not rebuild them)
 
 ### 3.5 Kick-Off Follow-Up Email Generator (Supporting Deliverable - MVP)
 
 After the Step 4 kick-off call, AI generates the detailed follow-up email that the digital specialist currently writes manually. This email confirms everything discussed: the agreed offer, campaign structure, ad budget, creative requirements, setup timeline, and any outstanding items. The specialist reviews and edits rather than drafts from scratch.
 
 John specifically identified this as a key MVP feature during the 08/04/2026 meeting. Positioned in Sprint 2 to ship with the MVP milestone.
+
+**Offer pricing calculator (from Steve's OB-Phase-2 walkthrough)**:
+
+The follow-up email today encodes a deterministic pricing structure that the digital specialist calculates manually on the call. We build this as a structured generator inside the email tool so the email comes out with numbers already worked out:
+
+- `total_value = discounted_membership + consultation_value + (body_scan_price × 2 if applicable)`
+- Discounted membership anchor: 75% of monthly for a standard 21-28 day program (adjusted per agreed program length)
+- Consultation value: duration and stand-alone price per the portal answers
+- Body scan value: stand-alone price × 2 (pre/post) when the gym offers scans
+- Bring-a-friend framing and money-back-guarantee framing appended as optional blocks based on portal answers
+- Campaign flow selection: low-ticket (checkout page) vs high-ticket (application + consultation booking funnel) - drives the funnel template choice downstream
+
+The AI generates the prose; the calculator supplies the numbers. The specialist reviews, adjusts, and sends.
 
 ### 3.6 Kick-Off Stripe Activation (Supporting Deliverable)
 
@@ -195,6 +215,24 @@ This knowledge profile is:
 
 Josh's vision from the 08/04/2026 meeting: "one agent per customer that knows everything about that customer - sales calls, agreements, kickoff notes, research - and becomes a queryable resource." This section is the data foundation that makes that vision possible. Future phases layer conversational AI on top of it.
 
+At the 21/04/2026 meeting this vision was extended: John described an "AI agent conveyor belt" where individual agents own each step (sales, onboarding, research, post-onboarding) and report to one overall orchestrator agent, with an "agnostic interface" that lets Bullet swap best-in-class underlying tools (Meta, GHL, etc.) without clients seeing the churn. Josh framed this as "the perplexity for gyms and fitness". Phase 1's database, orchestration layer, and knowledge profile are the concrete foundation for that long-term architecture.
+
+### 3.10 Legacy State Replacements (Supporting Deliverable)
+
+Steve's OB-Phase-1 and OB-Phase-2 Looms exposed specific legacy workflows that Phase 1 replaces. Each is a concrete pain point resolved by the database-first orchestration model:
+
+| Legacy workflow | Problem today | Phase 1 replacement |
+|-----------------|---------------|---------------------|
+| **Pabbly middleman for GHL sub-accounts** | Zapier cannot create GHL sub-accounts; Pabbly bridges it but has duplicate triggers across two Zaps and is "probably broken" in places | Direct GHL API call from the orchestrator; Pabbly retired entirely |
+| **Returning-client sub-account duplication** | Same client signing for a second site creates a duplicate GHL sub-account; manual cleanup required | Orchestrator checks for existing GHL contact/sub-account by email before creating |
+| **16-branch Outstanding Elements tech follow-up** | GHL workflow with a 16-path decision tree (ad account × reg docs × headshot × brand guidelines) sending one of 16 email variants; Sam manually chases from there | Single client-assets table in Postgres with boolean status per required asset; dashboard shows a live checklist per client; one email template with conditional blocks, driven by DB state |
+| **Monday manual Asana finance-date sync** | Kickoff date changes break the Zapier Asana sync; Steve manually corrects every Monday | Orchestrator listens for kickoff-calendar changes and writes directly to Asana with idempotency; date mutations propagate automatically |
+| **Timely project creation (manual)** | Only the Timely *client* auto-creates; the *project* is manual so Sam can set `time_budget_hours = monthly_fee / 100` and assign team members | Orchestrator auto-creates the project with the calculated budget; team assignment remains manual (or moves to a dashboard action) |
+| **Google Doc as de-facto source of truth** | Sales notes pasted manually into a Doc; survey answers auto-appended; pre-call research pasted in red; call notes added in red; team reads this Doc as the "single pane" | Database is the source of truth; dashboard shows the equivalent view (structured, not pasted); Google Doc becomes an optional export for team members who prefer that format |
+| **Amex not accepted in PandaDoc payment capture** | Rare cases require extracting Amex details manually outside the PandaDoc flow | Flagged; accepted as-is for Phase 1 unless client asks otherwise |
+
+Each of these has a line of status in the dashboard so the team can see, at a glance, that the legacy pain is gone.
+
 ---
 
 ## 4. Technology Stack (Proposed)
@@ -214,7 +252,7 @@ Josh's vision from the 08/04/2026 meeting: "one agent per customer that knows ev
 | Platform | Direction | Mechanism |
 |----------|-----------|-----------|
 | HubSpot | Read/Write | Official API + webhooks |
-| PandaDoc | Read (webhook) | Signing webhook; may be replaced by HubSpot agreements - see Section 3.1.2 |
+| PandaDoc | Read (webhook + API) | Signing webhook with polling/reconciliation against the API; PandaDoc confirmed as agreement platform (Section 3.1.2) |
 | GoHighLevel | Read/Write | API + webhooks for portal completion |
 | Asana | Write | API (task list templates) |
 | Stripe | Write | API (customers, payment methods, subscriptions) |
@@ -329,12 +367,14 @@ Row-level security is scoped per team role rather than per tenant (single-tenant
 | **Platform change of shape** - HubSpot / GHL / Asana change APIs | Version-pinned SDKs, contract tests against each provider, alerts on schema drift |
 | **Template drift** - Asana templates evolve manually | Templates stored by ID with checksum monitoring; any drift flagged in dashboard |
 | **Data currency** - signing before payment info captured | Orchestrator waits for Stripe payment method before triggering financial provisioning |
-| **Agreement platform change mid-project** - PandaDoc to HubSpot during the build | Abstraction layer at the signing-webhook boundary means only the adapter changes. Confirm timeline before Sprint 1 to avoid building for a system that is being retired (see Section 3.1.2) |
 | **Research agent accuracy** - website scraping or competitor identification returns incorrect data | Research output is presented as suggestions for human review, not used for autonomous decisions in Phase 1 |
+| **Returning-client sub-account duplication** - same email signing for a second site creates duplicate GHL sub-accounts | Orchestrator checks for existing GHL contact/sub-account by email before creating; dashboard surfaces the second-site relationship to the team |
+| **Kickoff date mutations breaking finance sync** - client reschedules kick-off and Asana finance date falls out of step (today requires Steve's Monday manual fix) | Orchestrator subscribes to calendar-change events and updates Asana finance task date idempotently; dashboard shows last-known scheduled date and drift from payment date |
+| **Amex edge case in PandaDoc** - payment capture fails for Amex, occasionally breaking the signing flow | Accepted as-is for Phase 1; orchestrator flags unpaid agreements distinctly so finance picks up manual capture without the onboarding pipeline stalling |
 
 ### Known Platform Limitations
 
-- **PandaDoc webhooks** are best-effort; must be paired with polling/reconciliation to ensure no signing events are missed. This limitation is one reason to favour the HubSpot move if the timeline allows (see Section 3.1.2).
+- **PandaDoc webhooks** are best-effort; must be paired with polling/reconciliation against the PandaDoc API to ensure no signing events are missed. Mitigated by a daily reconciliation job and a manual replay endpoint.
 - **GoHighLevel conditional email logic** is worth preserving in GHL rather than rebuilding in code; the orchestrator triggers the correct GHL workflow rather than sending directly.
 - **GHL AI builder** is a recent release (noted by John, 08/04/2026); stability and API access should be validated before building the Campaign Guide Assembly integration.
 - **Meta Marketing API** audience sizing queries are subject to rate limits and may return approximate data; sufficient for research agent suggestions but not for precise targeting.
@@ -349,10 +389,11 @@ Detailed TDD task breakdown to follow in `docs/sprint-plan.md` once this archite
 
 ### Sprint 1 (Weeks 1-2): Foundation + Sales Call Intelligence
 
-- Project scaffold, Postgres schema (including `client_knowledge` table), auth, dashboard shell
-- HubSpot + PandaDoc webhook ingestion for agreement signing events (verified, idempotent, logged; platform depends on Section 3.1.2 decision)
+- Project scaffold, Postgres schema (including `client_knowledge` table), auth, dashboard shell - the dashboard is live from Sprint 1, not a Sprint 4 polish task
+- HubSpot + PandaDoc webhook ingestion for agreement signing events (verified, idempotent, logged)
+- Direct GoHighLevel API client for sub-account creation (retires Pabbly) with returning-client existence check
 - **Sales Call Intelligence**: transcript capture (Zoom/Google Meet) -> AI-generated structured summary -> stored in client knowledge profile -> visible in dashboard
-- Read-only dashboard view: every signed agreement appearing with status "captured", plus AI sales summaries for any clients with transcripts
+- Read-only dashboard view: every signed agreement appearing with status "captured", plus AI sales summaries for any clients with transcripts; dashboard is the single source of truth for "where is this client?" from day one
 - **Sprint 1 value**: team can see AI-generated sales summaries in the dashboard immediately, replacing the manual "paste transcript into Claude" workflow
 
 ### Sprint 2 (Weeks 3-4): Core Fan-Out + Follow-Up Email + MVP Milestone
@@ -364,13 +405,15 @@ Detailed TDD task breakdown to follow in `docs/sprint-plan.md` once this archite
 - End-to-end happy path: signed agreement creates all non-financial artefacts automatically
 - **MVP MILESTONE**: demo to Bullet team, validate with real (or simulated) onboarding flow
 
-### Sprint 3 (Weeks 5-6): Financial Integrations & Communication
+### Sprint 3 (Weeks 5-6): Financial Integrations, Communication & Legacy Replacements
 
 - Stripe (customer + payment method + deferred subscription activation post-kickoff sign-off)
-- Xero (contact)
-- Timely (client)
-- Gmail / GHL conditional technical requirements emails
+- Xero (contact, with UK vs International routing)
+- Timely (client auto-create; project auto-create with calculated `monthly_fee / 100` time budget)
+- **Outstanding Elements replacement**: client-assets table + live dashboard checklist per client + single conditional email template (replaces the 16-branch GHL workflow; see Section 3.10)
+- Gmail / GHL conditional technical requirements emails (trigger existing GHL workflows where they still make sense; otherwise send from our system)
 - Stripe subscription activation triggered after kick-off follow-up email sign-off
+- Kickoff-date change propagation: calendar change auto-updates Asana finance task (eliminates Steve's Monday manual sync)
 
 ### Sprint 4 (Weeks 7-8): Research Agent, Polish & Pilot
 
@@ -386,20 +429,20 @@ Detailed TDD task breakdown to follow in `docs/sprint-plan.md` once this archite
 
 | Requirement | Owner | Status | Blocker? |
 |-------------|-------|--------|----------|
-| HubSpot API access + scope list | Bullet Digital Media | Not started | Sprint 1 |
-| PandaDoc webhook + API token | Bullet Digital Media | Not started | Sprint 1 (may be replaced by HubSpot - see Section 3.1.2) |
-| Claude API key | Bullet Digital Media | John committed | Sprint 1 (moved up for Sales Call Intelligence) |
-| OpenAI API key (Whisper) | Bullet Digital Media | Not started | Sprint 1 (moved up for Sales Call Intelligence) |
+| HubSpot API access + scope list | Bullet Digital Media | Chris chasing (21/04/2026) | Sprint 1 |
+| PandaDoc webhook + API token | Bullet Digital Media | Chris chasing (21/04/2026) | Sprint 1 (PandaDoc confirmed as agreement platform) |
+| Claude API key | Bullet Digital Media | John committed | Sprint 1 (for Sales Call Intelligence) |
+| OpenAI API key (Whisper) | Bullet Digital Media | Not started | Sprint 1 (for Sales Call Intelligence) |
 | Sample sales-call recording | Bullet Digital Media | Not started | Sprint 1 (needed to validate transcript pipeline) |
-| GoHighLevel API access + workflow IDs to trigger | Bullet Digital Media | Not started | Sprint 2 |
+| GoHighLevel API access + sub-account + workflow IDs to trigger | Bullet Digital Media | Not started | Sprint 1 (Pabbly retirement + portal webhook) |
 | Google Workspace service account + domain-wide delegation | Bullet Digital Media | Not started | Sprint 2 |
-| Slack incoming webhook per channel | Bullet Digital Media | Not started | Sprint 2 |
-| Asana token + onboarding task templates | Bullet Digital Media | Not started | Sprint 2 |
+| Slack incoming webhook for `bullet_inbound_clients` (and any other channels) | Bullet Digital Media | Not started | Sprint 2 |
+| Asana token + `Bullet Clients Status` project and finance task template IDs | Bullet Digital Media | Not started | Sprint 2 |
 | Stripe restricted API key | Bullet Digital Media | Not started | Sprint 3 |
-| Xero OAuth connection | Bullet Digital Media | Not started | Sprint 3 |
-| Timely API token | Bullet Digital Media | Not started | Sprint 3 |
+| Xero OAuth connection + chart-of-accounts + UK/International routing rules | Bullet Digital Media | Not started | Sprint 3 |
+| Timely API token + time-budget calculation confirmation (`monthly_fee / 100`) | Bullet Digital Media | Not started | Sprint 3 |
+| Leadsy credentials / link-generation access | Bullet Digital Media | Not started | Sprint 3 (tech-follow-up replacement) |
 | Meta Marketing API access (audience sizing) | Bullet Digital Media | Not started | Sprint 4 |
-| Decision: confirm agreement platform timeline (PandaDoc vs HubSpot) | Bullet Digital Media | Under review | **Sprint 1 blocker** - determines which signing trigger to build (see Section 3.1.2) |
 
 ---
 
@@ -428,34 +471,44 @@ Detailed TDD task breakdown to follow in `docs/sprint-plan.md` once this archite
 
 ## 11. Open Questions For Steve
 
-From John's email, Step 3 was flagged as needing a dedicated call with Steve to clarify the behind-the-scenes triggers. Specific items to close out:
+Several prior questions were resolved by Steve's Loom walkthroughs and the 21/04/2026 meeting (agreement platform, portal refresh, Zapier inventory, Sheet schema, Slack channel, Asana task shape, Timely model). The following remain:
 
-1. Which Asana workspace and template IDs are used today?
-2. Which GoHighLevel workflows own the conditional technical requirements emails? We want to trigger these rather than replace them.
-3. Is there a standard Google Drive folder structure per client, or does it vary?
-4. Which Google Sheet is the `Client Status Sheet`, and what is its exact schema?
-5. Who receives the Slack notifications today, and on which channels?
-6. Timely - is a client created per engagement, or per billing account?
-7. Xero - are all clients on the same chart of accounts / tracking categories?
-8. Does Stripe capture happen at signing (Step 3) or at kick-off (Step 4)? The email suggests both.
-9. Confirm the Zoom -> Google Meet migration timeline so the transcript capture is built against the correct provider.
-10. Any compliance requirements around storing sales call transcripts?
-11. What is the current research process in detail? Which sources does the campaign manager check, and in what order? (Needed for the research agent scope in Sprint 4.)
-12. Which Zapier automations exist today? What do they connect, and which ones have been unreliable? (Needed to decide which integrations we build directly vs delegate to Zapier - see Section 3.1.1.)
-13. What is the timeline for moving agreements from PandaDoc to HubSpot? If the move will happen during or before the Phase 1 build window (next 8 weeks), we should build for HubSpot agreements from the start rather than building around a system that is being retired. If PandaDoc will remain beyond Phase 1, we build for PandaDoc now with an abstraction layer for the future switch. (See Section 3.1.2.)
-14. Is refreshing the client onboarding portal a priority? The current GHL portal is functional but basic. We could build a custom-branded portal with a better client experience that writes directly into our system and syncs to GHL via webhook - giving the team progress visibility (has the client started, how far through, which sections incomplete) while keeping GHL automations intact. If you are happy with the current portal, we keep it and pull data via the GHL API instead. (See Section 3.4.)
+### Resolved since the previous draft
+- ~~Agreement platform: PandaDoc confirmed to stay (21/04/2026 meeting).~~
+- ~~Portal refresh: deferred to engagement Phase 2 (21/04/2026 meeting).~~
+- ~~Zapier inventory: captured in OB-Phase-1 and OB-Phase-2 Looms.~~
+
+### Still open (carried forward)
+
+1. Which Asana workspace + project template IDs are used today for the onboarding fan-out, and which are for the finance task?
+2. Which GoHighLevel workflows own the conditional technical requirements emails? The 16-branch Outstanding Elements workflow in particular - is Bullet happy for us to replace it with a DB-driven checklist and single conditional email template, or is there a reason to keep it as-is? (See Section 3.10.)
+3. The current Google Drive folder tree has ~25 sub-folders (Face-to-Camera variants, Ad Creative, Logo Files, Images, Brand Docs, Font Files, Headshots, Invoices, Campaign Guide). Steve called parts "probably legacy". Mirror exactly, simplify to actively used folders, or generate on demand?
+4. Xero - are all clients on the same chart of accounts / tracking categories, or does UK vs International routing change this?
+5. Stripe capture timing - card details are collected inside PandaDoc at signing; recurring subscription activates only after kickoff follow-up sign-off. Confirm this is unchanged.
+6. Confirm the Zoom to Google Meet migration timeline so the transcript capture is built against the correct provider.
+7. Any compliance requirements around storing sales call transcripts (retention, access, consent wording)?
+8. What is the current research process in detail? Which sources does the campaign manager check, and in what order? (Needed for the research agent scope in Sprint 4.)
+
+### New (from Loom walkthroughs + 21/04/2026 meeting)
+
+9. **Returning-client handling**: When a client who already has a GHL sub-account signs for a second site, should the orchestrator reuse the existing sub-account, create a new one, or prompt the team? Today this is manual cleanup.
+10. **Timely project automation**: Auto-create the Timely project with `time_budget_hours = monthly_fee / 100`, or leave project creation as a dashboard-driven action so Sam can still assign team members?
+11. **Offer pricing calculator**: Should the kick-off follow-up email generator compute the full priced offer structure (anchored membership discount, consultation value, scan value, bring-a-friend, money-back-guarantee framing) automatically, or only draft the prose?
+12. **Kickoff call trajectory**: John's 21/04/2026 framing was a "self-service module" - humans talk at sales, AI manages everything after. Does the kickoff call stay human-led through Phase 1 and into Phase 2, or is AI-led kickoff a Phase 2+ goal we should architect for now?
+13. **Pipeline stage parity**: Should the dashboard mirror GHL's pipeline stages (`Lead Gen Live / OB Form Submitted / Kickoff Call Booked / Kick Off Call Complete / Payment Received`), or use our own state model with a mapping layer to GHL?
+14. **`SaaS Mode` column** in the Client Status Sheet was visible in the Loom but not explained - what does it represent, and how should it flow through the new system?
+15. **Sales handover notes**: Today the salesperson pastes these manually into the Google Doc before kickoff. In the new model, does the salesperson enter these via the dashboard, or do we capture them from the sales-call transcript automatically?
+16. **Amex fallback**: Accept the current manual-capture workaround for Phase 1, or scope a fix (e.g. separate Stripe-hosted payment link when Amex is the card)?
 
 ---
 
 ## 12. Next Steps
 
-1. Walk Bullet through this revised plan and confirm scope alignment
-2. Book the follow-up call with Steve to resolve Section 11 open questions
-3. **Sprint 1 blocker**: Confirm agreement platform timeline - if PandaDoc is being retired during the build window, we build for HubSpot only; otherwise we build for PandaDoc with an abstraction layer (see Section 3.1.2)
-4. **Sprint 1 blocker**: Get inventory of current Zapier automations from Steve to decide build-vs-delegate per integration (see Section 3.1.1)
-5. Begin credential and template gathering per Section 9 - note that Claude API key and OpenAI key are now Sprint 1 blockers (moved up for Sales Call Intelligence)
-6. Obtain a sample sales-call recording for Sprint 1 transcript pipeline validation
-7. Confirm pilot clients for Sprint 4
+1. Walk Bullet through this revised plan (v3) and confirm scope alignment
+2. Close out remaining Section 11 open questions with Steve (new items 9-16 in particular)
+3. **Sprint 1 blocker**: Complete API credential and access gathering per Section 9 - Chris is already chasing John (21/04/2026 meeting action)
+4. Obtain a sample sales-call recording for Sprint 1 transcript pipeline validation
+5. Confirm pilot clients for Sprint 4
 
 ---
 
