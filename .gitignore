@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# Local rendered artefacts (HTML/PDF generated from markdown)
+output/
