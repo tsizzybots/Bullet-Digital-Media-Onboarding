@@ -1,8 +1,8 @@
 # Bullet Digital Media - Phase 1 Plan: Onboarding Process Automation
 
 **Prepared by**: IzzyAgents Technical Team
-**Date**: 22/04/2026
-**Status**: Draft v3 - Revised after 21/04/2026 meeting and Steve's process Loom walkthroughs (OB-Phase-1, OB-Phase-2)
+**Date**: 28/04/2026
+**Status**: Draft v3.1 - Revised after Stephen's 24/04/2026 reply (kick-off follow-up workflow widened: explicit human review step, two anchor-rate variants, variable body-scan count, offer-name suggestions; 16-branch replacement and offer pricing scope confirmed)
 
 ---
 
@@ -131,6 +131,7 @@ A lightweight internal dashboard (web) that surfaces a single row per client wit
 - Links into every connected platform (HubSpot, GHL, Asana, Drive folder, Stripe customer, Xero contact, Timely client, Slack thread, Meta ad account, Calendar event)
 - Time-in-step tracking so bottlenecks are visible
 - Per-client knowledge profile view - all accumulated data from sales calls, portal answers, research, and kickoff notes in one place
+- Step 4 hand-off states: each client at Step 4 surfaces explicitly as `Ready for Performance Director Review` (AI draft + suggested offer names + worked pricing visible for confirmation) then `Ready for Account Manager to Send` (PD has confirmed, AM picks up and sends). The deliberate human pause that exists today between the kick-off call and the follow-up email going out is preserved as a visible workflow step rather than an out-of-band Google Doc thread (see Section 3.5).
 
 This becomes the single source of truth for "where is this client?" replacing scattered lookups across Google Docs and platform-specific views.
 
@@ -158,22 +159,47 @@ These are real UX issues but replacing the portal is not the lever for a single-
 
 ### 3.5 Kick-Off Follow-Up Email Generator (Supporting Deliverable - MVP)
 
-After the Step 4 kick-off call, AI generates the detailed follow-up email that the digital specialist currently writes manually. This email confirms everything discussed: the agreed offer, campaign structure, ad budget, creative requirements, setup timeline, and any outstanding items. The specialist reviews and edits rather than drafts from scratch.
+After the Step 4 kick-off call, AI generates the detailed follow-up email that the digital specialist currently writes manually. This email confirms everything discussed: the agreed offer, campaign structure, ad budget, creative requirements, setup timeline, and any outstanding items.
 
 John specifically identified this as a key MVP feature during the 08/04/2026 meeting. Positioned in Sprint 2 to ship with the MVP milestone.
 
-**Offer pricing calculator (from Steve's OB-Phase-2 walkthrough)**:
+**The hand-off (confirmed with Stephen, 24/04/2026)**: there is a deliberate human review point between the kick-off call and the email going out, because not everything is 100% locked in on the call. The system preserves that pause as a productised workflow rather than removing it:
 
-The follow-up email today encodes a deterministic pricing structure that the digital specialist calculates manually on the call. We build this as a structured generator inside the email tool so the email comes out with numbers already worked out:
+1. Kick-off call ends. AI generates the draft email, suggests **2-3 offer-name options** (derived from the client, brand, portal answers, and historically successful offers for similar gyms), and works the pricing maths.
+2. The dashboard moves the client into the **`Ready for Performance Director Review`** state (Section 3.3). The PD sees the suggested names, the worked pricing with the calculation visible, and the full prose.
+3. PD confirms the offer name, sanity-checks the maths, and adjusts anything that was not 100% locked in on the call.
+4. The dashboard moves the client into **`Ready for Account Manager to Send`**. AM sends.
 
-- `total_value = discounted_membership + consultation_value + (body_scan_price × 2 if applicable)`
-- Discounted membership anchor: 75% of monthly for a standard 21-28 day program (adjusted per agreed program length)
-- Consultation value: duration and stand-alone price per the portal answers
-- Body scan value: stand-alone price × 2 (pre/post) when the gym offers scans
-- Bring-a-friend framing and money-back-guarantee framing appended as optional blocks based on portal answers
-- Campaign flow selection: low-ticket (checkout page) vs high-ticket (application + consultation booking funnel) - drives the funnel template choice downstream
+The pause stays. The grunt work goes away.
 
-The AI generates the prose; the calculator supplies the numbers. The specialist reviews, adjusts, and sends.
+**Offer pricing calculator (from Steve's OB-Phase-2 walkthrough, refined from Stephen's 24/04/2026 detail)**:
+
+The follow-up email today encodes a deterministic pricing structure that the Performance Director calculates manually on the call. We build this as a structured generator inside the email tool so the email comes out with numbers already worked out, and the dashboard renders the full calculation alongside the result so the PD can sanity-check rather than trust a black box.
+
+The calculator has **two anchor-rate variants** (selected per client based on the gym's pricing model captured in the OB survey):
+
+- **Subscription anchor** (e.g. unlimited classes for £200/month, 21-day offer): `anchor_value = monthly_price / 30.4 × offer_days`. Worked example: `£200 / 30.4 × 21 = £138.16`.
+- **Class-pack anchor** (e.g. pilates studio with 5-class pack at £30 drop-in rate): `anchor_value = drop_in_rate × class_count`. Worked example: `£30 × 5 = £150.00`.
+
+On top of the anchor:
+
+- **+ Consultation value** (if a consultation is part of the offer, agreed on the kick-off call) - duration and stand-alone price per the portal answers.
+- **+ Body scan value × N**, where N is **1, 2 or 3**, sourced from the OB survey (not fixed at 2).
+
+Then:
+
+- `total_value = anchor_value + consultation_value + (body_scan_price × N)`
+- `savings = total_value - offer_price`
+- `percent_off = savings / total_value × 100`
+
+Additional outputs:
+
+- **Offer-name suggestions** (2-3 candidates) for the PD to pick from or override.
+- **Bring-a-friend** and **money-back-guarantee** framing appended as optional blocks based on portal answers.
+- **Campaign flow selection**: low-ticket (checkout page, total-value/savings framing applies) vs high-ticket (application + consultation booking funnel) - drives the funnel template choice downstream.
+- **Calculation transparency**: the dashboard shows the full working alongside the result (for the worked example above: `£200 / 30.4 × 21 = £138.16, +£X consult, +£Y × 2 body scans = £Z total value, £W savings, X% off`) so the PD can confirm the maths matches what was agreed on the call.
+
+The AI generates the prose; the calculator supplies the numbers; the dashboard surfaces both for review. The specialist confirms, then sends.
 
 ### 3.6 Kick-Off Stripe Activation (Supporting Deliverable)
 
@@ -225,7 +251,7 @@ Steve's OB-Phase-1 and OB-Phase-2 Looms exposed specific legacy workflows that P
 |-----------------|---------------|---------------------|
 | **Pabbly middleman for GHL sub-accounts** | Zapier cannot create GHL sub-accounts; Pabbly bridges it but has duplicate triggers across two Zaps and is "probably broken" in places | Direct GHL API call from the orchestrator; Pabbly retired entirely |
 | **Returning-client sub-account duplication** | Same client signing for a second site creates a duplicate GHL sub-account; manual cleanup required | Orchestrator checks for existing GHL contact/sub-account by email before creating |
-| **16-branch Outstanding Elements tech follow-up** | GHL workflow with a 16-path decision tree (ad account × reg docs × headshot × brand guidelines) sending one of 16 email variants; Sam manually chases from there | Single client-assets table in Postgres with boolean status per required asset; dashboard shows a live checklist per client; one email template with conditional blocks, driven by DB state |
+| **16-branch Outstanding Elements tech follow-up** *(approach confirmed by Stephen, 24/04/2026)* | GHL workflow with a 16-path decision tree (ad account × reg docs × headshot × brand guidelines) sending one of 16 email variants; Sam manually chases from there | Single client-assets table in Postgres with boolean status per required asset; dashboard shows a live checklist per client; one email template with conditional blocks, driven by DB state |
 | **Monday manual Asana finance-date sync** | Kickoff date changes break the Zapier Asana sync; Steve manually corrects every Monday | Orchestrator listens for kickoff-calendar changes and writes directly to Asana with idempotency; date mutations propagate automatically |
 | **Timely project creation (manual)** | Only the Timely *client* auto-creates; the *project* is manual so Sam can set `time_budget_hours = monthly_fee / 100` and assign team members | Orchestrator auto-creates the project with the calculated budget; team assignment remains manual (or moves to a dashboard action) |
 | **Google Doc as de-facto source of truth** | Sales notes pasted manually into a Doc; survey answers auto-appended; pre-call research pasted in red; call notes added in red; team reads this Doc as the "single pane" | Database is the source of truth; dashboard shows the equivalent view (structured, not pasted); Google Doc becomes an optional export for team members who prefer that format |
@@ -477,28 +503,34 @@ Several prior questions were resolved by Steve's Loom walkthroughs and the 21/04
 - ~~Agreement platform: PandaDoc confirmed to stay (21/04/2026 meeting).~~
 - ~~Portal refresh: deferred to engagement Phase 2 (21/04/2026 meeting).~~
 - ~~Zapier inventory: captured in OB-Phase-1 and OB-Phase-2 Looms.~~
+- ~~16-branch Outstanding Elements replacement: Stephen confirmed on 24/04/2026 ("1 Email with conditional blocks sounds great"). Single client-assets table + live dashboard checklist + one conditional email template, per Section 3.10.~~
+- ~~Offer pricing calculator scope: Stephen confirmed on 24/04/2026 that AI computes the full priced offer (two anchor variants, consultation, body scans 1/2/3) AND a deliberate human review point sits between the kick-off call and the email send, surfaced in the dashboard as `Ready for PD Review` -> `Ready for AM to Send`. See Section 3.5.~~
 
 ### Still open (carried forward)
 
 1. Which Asana workspace + project template IDs are used today for the onboarding fan-out, and which are for the finance task?
-2. Which GoHighLevel workflows own the conditional technical requirements emails? The 16-branch Outstanding Elements workflow in particular - is Bullet happy for us to replace it with a DB-driven checklist and single conditional email template, or is there a reason to keep it as-is? (See Section 3.10.)
-3. The current Google Drive folder tree has ~25 sub-folders (Face-to-Camera variants, Ad Creative, Logo Files, Images, Brand Docs, Font Files, Headshots, Invoices, Campaign Guide). Steve called parts "probably legacy". Mirror exactly, simplify to actively used folders, or generate on demand?
-4. Xero - are all clients on the same chart of accounts / tracking categories, or does UK vs International routing change this?
-5. Stripe capture timing - card details are collected inside PandaDoc at signing; recurring subscription activates only after kickoff follow-up sign-off. Confirm this is unchanged.
-6. Confirm the Zoom to Google Meet migration timeline so the transcript capture is built against the correct provider.
-7. Any compliance requirements around storing sales call transcripts (retention, access, consent wording)?
-8. What is the current research process in detail? Which sources does the campaign manager check, and in what order? (Needed for the research agent scope in Sprint 4.)
+2. The current Google Drive folder tree has ~25 sub-folders (Face-to-Camera variants, Ad Creative, Logo Files, Images, Brand Docs, Font Files, Headshots, Invoices, Campaign Guide). Steve called parts "probably legacy". Mirror exactly, simplify to actively used folders, or generate on demand?
+3. Xero - are all clients on the same chart of accounts / tracking categories, or does UK vs International routing change this?
+4. Stripe capture timing - card details are collected inside PandaDoc at signing; recurring subscription activates only after kickoff follow-up sign-off. Confirm this is unchanged.
+5. Confirm the Zoom to Google Meet migration timeline so the transcript capture is built against the correct provider.
+6. Any compliance requirements around storing sales call transcripts (retention, access, consent wording)?
+7. What is the current research process in detail? Which sources does the campaign manager check, and in what order? (Needed for the research agent scope in Sprint 4.)
 
 ### New (from Loom walkthroughs + 21/04/2026 meeting)
 
-9. **Returning-client handling**: When a client who already has a GHL sub-account signs for a second site, should the orchestrator reuse the existing sub-account, create a new one, or prompt the team? Today this is manual cleanup.
-10. **Timely project automation**: Auto-create the Timely project with `time_budget_hours = monthly_fee / 100`, or leave project creation as a dashboard-driven action so Sam can still assign team members?
-11. **Offer pricing calculator**: Should the kick-off follow-up email generator compute the full priced offer structure (anchored membership discount, consultation value, scan value, bring-a-friend, money-back-guarantee framing) automatically, or only draft the prose?
-12. **Kickoff call trajectory**: John's 21/04/2026 framing was a "self-service module" - humans talk at sales, AI manages everything after. Does the kickoff call stay human-led through Phase 1 and into Phase 2, or is AI-led kickoff a Phase 2+ goal we should architect for now?
-13. **Pipeline stage parity**: Should the dashboard mirror GHL's pipeline stages (`Lead Gen Live / OB Form Submitted / Kickoff Call Booked / Kick Off Call Complete / Payment Received`), or use our own state model with a mapping layer to GHL?
-14. **`SaaS Mode` column** in the Client Status Sheet was visible in the Loom but not explained - what does it represent, and how should it flow through the new system?
-15. **Sales handover notes**: Today the salesperson pastes these manually into the Google Doc before kickoff. In the new model, does the salesperson enter these via the dashboard, or do we capture them from the sales-call transcript automatically?
-16. **Amex fallback**: Accept the current manual-capture workaround for Phase 1, or scope a fix (e.g. separate Stripe-hosted payment link when Amex is the card)?
+8. **Returning-client handling**: When a client who already has a GHL sub-account signs for a second site, should the orchestrator reuse the existing sub-account, create a new one, or prompt the team? Today this is manual cleanup.
+9. **Timely project automation**: Auto-create the Timely project with `time_budget_hours = monthly_fee / 100`, or leave project creation as a dashboard-driven action so Sam can still assign team members?
+10. **Kickoff call trajectory**: John's 21/04/2026 framing was a "self-service module" - humans talk at sales, AI manages everything after. Does the kickoff call stay human-led through Phase 1 and into Phase 2, or is AI-led kickoff a Phase 2+ goal we should architect for now?
+11. **Pipeline stage parity**: Should the dashboard mirror GHL's pipeline stages (`Lead Gen Live / OB Form Submitted / Kickoff Call Booked / Kick Off Call Complete / Payment Received`), or use our own state model with a mapping layer to GHL?
+12. **`SaaS Mode` column** in the Client Status Sheet was visible in the Loom but not explained - what does it represent, and how should it flow through the new system?
+13. **Sales handover notes**: Today the salesperson pastes these manually into the Google Doc before kickoff. In the new model, does the salesperson enter these via the dashboard, or do we capture them from the sales-call transcript automatically?
+14. **Amex fallback**: Accept the current manual-capture workaround for Phase 1, or scope a fix (e.g. separate Stripe-hosted payment link when Amex is the card)?
+
+### New (from Stephen's 24/04/2026 reply)
+
+15. **30.4-day month divisor for subscription anchor**: Stephen's worked example uses `£200 / 30.4 × 21`. Confirm 30.4 is Bullet's standard (vs 28 or 30) so the calculator matches today's manual workings.
+16. **Historical offers corpus for the offer-name suggester**: Where are previously-used offer names stored today (Asana, Drive, PD's head)? Needed to seed the AI suggestions with what has actually worked.
+17. **Class-pack offer shapes**: Are class-pack offers always `N classes for £X` (so total value = drop-in × N), or are there variants (e.g. "10 classes / 30 days")?
 
 ---
 

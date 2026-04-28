@@ -2,7 +2,7 @@
 
 **Prepared for**: Bullet Digital Media
 **Prepared by**: IzzyAgents
-**Date**: 22/04/2026
+**Date**: 28/04/2026 (v3.1 - refreshed after Stephen's 24/04/2026 reply)
 
 ---
 
@@ -49,7 +49,18 @@ Every sales call transcript is automatically turned into a structured summary - 
 
 ### 4. AI Kick-Off Follow-Up Emails
 
-After the kick-off call, AI drafts the detailed follow-up email your digital specialist currently writes by hand. The agreed offer, campaign structure, budget, creative requirements, and timeline - all pulled together from the call transcript. Your specialist reviews and sends rather than drafting from scratch.
+After every kick-off call, AI drafts the detailed follow-up email your Performance Director currently writes by hand. The agreed offer, campaign structure, budget, creative requirements, timeline - all pulled together from the call transcript and the client's onboarding data.
+
+**The pause you have today stays.** AI does the heavy lifting; the human review step does not go away.
+
+How it lands in the dashboard:
+
+1. AI generates the draft email, suggests 2-3 offer-name options (based on the client, brand, portal answers, and what has worked for similar gyms), and works the pricing maths.
+2. The client appears in a `Ready for Performance Director Review` state. Your PD sees the suggested names, the worked numbers (with the calculation visible, not a black box), and the full prose.
+3. PD adjusts anything that was not 100% locked in on the call (offer name, last-minute pricing tweaks, missing details) and confirms.
+4. The client moves to `Ready for Account Manager to Send`. AM hits send.
+
+The pricing calculator handles both gym pricing models out of the box. Whether the gym sells monthly memberships (with subscription anchor) or class packs (with drop-in anchor), and whether the offer includes 1, 2 or 3 body scans plus an optional consultation, the maths is worked out automatically and shown back to your team to sanity-check before anything goes out.
 
 ### 5. Pre-Kick-Off Client Research
 
