@@ -2,7 +2,7 @@
 
 **Prepared for**: Bullet Digital Media
 **Prepared by**: IzzyAgents
-**Date**: 28/04/2026 (v3.1 - refreshed after Stephen's 24/04/2026 reply)
+**Date**: 30/04/2026 (v3.2 - refreshed after Stephen's 30/04/2026 reply: kick-off email pricing block now scoped to low-ticket / checkout campaigns only; consultation-booking clients get a prose-only confirmation)
 
 ---
 
@@ -55,12 +55,17 @@ After every kick-off call, AI drafts the detailed follow-up email your Performan
 
 How it lands in the dashboard:
 
-1. AI generates the draft email, suggests 2-3 offer-name options (based on the client, brand, portal answers, and what has worked for similar gyms), and works the pricing maths.
-2. The client appears in a `Ready for Performance Director Review` state. Your PD sees the suggested names, the worked numbers (with the calculation visible, not a black box), and the full prose.
+1. AI generates the draft email and (for low-ticket / checkout campaigns) suggests 2-3 offer-name options and works the pricing maths.
+2. The client appears in a `Ready for Performance Director Review` state. Your PD sees the suggested names, the worked numbers (with the calculation visible, not a black box) or the prose draft, and the full email body.
 3. PD adjusts anything that was not 100% locked in on the call (offer name, last-minute pricing tweaks, missing details) and confirms.
 4. The client moves to `Ready for Account Manager to Send`. AM hits send.
 
-The pricing calculator handles both gym pricing models out of the box. Whether the gym sells monthly memberships (with subscription anchor) or class packs (with drop-in anchor), and whether the offer includes 1, 2 or 3 body scans plus an optional consultation, the maths is worked out automatically and shown back to your team to sanity-check before anything goes out.
+**Two variants, matched to how Bullet actually sells** (confirmed on 30/04/2026):
+
+- **Low-ticket / checkout campaigns** (large group class facilities) - full pricing-maths block: subscription anchor (`monthly_price / 30.4 × offer_days`) or class-pack anchor (`drop_in_rate × class_count`), plus 1, 2 or 3 body scans, plus an optional consultation. The email shows total value, savings, and % off, with the working visible to the PD for sanity-checking.
+- **Higher-ticket / consultation-booking campaigns** (smaller, more expensive clients) - the email confirms the agreed offer, ad budget, creative plan, setup timeline and consultation booking mechanics. **No pricing-maths block.** That framing is not how those campaigns are sold.
+
+Your Performance Director sets the campaign type (`low-ticket` vs `high-ticket`) on the kick-off call with one click in the dashboard, and the email generator picks the right variant. The dashboard also pre-fills a default suggestion from the OB-survey data so the PD has something to confirm rather than start from scratch.
 
 ### 5. Pre-Kick-Off Client Research
 

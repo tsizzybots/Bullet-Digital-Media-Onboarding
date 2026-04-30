@@ -1,8 +1,8 @@
 # Bullet Digital Media - Phase 1 Plan: Onboarding Process Automation
 
 **Prepared by**: IzzyAgents Technical Team
-**Date**: 28/04/2026
-**Status**: Draft v3.1 - Revised after Stephen's 24/04/2026 reply (kick-off follow-up workflow widened: explicit human review step, two anchor-rate variants, variable body-scan count, offer-name suggestions; 16-branch replacement and offer pricing scope confirmed)
+**Date**: 30/04/2026
+**Status**: Draft v3.2 - Revised after Stephen's 30/04/2026 reply (kick-off email pricing/discount calculation now scoped to low-ticket / checkout-based campaigns only; high-ticket / consultation-booking variant defined as prose-only confirmation; `campaign_flow_type` captured as a structured client field; Stripe restricted-key one-pager dispatched). v3.1 (28/04/2026) widened the kick-off follow-up workflow with the explicit human review step, two anchor-rate variants, variable body-scan count, and offer-name suggestions.
 
 ---
 
@@ -163,16 +163,21 @@ After the Step 4 kick-off call, AI generates the detailed follow-up email that t
 
 John specifically identified this as a key MVP feature during the 08/04/2026 meeting. Positioned in Sprint 2 to ship with the MVP milestone.
 
-**The hand-off (confirmed with Stephen, 24/04/2026)**: there is a deliberate human review point between the kick-off call and the email going out, because not everything is 100% locked in on the call. The system preserves that pause as a productised workflow rather than removing it:
+**Two variants, gated by campaign type (confirmed with Stephen, 30/04/2026)**: the generator branches at the top on a structured `campaign_flow_type` flag set on the kick-off call by the Performance Director. Bullet sells low-ticket and high-ticket campaigns differently, so the email shapes are different:
 
-1. Kick-off call ends. AI generates the draft email, suggests **2-3 offer-name options** (derived from the client, brand, portal answers, and historically successful offers for similar gyms), and works the pricing maths.
-2. The dashboard moves the client into the **`Ready for Performance Director Review`** state (Section 3.3). The PD sees the suggested names, the worked pricing with the calculation visible, and the full prose.
-3. PD confirms the offer name, sanity-checks the maths, and adjusts anything that was not 100% locked in on the call.
+- `low_ticket_checkout` - large group class facilities on the checkout-page funnel. **Full pricing-maths block applies** (anchor rate + body scans + optional consultation -> total value -> savings -> % off).
+- `high_ticket_consultation` - smaller, more expensive clients on the application + consultation-booking funnel. **Prose-only confirmation; no anchor / total-value / savings calculation.** The pricing/discount framing is not how those campaigns are sold.
+
+**The hand-off (confirmed with Stephen, 24/04/2026)**: regardless of variant, there is a deliberate human review point between the kick-off call and the email going out, because not everything is 100% locked in on the call. The system preserves that pause as a productised workflow rather than removing it:
+
+1. Kick-off call ends. AI generates the draft email; for the low-ticket variant it also suggests **2-3 offer-name options** (derived from the client, brand, portal answers, and historically successful offers for similar gyms) and works the pricing maths.
+2. The dashboard moves the client into the **`Ready for Performance Director Review`** state (Section 3.3). The PD sees the suggested names and the worked pricing with the calculation visible (low-ticket variant), or the prose draft only (high-ticket variant), plus the full email body.
+3. PD confirms the offer name, sanity-checks the maths or the prose, and adjusts anything that was not 100% locked in on the call.
 4. The dashboard moves the client into **`Ready for Account Manager to Send`**. AM sends.
 
 The pause stays. The grunt work goes away.
 
-**Offer pricing calculator (from Steve's OB-Phase-2 walkthrough, refined from Stephen's 24/04/2026 detail)**:
+**Low-ticket / checkout variant: pricing calculator (from Steve's OB-Phase-2 walkthrough, refined from Stephen's 24/04/2026 detail)**:
 
 The follow-up email today encodes a deterministic pricing structure that the Performance Director calculates manually on the call. We build this as a structured generator inside the email tool so the email comes out with numbers already worked out, and the dashboard renders the full calculation alongside the result so the PD can sanity-check rather than trust a black box.
 
@@ -196,10 +201,29 @@ Additional outputs:
 
 - **Offer-name suggestions** (2-3 candidates) for the PD to pick from or override.
 - **Bring-a-friend** and **money-back-guarantee** framing appended as optional blocks based on portal answers.
-- **Campaign flow selection**: low-ticket (checkout page, total-value/savings framing applies) vs high-ticket (application + consultation booking funnel) - drives the funnel template choice downstream.
 - **Calculation transparency**: the dashboard shows the full working alongside the result (for the worked example above: `£200 / 30.4 × 21 = £138.16, +£X consult, +£Y × 2 body scans = £Z total value, £W savings, X% off`) so the PD can confirm the maths matches what was agreed on the call.
 
 The AI generates the prose; the calculator supplies the numbers; the dashboard surfaces both for review. The specialist confirms, then sends.
+
+**High-ticket / consultation variant: prose-only confirmation (added per Stephen's 30/04/2026 reply)**:
+
+For higher-ticket consultation-booking clients, the follow-up email is a prose-only confirmation of what was agreed on the kick-off call - no anchor maths, no total-value table, no savings or % off block. The AI pulls the specifics straight from the call transcript and the knowledge profile and generates the email body.
+
+The variant covers:
+
+- The agreed offer structure (application funnel + consultation booking) and headline price point.
+- Ad budget and start date.
+- Creative requirements (face-to-camera footage, brand assets, headshots, etc.) and any outstanding items the client owes.
+- Setup timeline and the kickoff date for going live.
+- The consultation booking link / mechanic the client team will use to book leads.
+
+The hand-off (PD review -> AM send) is identical to the low-ticket variant. The PD reviews and signs off the prose; only the offer-name and pricing-maths concerns drop out.
+
+**Campaign-type capture**:
+
+The variant is selected by a structured `campaign_flow_type ENUM('low_ticket_checkout', 'high_ticket_consultation')` field on the client record, set by the Performance Director on the kick-off call (one click in the dashboard) when the offer structure is finalised. The field is added to the `clients` table in Section 6.
+
+A fallback inference runs against the OB-survey data captured before the call so the dashboard can show a default suggestion ahead of PD confirmation: if `group_size = small` AND `consultation_price > 0` then the default is `high_ticket_consultation`; otherwise the default is `low_ticket_checkout`. The PD always has the final say.
 
 ### 3.6 Kick-Off Stripe Activation (Supporting Deliverable)
 
@@ -356,7 +380,7 @@ The database is the central store. Every job writes its outcome (success, failur
 
 | Table | Purpose |
 |-------|---------|
-| `clients` | One row per client. Includes current step, stage timestamps, canonical IDs in each platform |
+| `clients` | One row per client. Includes current step, stage timestamps, canonical IDs in each platform, and `campaign_flow_type ENUM('low_ticket_checkout', 'high_ticket_consultation')` (Section 3.5) gating the kick-off email variant |
 | `client_knowledge` | Per-client knowledge profile. Structured facts accumulated from every touchpoint (sales call, agreement, portal, research, kickoff). Each entry tagged with source and timestamp. Queryable by team and by future AI agents |
 | `onboarding_events` | Append-only log of every trigger received (sales call booked, signed, portal complete, kick-off done, build complete, gone live) |
 | `platform_actions` | One row per fan-out job. Stores target platform, payload, status (pending/success/failed/retrying), external ID, retry count, last error |
@@ -427,7 +451,7 @@ Detailed TDD task breakdown to follow in `docs/sprint-plan.md` once this archite
 - Slack, Asana, Google Sheet, Google Drive, Google Calendar integrations
 - Google Docs optional sync (generated from database, not primary store)
 - Orchestration engine with retries and the per-action status UI
-- **Kick-off follow-up email generator**: AI drafts the post-kickoff confirmation email from call transcript + knowledge profile; specialist reviews and sends
+- **Kick-off follow-up email generator (both variants)**: AI drafts the post-kickoff confirmation email from call transcript + knowledge profile. Low-ticket / checkout variant ships with the pricing calculator (anchors, body scans, total value, savings, % off); high-ticket / consultation variant ships as prose-only confirmation (no maths). PD selects `campaign_flow_type` in the dashboard before AI generation; specialist reviews and sends
 - End-to-end happy path: signed agreement creates all non-financial artefacts automatically
 - **MVP MILESTONE**: demo to Bullet team, validate with real (or simulated) onboarding flow
 
@@ -440,6 +464,7 @@ Detailed TDD task breakdown to follow in `docs/sprint-plan.md` once this archite
 - Gmail / GHL conditional technical requirements emails (trigger existing GHL workflows where they still make sense; otherwise send from our system)
 - Stripe subscription activation triggered after kick-off follow-up email sign-off
 - Kickoff-date change propagation: calendar change auto-updates Asana finance task (eliminates Steve's Monday manual sync)
+- **Stripe restricted-key brief** dispatched to Stephen 30/04/2026 so the key is provisioned ahead of Sprint 3 (separate doc: `emails/Stripe Restricted Key Setup.pdf`)
 
 ### Sprint 4 (Weeks 7-8): Research Agent, Polish & Pilot
 
@@ -505,6 +530,7 @@ Several prior questions were resolved by Steve's Loom walkthroughs and the 21/04
 - ~~Zapier inventory: captured in OB-Phase-1 and OB-Phase-2 Looms.~~
 - ~~16-branch Outstanding Elements replacement: Stephen confirmed on 24/04/2026 ("1 Email with conditional blocks sounds great"). Single client-assets table + live dashboard checklist + one conditional email template, per Section 3.10.~~
 - ~~Offer pricing calculator scope: Stephen confirmed on 24/04/2026 that AI computes the full priced offer (two anchor variants, consultation, body scans 1/2/3) AND a deliberate human review point sits between the kick-off call and the email send, surfaced in the dashboard as `Ready for PD Review` -> `Ready for AM to Send`. See Section 3.5.~~
+- ~~Pricing/discount calculation applicability: Stephen confirmed on 30/04/2026 that the pricing/discount calculation applies to low-ticket / checkout-based campaigns only (large group class facilities). Higher-ticket / consultation-booking clients (smaller, more expensive) receive a prose-only confirmation email - no anchor maths, no savings/% off block. The generator branches at the top on a structured `campaign_flow_type` field set by the PD on the kick-off call. See Section 3.5.~~
 
 ### Still open (carried forward)
 
@@ -536,7 +562,7 @@ Several prior questions were resolved by Steve's Loom walkthroughs and the 21/04
 
 ## 12. Next Steps
 
-1. Walk Bullet through this revised plan (v3) and confirm scope alignment
+1. Walk Bullet through this revised plan (v3.2) and confirm scope alignment
 2. Close out remaining Section 11 open questions with Steve (new items 9-16 in particular)
 3. **Sprint 1 blocker**: Complete API credential and access gathering per Section 9 - Chris is already chasing John (21/04/2026 meeting action)
 4. Obtain a sample sales-call recording for Sprint 1 transcript pipeline validation
