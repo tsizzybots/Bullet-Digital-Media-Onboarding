@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stripe Restricted Key Setup.md</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+      font-size: 16px;
+      line-height: 1.6;
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    /* ── Theme Variables ── */
+    :root {
+      --bg: #ffffff;
+      --text: #1f2328;
+      --text-muted: #656d76;
+      --border: #d1d9e0;
+      --bg-subtle: #f6f8fa;
+      --bg-code: #eff1f3;
+      --link: #0969da;
+      --checkbox-bg: #2da44e;
+      --checkbox-border: #d1d9e0;
+      --content-width: 900px;
+      --table-stripe: #eaeef2;
+      --kw: #cf222e;
+      --str: #0a3069;
+      --cmt: #6e7781;
+      --fn: #8250df;
+      --num: #0550ae;
+      --type: #953800;
+      --attr: #116329;
+    }
+
+    [data-theme="dark"] {
+      --bg: #0d1117;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --border: #30363d;
+      --bg-subtle: #161b22;
+      --bg-code: #1c2128;
+      --link: #58a6ff;
+      --checkbox-bg: #238636;
+      --checkbox-border: #30363d;
+      --table-stripe: #1c2128;
+      --kw: #ff7b72;
+      --str: #a5d6ff;
+      --cmt: #8b949e;
+      --fn: #d2a8ff;
+      --num: #79c0ff;
+      --type: #ffa657;
+      --attr: #7ee787;
+    }
+
+    [data-width="wide"] {
+      --content-width: 1350px;
+    }
+
+    /* ── Toolbar ── */
+    .toolbar {
+      position: sticky;
+      top: 0;
+      background: var(--bg-subtle);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 100;
+      font-size: 14px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .toolbar .filename {
+      font-weight: 600;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      color: var(--text);
+      font-size: 13px;
+    }
+    .toolbar .actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .toolbar .generated {
+      color: var(--text-muted);
+      font-size: 12px;
+      margin-right: 8px;
+    }
+    .toolbar button {
+      background: #2da44e;
+      color: white;
+      border: none;
+      padding: 6px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s;
+    }
+    .toolbar button:hover {
+      background: #218838;
+    }
+    .toolbar button.secondary {
+      background: var(--bg-subtle);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .toolbar button.secondary:hover {
+      background: var(--bg-code);
+    }
+    .toolbar .icon-btn {
+      background: var(--bg-subtle);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      font-size: 15px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+    }
+
+    /* ── Content Area ── */
+    .markdown-body {
+      max-width: var(--content-width);
+      margin: 0 auto;
+      padding: 32px 48px 64px;
+      transition: max-width 0.3s ease;
+    }
+
+    /* ── Headings ── */
+    .markdown-body h1 {
+      font-size: 2em;
+      font-weight: 600;
+      margin-top: 24px;
+      margin-bottom: 16px;
+      padding-bottom: 0.3em;
+      border-bottom: 1px solid var(--border);
+      line-height: 1.25;
+    }
+    .markdown-body h1:first-child {
+      margin-top: 0;
+    }
+    .markdown-body h2 {
+      font-size: 1.5em;
+      font-weight: 600;
+      margin-top: 24px;
+      margin-bottom: 16px;
+      padding-bottom: 0.3em;
+      border-bottom: 1px solid var(--border);
+      line-height: 1.25;
+    }
+    .markdown-body h3 {
+      font-size: 1.25em;
+      font-weight: 600;
+      margin-top: 24px;
+      margin-bottom: 16px;
+      line-height: 1.25;
+    }
+    .markdown-body h4 {
+      font-size: 1em;
+      font-weight: 600;
+      margin-top: 24px;
+      margin-bottom: 16px;
+      line-height: 1.25;
+    }
+    .markdown-body h5 {
+      font-size: 0.875em;
+      font-weight: 600;
+      margin-top: 24px;
+      margin-bottom: 16px;
+      line-height: 1.25;
+    }
+    .markdown-body h6 {
+      font-size: 0.85em;
+      font-weight: 600;
+      margin-top: 24px;
+      margin-bottom: 16px;
+      line-height: 1.25;
+      color: var(--text-muted);
+    }
+
+    /* ── Paragraphs ── */
+    .markdown-body p {
+      margin-top: 0;
+      margin-bottom: 16px;
+    }
+
+    /* ── Bold & Italic ── */
+    .markdown-body strong {
+      font-weight: 600;
+    }
+    .markdown-body em {
+      font-style: italic;
+    }
+
+    /* ── Links ── */
+    .markdown-body a {
+      color: var(--link);
+      text-decoration: none;
+    }
+    .markdown-body a:hover {
+      text-decoration: underline;
+    }
+
+    /* ── Lists ── */
+    .markdown-body ul,
+    .markdown-body ol {
+      margin-top: 0;
+      margin-bottom: 16px;
+      padding-left: 2em;
+    }
+    .markdown-body ul {
+      list-style-type: disc;
+    }
+    .markdown-body ol {
+      list-style-type: decimal;
+    }
+    .markdown-body li {
+      margin-top: 0.25em;
+    }
+    .markdown-body li + li {
+      margin-top: 0.25em;
+    }
+    .markdown-body ul ul,
+    .markdown-body ul ol,
+    .markdown-body ol ul,
+    .markdown-body ol ol {
+      margin-top: 0;
+      margin-bottom: 0;
+    }
+
+    /* ── Task Lists (Custom Checkboxes via inline SVG) ── */
+    .markdown-body .task-list {
+      list-style: none;
+      padding-left: 1.5em;
+    }
+    .markdown-body .task-list li {
+      position: relative;
+      padding-left: 6px;
+    }
+    .markdown-body .task-list .check {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--checkbox-border);
+      border-radius: 3px;
+      background: var(--bg);
+      vertical-align: middle;
+      margin-right: 0.5em;
+      position: relative;
+      top: -1px;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .markdown-body .task-list .check.checked {
+      background: var(--checkbox-bg);
+      border-color: var(--checkbox-bg);
+    }
+    .markdown-body .task-list .check.checked svg {
+      display: block;
+      position: absolute;
+      top: 1px;
+      left: 1px;
+      width: 10px;
+      height: 10px;
+    }
+
+    /* ── Tables ── */
+    .markdown-body table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-bottom: 16px;
+      overflow: auto;
+      font-size: 14px;
+      table-layout: auto;
+    }
+    .markdown-body table th {
+      font-weight: 600;
+      background: var(--bg-subtle);
+      padding: 6px 13px;
+      border: 1px solid var(--border);
+      text-align: left;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .markdown-body table td {
+      padding: 6px 13px;
+      border: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .markdown-body table tr:nth-child(even) {
+      background: var(--table-stripe);
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    /* ── Code ── */
+    .markdown-body code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 85%;
+      background: var(--bg-code);
+      padding: 0.2em 0.4em;
+      border-radius: 6px;
+    }
+    .markdown-body pre {
+      background: var(--bg-subtle);
+      border-radius: 6px;
+      padding: 16px;
+      overflow-x: auto;
+      margin-top: 0;
+      margin-bottom: 16px;
+      line-height: 1.45;
+      font-size: 85%;
+    }
+    .markdown-body pre code {
+      background: transparent;
+      padding: 0;
+      border-radius: 0;
+      font-size: inherit;
+      word-break: normal;
+      white-space: pre;
+    }
+
+    /* ── Syntax Highlighting ── */
+    .markdown-body pre .kw { color: var(--kw); }
+    .markdown-body pre .str { color: var(--str); }
+    .markdown-body pre .cmt { color: var(--cmt); font-style: italic; }
+    .markdown-body pre .fn { color: var(--fn); }
+    .markdown-body pre .num { color: var(--num); }
+    .markdown-body pre .type { color: var(--type); }
+    .markdown-body pre .attr { color: var(--attr); }
+    .markdown-body pre .op { color: var(--kw); }
+
+    /* ── Blockquotes ── */
+    .markdown-body blockquote {
+      margin: 0 0 16px 0;
+      padding: 0 16px;
+      border-left: 4px solid var(--border);
+      color: var(--text-muted);
+    }
+    .markdown-body blockquote p:last-child {
+      margin-bottom: 0;
+    }
+
+    /* ── Horizontal Rules ── */
+    .markdown-body hr {
+      border: none;
+      border-top: 3px solid var(--border);
+      margin: 24px 0;
+      height: 0;
+    }
+
+    /* ── Images ── */
+    .markdown-body img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+    }
+
+    /* ── Strikethrough ── */
+    .markdown-body del {
+      text-decoration: line-through;
+      color: var(--text-muted);
+    }
+
+    /* ── Print Styles ── */
+    @media print {
+      .toolbar {
+        display: none !important;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        background: white !important;
+        color: #1f2328 !important;
+      }
+      .markdown-body {
+        max-width: 100%;
+        padding: 0;
+        margin: 0;
+      }
+      .markdown-body pre,
+      .markdown-body code {
+        word-wrap: break-word;
+        white-space: pre-wrap;
+      }
+      .markdown-body a {
+        color: #1f2328 !important;
+        text-decoration: none;
+      }
+      .markdown-body table {
+        page-break-inside: avoid;
+      }
+      .markdown-body h1,
+      .markdown-body h2,
+      .markdown-body h3 {
+        page-break-after: avoid;
+      }
+      .markdown-body img {
+        page-break-inside: avoid;
+      }
+      .markdown-body pre {
+        background: #f6f8fa !important;
+      }
+      .markdown-body table th {
+        background: #f6f8fa !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      .markdown-body table tr:nth-child(even) {
+        background: #eaeef2 !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      .markdown-body hr {
+        border-top-color: #d1d9e0 !important;
+      }
+      .markdown-body h1,
+      .markdown-body h2 {
+        border-bottom-color: #d1d9e0 !important;
+      }
+      .markdown-body .task-list .check.checked {
+        background: #2da44e !important;
+        border-color: #2da44e !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      @page {
+        margin: 1.5cm;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <span class="filename">Stripe Restricted Key Setup.md</span>
+    <div class="actions">
+      <span class="generated">Generated 30 April 2026</span>
+      <button class="icon-btn" onclick="toggleTheme()" title="Toggle dark mode" id="theme-btn">&#9790;</button>
+      <button class="icon-btn" onclick="toggleWidth()" title="Toggle wide layout" id="width-btn">&#8596;</button>
+      <button class="secondary" onclick="navigator.clipboard.writeText(window.location.href).then(function(){this.textContent='Copied!'}.bind(this)).catch(function(){})">Copy Link</button>
+      <button onclick="window.print()">Download as PDF</button>
+    </div>
+  </div>
+  <article class="markdown-body">
+<h1>Stripe Restricted Key Setup</h1>
+<p><strong>Prepared for</strong>: Bullet Digital Media (Stephen Taylor)</p>
+<p><strong>Prepared by</strong>: IzzyAgents</p>
+<p><strong>Date</strong>: 30/04/2026</p>
+<p><strong>For</strong>: Phase 1 - Sprint 3 financial integrations (Stripe, Xero, Timely)</p>
+<hr>
+<h2>Why a restricted key, not the master secret</h2>
+<p>Restricted keys are scoped to only the resources we need, can be revoked or rotated independently, and give us a clean audit trail per integration. The master secret key has full account access, which is more risk than this integration warrants.</p>
+<h2>Resources and permissions to grant</h2>
+<p>Toggle each of these to the listed permission inside the restricted-key creation screen. Leave <strong>everything else on <code>None</code></strong>.</p>
+<table>
+<thead>
+<tr><th>Resource</th><th>Permission</th><th>Why we need it</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Customers</code></td><td>Read + Write</td><td>Create the Stripe customer when an agreement is signed; update contact details if they change</td></tr>
+<tr><td><code>Payment methods</code></td><td>Read + Write</td><td>Attach the card captured in PandaDoc to the customer; update if the client adds a new card</td></tr>
+<tr><td><code>Subscriptions</code></td><td>Read + Write</td><td>Create the recurring subscription after kick-off sign-off; pause / cancel if the client churns</td></tr>
+<tr><td><code>Prices</code></td><td>Read + Write</td><td>Look up existing pricing tiers; create one-off prices for bespoke offers when needed</td></tr>
+<tr><td><code>Invoices</code></td><td>Read + Write</td><td>Issue and read invoices for retainer billing and proration adjustments</td></tr>
+<tr><td><code>Events</code></td><td>Read</td><td>Verify webhook payloads (subscription updated, payment succeeded, payment failed) and reconcile state</td></tr>
+</tbody>
+</table>
+<h2>What you can leave on <code>None</code></h2>
+<p>You will see a long list of resources in the create-key screen. The following are <strong>not</strong> required for Phase 1, so leaving them on <code>None</code> is the right call:</p>
+<p><code>Connect</code>, <code>Identity</code>, <code>Issuing</code>, <code>Terminal</code>, <code>Treasury</code>, <code>Reporting</code>, <code>Files</code>, <code>Tax</code>, <code>Radar</code>, <code>Sigma</code>, <code>Webhook endpoints</code> (read-only access to webhook configuration is not needed - we register endpoints from our side).</p>
+<h2>Step-by-step setup</h2>
+<ol>
+<li>Stripe Dashboard -> <strong>Developers</strong> -> <strong>API keys</strong> -> <strong>Create restricted key</strong>.</li>
+<li>Name the key <code>IzzyAgents_Bullet_Phase1_RW_v1</code>. (Naming convention: <code>&lt;vendor&gt;_&lt;engagement&gt;_&lt;phase&gt;_&lt;scope&gt;_&lt;version&gt;</code>. Lets you rotate without breaking integrations.)</li>
+<li>Toggle each resource above to its listed permission. Confirm everything else is on <code>None</code>.</li>
+<li>Click <strong>Create key</strong>. Stripe will reveal the key value <strong>once</strong> - copy it immediately.</li>
+<li>Store the key in your password manager (1Password, Bitwarden, or your team's standard) <strong>before</strong> closing the modal. Stripe will not show it again.</li>
+<li>Share with IzzyAgents via a secure channel - your password manager's secure share, a one-time-secret link, or a shared vault item. <strong>Never paste the key into plain email or Slack.</strong></li>
+</ol>
+<h2>Rotation and revocation</h2>
+<p>Rotate every 12 months as standard, and immediately if it is suspected of leaking (e.g. accidentally committed to a repo, shared in a screenshot, used by a departing team member). Rotation is the same flow: create a new key, hand it over, confirm the integration is using it, then click <strong>Roll</strong> on the old key in the Stripe dashboard. Revocation is one click on the same screen if the key needs to be killed instantly.</p>
+<h2>Webhook signing secret (separate value)</h2>
+<p>The webhook signing secret is <strong>not</strong> the same as the restricted API key. We register the webhook endpoint from our side in Sprint 3, at which point Stripe gives us a <code>whsec_...</code> value. We will request that one alongside the API key when Sprint 3 starts, but it is captured at endpoint-registration time, not when the API key is created.</p>
+<h2>What we need from you</h2>
+<ul>
+<li>The restricted key value, shared via a secure channel.</li>
+<li>Confirmation of which Stripe account / mode the key is for (Live vs Test). Sprint 3 wants both - we develop against Test mode and switch to Live for the pilot.</li>
+</ul>
+  </article>
+  <script>
+    function toggleTheme() {
+      var html = document.documentElement;
+      var isDark = html.getAttribute('data-theme') === 'dark';
+      if (isDark) {
+        html.removeAttribute('data-theme');
+        document.getElementById('theme-btn').textContent = '\u263E';
+      } else {
+        html.setAttribute('data-theme', 'dark');
+        document.getElementById('theme-btn').textContent = '\u2600';
+      }
+      try { localStorage.setItem('pdf-theme', isDark ? 'light' : 'dark'); } catch(e) {}
+    }
+
+    function toggleWidth() {
+      var html = document.documentElement;
+      var isWide = html.getAttribute('data-width') === 'wide';
+      if (isWide) {
+        html.removeAttribute('data-width');
+        document.getElementById('width-btn').textContent = '\u2194';
+      } else {
+        html.setAttribute('data-width', 'wide');
+        document.getElementById('width-btn').textContent = '\u2B0C';
+      }
+      try { localStorage.setItem('pdf-width', isWide ? 'normal' : 'wide'); } catch(e) {}
+    }
+
+    // Restore saved preferences
+    try {
+      if (localStorage.getItem('pdf-theme') === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        document.getElementById('theme-btn').textContent = '\u2600';
+      }
+      if (localStorage.getItem('pdf-width') === 'wide') {
+        document.documentElement.setAttribute('data-width', 'wide');
+        document.getElementById('width-btn').textContent = '\u2B0C';
+      }
+    } catch(e) {}
+  </script>
+</body>
+</html>

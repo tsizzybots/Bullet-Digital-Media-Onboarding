@@ -522,6 +522,8 @@ Detailed TDD task breakdown to follow in `docs/sprint-plan.md` once this archite
 
 ## 11. Open Questions For Steve
 
+This section captures **plan-scope** open questions (scope, decisions, deferrals). Blocking **implementation** questions raised during the build are tracked separately in `docs/openquestions.md` (one source of truth, with verbatim wording, owner, blocking impact, and our provisional default for each).
+
 Several prior questions were resolved by Steve's Loom walkthroughs and the 21/04/2026 meeting (agreement platform, portal refresh, Zapier inventory, Sheet schema, Slack channel, Asana task shape, Timely model). The following remain:
 
 ### Resolved since the previous draft
