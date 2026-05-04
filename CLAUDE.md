@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a **project planning and documentation workspace** for the IzzyAgents & Bullet Digital Media AI engagement. Bullet Digital Media is a gym/fitness marketing agency (~91-100 active clients, ~8-12 team members) that IzzyAgents is building AI solutions for.
 
-**Current status**: Documentation and discovery phase. No application code exists yet — this workspace contains project scope, meeting notes, and questionnaire responses that provide context for future development. Code will be added as the application is built out.
+**Current status**: Active development phase (entered 03/05/2026). Planning is complete; Phase 1 plan v3.2 is locked as the build spec. Application code is being added to this workspace as the build progresses.
 
 **Current focus**: Phase 1 only. Future phases will not begin until Phase 1 is fully complete.
 
@@ -17,6 +17,7 @@ This is a **project planning and documentation workspace** for the IzzyAgents & 
 - `questionnaire_responses/` - Client discovery questionnaire data (CSV)
 - `emails/` - Source email briefs from Bullet (e.g. `Bullet Onboarding Process.pdf`)
 - `docs/` - Plan documents, Loom summaries, and other project documentation
+  - `docs/CHANGELOG.md` - **canonical log of all development updates, decisions, and discoveries** (see "Changelog Discipline" below)
   - `docs/phase-1-plan.md` and `docs/phase-1-plan-client.md` - current Phase 1 plans (internal + client-facing)
   - `docs/loom-video-summaries/` - Steve's walkthroughs of the current onboarding mechanics (OB-Phase-1, OB-Phase-2)
   - `docs/archive/` - Deferred earlier-scope plans (knowledge bank, Telegram bot)
@@ -67,6 +68,30 @@ Key constraints:
 - Internal-facing tool; single-tenant (Bullet team only)
 - Every fan-out action is idempotent, retryable, and individually auditable - partial failures must be visible in the dashboard, never silent
 - Every job writes its outcome (success/failure, external ID, retry count) back to Postgres - nothing is inferred from live platform state at view-time
+
+## Changelog Discipline
+
+`docs/CHANGELOG.md` is the canonical log of development progress for this engagement. It exists because this is a multi-month build with shifting platform context and a single client; git log alone is not enough to retain decisions and discoveries.
+
+**You must update `docs/CHANGELOG.md` whenever any of the following happen:**
+
+- New code, files, features, or capabilities are added.
+- Existing behaviour, scope, or structure is changed.
+- Code, files, or capabilities are removed, deprecated, or retired.
+- A scope, architecture, or product **decision** is confirmed (e.g. "we are using X over Y").
+- A **discovery** is made about Bullet's existing processes, platforms, constraints, integrations, or data shapes (e.g. learning that a GHL workflow has a hidden branch, that a Stripe field is required, that a transcript format differs from what was assumed).
+- A bug is fixed in a way that's worth remembering.
+
+**Rules:**
+
+1. Append new entries to the top of the `[Unreleased]` block under a `### DD/MM/YYYY` heading (UK date format).
+2. Tag each bullet with one of: **Added**, **Changed**, **Removed**, **Decision**, **Discovery**, **Fixed**.
+3. Capture decisions and discoveries **in the moment** they are made or learned, not retrospectively.
+4. Reference commit hashes, file paths, or PR numbers where useful.
+5. Do not skip the changelog because "the commit message says it" - the changelog is for the human reader picking up context weeks later, not for replaying git history.
+6. Follow the project's formatting rules (no em dashes, UK dates, 24-hour times, USD).
+
+If a task touches code AND introduces a decision/discovery, log both - one as Added/Changed/Fixed, the other as Decision/Discovery.
 
 ## Document Formatting Rules
 
