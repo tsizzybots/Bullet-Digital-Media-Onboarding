@@ -14,6 +14,17 @@ Entry types:
 
 ## [Unreleased]
 
+### 04/05/2026 - Client progress page + /update-progress automation
+
+- **Added**: `progress-site/` - standalone Vite + React 19 + Tailwind 4 + Framer Motion static site that renders all 92 StrikeFlow cards as a client-facing progress dashboard. Dark mode by default, single-brand IzzyAgents header, "By Sprint / By Status" grouping toggle, "All / Done / Active / Upcoming" filters, slide-in detail panel with description and notes timeline. Mirrors the WZY Revenue Dashboard pattern. Initial build verified: 391 modules, 711ms, no errors.
+- **Added**: `scripts/transform_snapshot.py` - transforms a raw `mcp__strikeflow__boards_get_snapshot` response into the `BoardSnapshot` shape consumed by `progress-site/src/main.tsx`. Includes the 10 in-scope lists in fixed display order, normalises tags and notes defensively, warns on cards whose title doesn't begin with `S{N}-`.
+- **Added**: `progress-site/src/data/board-snapshot.json` - initial snapshot generated 04/05/2026: Sprint 1 (35), Sprint 2 (27), Sprint 3 (14), Sprint 4 (16); other lists empty.
+- **Added**: `.claude/skills/update-progress/SKILL.md` - `/update-progress` slash command. Fetches the live board, runs the transform, runs `vite build` to verify, commits the snapshot with a UK-format `chore: update progress dashboard snapshot - DD/MM/YYYY` message, then asks before pushing (push triggers Render auto-deploy).
+- **Added**: `render.yaml` - Render Blueprint with one static-site service `bullet-progress` (publishes `progress-site/dist`, 1h cache, SPA rewrite). First deploy still requires creating the service manually in the Render dashboard pointed at `tsizzybots/bullet_digital_media`; every push thereafter auto-deploys.
+- **Added**: `public/izzyagents-white.png` and `progress-site/public/izzyagents-white.png` (copied from WZY repo) - single-brand header logo.
+- **Changed**: `.gitignore` - excludes `node_modules/`, `dist/`, and `__pycache__/`.
+- **Decision**: client progress page mirrors the WZY pattern verbatim. All 92 internal cards are visible to the client (no curation, no description filtering). Reasoning: single source of truth, no editorial overhead, and Bullet sees the same TDD-shaped task content the build team works against - matches the "agnostic interface" long-term vision where everything goes through one front-end. Routine snapshot refreshes do **not** require a changelog entry; only structural changes (new sprint, new list) do.
+
 ### 04/05/2026 - Infrastructure setup doc + changelog discipline tightened
 
 - **Added**: `docs/infrastructure.md` - client-facing infrastructure setup guide. Lists every third-party service Bullet must register for (Section A: 9 new services - Neon, Render, Inngest, Cloudflare R2, Sentry, Resend, Anthropic, OpenAI, Firecrawl), every existing service that needs IzzyAgents access added (Section B: 12 existing services), estimated monthly infrastructure cost ($220-$540 USD/month at pilot scale), an action checklist organised by sprint week, and credential-handling rules. Every service specifies how to share access with `team@izzyagents.ai`.

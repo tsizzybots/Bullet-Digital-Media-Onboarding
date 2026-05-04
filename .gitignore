@@ -3,3 +3,11 @@
 
 # Local rendered artefacts (HTML/PDF generated from markdown)
 output/
+
+# Node / Vite build artefacts (progress-site)
+node_modules/
+dist/
+
+# Python
+__pycache__/
+*.pyc

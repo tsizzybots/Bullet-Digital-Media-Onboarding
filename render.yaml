@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────
+# Bullet Digital Media — Render Blueprint
+# ─────────────────────────────────────────────────
+
+services:
+  # ─── Static Site (client progress dashboard) ──────────
+  - type: web
+    name: bullet-progress
+    runtime: static
+    buildCommand: |
+      cd progress-site &&
+      npm install &&
+      cp ../public/izzyagents-white.png public/ &&
+      npx vite build
+    staticPublishPath: progress-site/dist
+    pullRequestPreviewsEnabled: true
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: public, max-age=3600
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

@@ -1,0 +1,1062 @@
+{
+  "generated_at": "2026-05-04T03:27:47Z",
+  "board_name": "Bullet Digital Media",
+  "lists": [
+    {
+      "name": "Backlog",
+      "cards": []
+    },
+    {
+      "name": "Planned",
+      "cards": []
+    },
+    {
+      "name": "Sprint 1: Foundation & Signing Capture",
+      "cards": [
+        {
+          "id": "b1368e5a-97bd-49ef-a729-ef205d496465",
+          "title": "S1-01: Monorepo scaffold",
+          "description": "**Description**: Create the monorepo at `tsizzybots/bullet_digital_media` with `apps/api` (Python via uv), `apps/dashboard` (TS via pnpm workspaces), `packages/shared`. Add root `README.md`, `.gitignore` (including `.env`), `.editorconfig`, pre-commit hook scanning for secrets.\n\n**Tests**: `pnpm install` and `uv sync` both succeed cleanly from a fresh clone. Pre-commit hook rejects a test commit containing a fake API key. CI workflow file lints successfully.\n\n**Dependencies**: n/a",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:06:29.325Z",
+          "updated_at": "2026-05-04T02:06:29.325Z"
+        },
+        {
+          "id": "d42e434b-f113-41ce-9ade-9a37c75318fb",
+          "title": "S1-02: Docker Compose local dev environment",
+          "description": "**Description**: `docker-compose.yml` at repo root brings up Postgres 16 with `pgvector` extension and the Inngest dev server. Document the `docker compose up` command in the root README.\n\n**Tests**: `docker compose up` starts both services. A connection from a local script can `CREATE EXTENSION vector;` against the Postgres instance. Inngest dev server UI loads on its default port.\n\n**Dependencies**: S1-01",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:06:49.697Z",
+          "updated_at": "2026-05-04T02:06:49.697Z"
+        },
+        {
+          "id": "d763ba8f-4779-4902-aad1-d5dfc1025131",
+          "title": "S1-03: Neon Postgres provisioning (prod + staging)",
+          "description": "**Description**: Create two Neon projects: `bullet-prod` and `bullet-staging`. Enable `pgvector` in both. Configure pgbouncer pooling. Capture connection strings into Render env groups (groundwork for S1-04).\n\n**Tests**: `psql` connection succeeds against both databases over TLS. `SELECT * FROM pg_extension WHERE extname = 'vector';` returns a row in both.\n\n**Dependencies**: n/a",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:17.683Z",
+          "updated_at": "2026-05-04T02:07:17.683Z"
+        },
+        {
+          "id": "ab449efe-fecf-424e-a3c5-cbf9db11c571",
+          "title": "S1-04: Render service provisioning (staging)",
+          "description": "**Description**: Create staging Render services: `bullet-api-staging` (FastAPI), `bullet-worker-staging` (Inngest worker), `bullet-cron-staging` (cron), `bullet-dashboard-staging` (Next.js). Wire env groups to Neon staging. Confirm zero-downtime restart works.\n\n**Tests**: Each staging service serves a `/healthz` endpoint returning `{\"status\":\"ok\"}` over HTTPS. Render env vars are scoped per service via env groups.\n\n**Dependencies**: S1-01, S1-03",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:34.990Z",
+          "updated_at": "2026-05-04T02:07:34.990Z"
+        },
+        {
+          "id": "0b30fa16-92a1-4acd-acfe-a8a1e286237d",
+          "title": "S1-05: SQLAlchemy + Alembic setup",
+          "description": "**Description**: Configure SQLAlchemy 2.x async with asyncpg driver. Initialise Alembic with an `env.py` that supports per-PR Neon DB branching. First migration: `vector` extension and `citext` extension creation only.\n\n**Tests**: `alembic upgrade head` runs cleanly against a fresh DB. `alembic downgrade base` reverses cleanly. Async session factory yields a working session in a smoke test.\n\n**Dependencies**: S1-02",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:53.041Z",
+          "updated_at": "2026-05-04T02:07:53.041Z"
+        },
+        {
+          "id": "229e6585-dfd4-49bf-b414-28ee2dbedef0",
+          "title": "S1-06: Schema migration - clients table",
+          "description": "**Description**: Alembic migration creating `clients` per PRD section 4.1, including `campaign_flow_type` enum, `current_step` enum, `parent_client_id` self-FK, all platform ID columns, and the indexes listed (email, current_step, created_at DESC, parent_client_id).\n\n**Tests**: Migration applies and reverses cleanly. Inserting a row with `legal_entity='UK'` succeeds; inserting an invalid enum value fails. Self-FK accepts a parent_client_id that exists; rejects one that does not.\n\n**Dependencies**: S1-05",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:12.409Z",
+          "updated_at": "2026-05-04T02:08:12.409Z"
+        },
+        {
+          "id": "891e07c4-9737-47cc-819b-41f47c7e595f",
+          "title": "S1-07: Schema migration - client_knowledge table",
+          "description": "**Description**: Alembic migration per PRD section 4.2 including the `vector(1536)` column, GIN index on `value`, and ivfflat index on `embedding`. Source enum and FK to `clients`.\n\n**Tests**: Migration up/down. Insert with valid embedding succeeds. GIN index used by query planner for `value @>` lookup (verified via `EXPLAIN`).\n\n**Dependencies**: S1-06",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:35.566Z",
+          "updated_at": "2026-05-04T02:08:35.566Z"
+        },
+        {
+          "id": "817f4f5d-eea9-49fa-811c-830af8e68d84",
+          "title": "S1-08: Schema migration - onboarding_events table",
+          "description": "**Description**: Alembic migration per PRD section 4.3 with the `(event_type, external_id) UNIQUE` constraint for idempotent webhook ingestion.\n\n**Tests**: Migration up/down. Inserting two rows with the same `(event_type, external_id)` raises an integrity error.\n\n**Dependencies**: S1-06",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:52.150Z",
+          "updated_at": "2026-05-04T02:08:52.150Z"
+        },
+        {
+          "id": "8ada3c7c-3b9a-4b56-a908-85a9010f0300",
+          "title": "S1-09: Schema migration - platform_actions table",
+          "description": "**Description**: Alembic migration per PRD section 4.4. `idempotency_key UNIQUE`, status enum, FK to `clients` and `onboarding_events`.\n\n**Tests**: Migration up/down. Duplicate `idempotency_key` insert raises integrity error. Status transitions through pending -> in_progress -> success without constraint violation.\n\n**Dependencies**: S1-06, S1-08",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:10.903Z",
+          "updated_at": "2026-05-04T02:09:10.903Z"
+        },
+        {
+          "id": "036515b6-1871-4c54-928a-eb2780e1a8be",
+          "title": "S1-10: Schema migration - remaining tables",
+          "description": "**Description**: One migration covering `documents`, `research_results`, `client_assets`, `users`, `sessions`, `audit_log` per PRD sections 4.5 - 4.10.\n\n**Tests**: Migration up/down. `users.email` UNIQUE enforced. `sessions.token_hash` UNIQUE enforced. Enums reject invalid values.\n\n**Dependencies**: S1-06",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:30.092Z",
+          "updated_at": "2026-05-04T02:09:30.092Z"
+        },
+        {
+          "id": "89c4279d-1ab6-4ff4-af7b-3a4885160e65",
+          "title": "S1-11: Seed founders and PDs",
+          "description": "**Description**: Idempotent seeder script that inserts the four named users (John, Stephen, Max, Luchiano) with their roles (`founder`, `founder`, `performance_director`, `performance_director`) and a temporary password each that forces a reset on first login.\n\n**Tests**: Running the seeder twice produces identical state (no duplicates). Each seeded user's password verifies under argon2id.\n\n**Dependencies**: S1-10",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:50.716Z",
+          "updated_at": "2026-05-04T02:09:50.716Z"
+        },
+        {
+          "id": "e0c20bc0-dcbf-4fe9-b171-73d9ef720e79",
+          "title": "S1-12: FastAPI app shell + role dependencies",
+          "description": "**Description**: FastAPI app with structured JSON logging, `/healthz`, `/version`, OpenAPI exposed at `/openapi.json`. Reusable role-based dependencies (`require_founder`, `require_pd`, `require_am`, `require_engineer`).\n\n**Tests**: `/healthz` returns 200. An endpoint guarded by `require_founder` returns 403 for an AM session and 200 for a founder session. OpenAPI document validates against the OpenAPI 3.1 schema.\n\n**Dependencies**: S1-04, S1-10",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:08.534Z",
+          "updated_at": "2026-05-04T02:10:08.534Z"
+        },
+        {
+          "id": "2c0c76da-09b5-41a5-9b1a-610233881964",
+          "title": "S1-13: Username/password auth + argon2id",
+          "description": "**Description**: `POST /auth/login` accepts email + password, verifies under argon2id, issues a session cookie. Brute-force protection: 5 failed attempts in 15 minutes from the same IP triggers a 15-minute lockout.\n\n**Tests**: Valid credentials issue a session cookie. Invalid credentials return 401. Five rapid failures from the same IP trigger lockout; sixth attempt returns 429 even with valid credentials. Lockout expires after 15 minutes.\n\n**Dependencies**: S1-11, S1-12",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:27.138Z",
+          "updated_at": "2026-05-04T02:10:27.138Z"
+        },
+        {
+          "id": "ae65f729-aa32-46ce-aabe-a40d941b2bd5",
+          "title": "S1-14: Resend email confirmation flow",
+          "description": "**Description**: New users receive a confirmation email via Resend with a 24h-expiring token. `email_confirmed=false` blocks login. `POST /auth/confirm/{token}` flips the flag and timestamps `email_confirmed_at`.\n\n**Tests**: Unconfirmed user cannot log in (403 with a clear message). Confirmation link within 24h flips the flag. Expired token returns 410. Resend API client is mockable in tests.\n\n**Dependencies**: S1-13",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:44.621Z",
+          "updated_at": "2026-05-04T02:10:44.621Z"
+        },
+        {
+          "id": "34d34b36-6b19-4364-a3ef-ccc90cddb955",
+          "title": "S1-15: 7-day session cookie + revocation",
+          "description": "**Description**: Sessions stored in `sessions` table with `sha256(token)`, HttpOnly + Secure + SameSite=Lax cookie, 7-day expiry. `POST /auth/logout` deletes the session row.\n\n**Tests**: Session cookie works for 7 days. Cookie expires after 7 days and access is rejected. Logout deletes the row and the same cookie is rejected on the next request.\n\n**Dependencies**: S1-13",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:07.399Z",
+          "updated_at": "2026-05-04T02:11:07.399Z"
+        },
+        {
+          "id": "08f2f8a2-58df-40aa-af9d-f3cad9fba0a6",
+          "title": "S1-16: Next.js dashboard scaffold",
+          "description": "**Description**: Next.js (App Router) + TypeScript strict + Tailwind + shadcn/ui dark-mode default. Route groups for role boundaries (`(founder)`, `(pd)`, `(am)`). Server-side auth guard reading session cookie.\n\n**Tests**: `pnpm build` succeeds with strict TypeScript. Unauthenticated access to a protected route redirects to `/login`. Dark mode is the default theme on a fresh load.\n\n**Dependencies**: S1-04, S1-12",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:22.574Z",
+          "updated_at": "2026-05-04T02:11:22.574Z"
+        },
+        {
+          "id": "67da169c-0a1b-4272-aa3b-ae004afcb77b",
+          "title": "S1-17: OpenAPI -> TS client codegen + TanStack Query",
+          "description": "**Description**: Codegen pipeline that produces a typed TS client from `apps/api`'s OpenAPI document into `packages/shared`. TanStack Query configured with 5-10s polling defaults on active dashboard views.\n\n**Tests**: Codegen runs cleanly in CI; generated types compile under strict mode. A sample query against `/healthz` from the dashboard renders the response without `any`.\n\n**Dependencies**: S1-12, S1-16",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:37.787Z",
+          "updated_at": "2026-05-04T02:11:37.787Z"
+        },
+        {
+          "id": "b94a5e38-99ae-43e0-8c5b-e99597b51cbd",
+          "title": "S1-18: Login + email confirmation pages",
+          "description": "**Description**: `/login` page with email + password form and confirmation-flow handling. Confirmation page reads the token from the URL and calls `POST /auth/confirm/{token}`.\n\n**Tests**: Playwright E2E: a seeded user can log in, see the empty `/clients` page, log out, and is rejected when re-using the cookie. A new user receives a confirmation email (Resend mock), clicks the link, and is logged in.\n\n**Dependencies**: S1-14, S1-15, S1-16, S1-17",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:47.797Z",
+          "updated_at": "2026-05-04T02:11:47.797Z"
+        },
+        {
+          "id": "e12f156d-d4c5-4b6d-a468-572ef9e6431a",
+          "title": "S1-19: Inngest setup (prod + staging + local)",
+          "description": "**Description**: Inngest accounts and signing keys provisioned for prod and staging. Worker process in `apps/api` registers a no-op function. Local dev uses the dev server from S1-02.\n\n**Tests**: Sending a test event via Inngest CLI in local dev fires the registered function. Staging Inngest UI shows the worker as connected.\n\n**Dependencies**: S1-02, S1-04",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:59.224Z",
+          "updated_at": "2026-05-04T02:11:59.224Z"
+        },
+        {
+          "id": "0f5268fa-ecb0-452c-ab1e-a8300b734957",
+          "title": "S1-20: Sentry setup (api + dashboard, PII scrubbing)",
+          "description": "**Description**: Sentry DSNs per environment. PII scrubbing rules: email, phone, transcript content, signed-PDF URLs scrubbed before send. Source maps uploaded for the dashboard.\n\n**Tests**: A deliberate `raise` in api lands in Sentry with email scrubbed to `[Filtered]`. Dashboard runtime error lands in Sentry with a useful stack trace from source maps.\n\n**Dependencies**: S1-04, S1-16",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:12:09.788Z",
+          "updated_at": "2026-05-04T02:12:09.788Z"
+        },
+        {
+          "id": "4384b59d-57f3-4671-9984-26100a59af3c",
+          "title": "S1-21: Render env groups + secret hygiene",
+          "description": "**Description**: All Phase 1 secrets configured in Render env groups (per env). Pre-commit hook (already installed in S1-01) verified to scan staged files for common secret patterns.\n\n**Tests**: Attempting to commit a file containing `sk_test_` is blocked. All staging services start with their env vars resolved (no `MISSING_ENV` errors in logs).\n\n**Dependencies**: S1-01, S1-04",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:12:21.414Z",
+          "updated_at": "2026-05-04T02:12:21.414Z"
+        },
+        {
+          "id": "6fe7c16a-4aaf-4b93-9b52-6112b9386e2e",
+          "title": "S1-22: PandaDoc webhook receiver + HMAC verification",
+          "description": "**Description**: `POST /webhooks/pandadoc` verifies HMAC signature, dedupes against `(event_type=pandadoc.signed, external_id=document.id)`, persists `onboarding_events` row, and triggers an Inngest event for downstream fan-out.\n\n**Tests**: Valid signature + new payload creates one event row and triggers Inngest. Replay of the same payload creates no new row (idempotent). Tampered signature returns 401 and creates no row. Verified-at timestamp populated only on signature pass.\n\n**Dependencies**: S1-08, S1-19",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:15:39.393Z",
+          "updated_at": "2026-05-04T02:15:39.393Z"
+        },
+        {
+          "id": "1caff9fe-dd75-4a40-8263-fe26dfc194f3",
+          "title": "S1-23: PandaDoc daily reconciliation cron",
+          "description": "**Description**: Cron at 03:00 UK time pulls `documents?status=completed&signed_after=<last_check>` from PandaDoc. Any signed documents missing a corresponding `onboarding_events` row trigger a synthetic event and a Slack alert.\n\n**Tests**: Mocked PandaDoc API returns 3 docs, 1 of which has no event row. Cron creates the missing event and posts to Slack mock. Subsequent run with no new docs is a no-op.\n\n**Dependencies**: S1-22",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:15:51.411Z",
+          "updated_at": "2026-05-04T02:15:51.411Z"
+        },
+        {
+          "id": "f42ddab4-fa6a-470c-8f7f-faf0c70762b0",
+          "title": "S1-24: PandaDoc manual replay endpoint",
+          "description": "**Description**: `POST /admin/pandadoc/replay/{document_id}` (founder + engineer only) fetches the document via the API and emits the synthetic webhook through the same handler as S1-22.\n\n**Tests**: Replay of a known signed document creates the event row and triggers Inngest. Replay of an unknown document returns 404. AM role gets 403.\n\n**Dependencies**: S1-22",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:02.194Z",
+          "updated_at": "2026-05-04T02:16:02.194Z"
+        },
+        {
+          "id": "d550c5d0-3f26-4ec2-8cc6-a292a887a331",
+          "title": "S1-25: GHL sub-account creation (direct API, replaces Pabbly)",
+          "description": "**Description**: Inngest function `create_ghl_subaccount` triggered by `pandadoc.signed`. Calls GHL agency API directly. Writes `platform_actions` row pre/post.\n\n**Tests**: Mocked GHL agency API returns a sub-account id; row recorded with `status=success`, `external_id` set, `clients.ghl_subaccount_id` populated. API failure marks `status=failed` with `last_error` and increments `retry_count`. Concurrency cap of 3 enforced (verified by parallel test events).\n\n**Dependencies**: S1-09, S1-22",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:13.430Z",
+          "updated_at": "2026-05-04T02:16:13.430Z"
+        },
+        {
+          "id": "1ae931df-581f-460b-8ff1-fdfed42ae2c8",
+          "title": "S1-26: Returning-client check + parent_client_id linking",
+          "description": "**Description**: Before sub-account creation in S1-25, lookup existing GHL contact by signed-document email. If found, set `parent_client_id` on the new client row to the existing client's id and skip sub-account creation; reuse the existing `ghl_subaccount_id`.\n\n**Tests**: First signing for an email creates a fresh client + sub-account. Second signing for the same email creates a new client row with `parent_client_id` set and reuses the existing GHL sub-account id; `platform_actions` records a `skipped_existing` outcome.\n\n**Dependencies**: S1-25",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:26.748Z",
+          "updated_at": "2026-05-04T02:16:26.748Z"
+        },
+        {
+          "id": "2bc87036-0901-4404-8090-dc20c8608199",
+          "title": "S1-27: Sales call transcript capture - native (Zoom + Google Meet)",
+          "description": "**Description**: Webhook receivers for Zoom and Google Meet recording-completed events. Pull native transcript when available, store text in `documents` (R2 key) and trigger AI summary.\n\n**Tests**: Zoom mock event with native transcript stores transcript in R2 and creates a `documents` row of kind `transcript_text`. Same for Google Meet. Event with no transcript falls through to S1-28 path.\n\n**Dependencies**: S1-10, S1-19, plus R2 buckets created (covered by S1-21 env groups)",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:39.370Z",
+          "updated_at": "2026-05-04T02:16:39.370Z"
+        },
+        {
+          "id": "7ff7c157-075a-4acd-a377-0d62fe12732f",
+          "title": "S1-28: Sales call transcript fallback - OpenAI Whisper",
+          "description": "**Description**: When native transcript is missing, download recording audio, send to Whisper API, store text in R2, write `documents` row of kind `transcript_text`. Soft cost cap $50/mo with alert at 80%.\n\n**Tests**: Mocked recording with no native transcript triggers Whisper path; `documents` row created. Cost-tracker accumulator emits an alert at 80% of cap.\n\n**Dependencies**: S1-27",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:51.933Z",
+          "updated_at": "2026-05-04T02:16:51.933Z"
+        },
+        {
+          "id": "09e4a96f-2ba1-45d3-9a89-f3294618ce9e",
+          "title": "S1-29: AI sales summary generator",
+          "description": "**Description**: Inngest function `summarise_sales_call`. Anthropic SDK call with `claude-opus-4-7`, prompt caching enabled (system prompt + few-shot examples cached, transcript not cached). Output validated against the Pydantic schema in PRD section 7.1.\n\n**Tests**: Given a fixture transcript, the function produces JSON matching the schema. Prompt-cache hit observed on the second call within 5 minutes (verified via response metadata). Schema-invalid output fails the function and surfaces in `platform_actions` with a clear `last_error`.\n\n**Dependencies**: S1-27 (transcript present)",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:56.411Z",
+          "updated_at": "2026-05-04T02:16:56.411Z"
+        },
+        {
+          "id": "bb7d528b-6bca-43dc-924c-4e0297e83989",
+          "title": "S1-30: Write summary to client_knowledge with embeddings",
+          "description": "**Description**: For each top-level field of the sales summary, insert one row into `client_knowledge` with `source=sales_call`. Compute embedding for `value_text` and store in `embedding` column.\n\n**Tests**: A summary with 7 fields produces 7 `client_knowledge` rows. Each row has a non-null embedding. Re-running the summariser for the same client + transcript does not duplicate rows (idempotent on `(client_id, source, key, captured_at)`).\n\n**Dependencies**: S1-07, S1-29",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:17:03.970Z",
+          "updated_at": "2026-05-04T02:17:03.970Z"
+        },
+        {
+          "id": "6e692d86-6a30-448c-86bf-227d9925c80a",
+          "title": "S1-31: Dashboard /clients list view",
+          "description": "**Description**: Server-rendered table of every client with current_step, time-in-step, last platform action status, and a link to the detail page. 10s polling.\n\n**Tests**: Playwright: with 3 seeded clients in different steps, the list renders all 3 with correct steps. Polling fetches a fresh row when a fourth client is inserted server-side.\n\n**Dependencies**: S1-06, S1-17, S1-18",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:17:10.927Z",
+          "updated_at": "2026-05-04T02:17:10.927Z"
+        },
+        {
+          "id": "bee7de9b-6617-42f9-a16c-5198151c3fe3",
+          "title": "S1-32: Dashboard /clients/[id] detail view (Sprint 1 slice)",
+          "description": "**Description**: Detail page shows client metadata, current_step, AI sales summary (if present), platform deep-links (placeholders for platforms not yet integrated). 5s polling on active fields.\n\n**Tests**: Playwright: opening a seeded client with a sales summary renders the structured summary fields. Opening a client without a summary shows a clear \"no summary yet\" state. Inngest run id deep-link opens the Inngest UI for a recorded action.\n\n**Dependencies**: S1-30, S1-31",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:17:20.263Z",
+          "updated_at": "2026-05-04T02:17:20.263Z"
+        },
+        {
+          "id": "abf1e07e-1f60-4c4c-bf2f-45b6d56e9b73",
+          "title": "S1-33: GitHub Actions CI",
+          "description": "**Description**: PR workflow runs lint (`ruff` + `eslint`), typecheck (`mypy` + `tsc --noEmit`), and tests (`pytest` + `vitest` + Playwright). Per-PR Neon branch is created and torn down.\n\n**Tests**: A PR introducing a lint error fails CI. A PR adding a passing test passes CI. Per-PR Neon branch is visible in the Neon dashboard during the run and removed after merge/close.\n\n**Dependencies**: S1-01, S1-03",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:17:26.303Z",
+          "updated_at": "2026-05-04T02:17:26.303Z"
+        },
+        {
+          "id": "22e2a909-d105-446f-97dd-82484ff45a53",
+          "title": "S1-34: Auto-deploy to Render staging on merge to main",
+          "description": "**Description**: Render auto-deploy hook on push to `main`. Promotion to production is manual via the Render dashboard.\n\n**Tests**: A merge to `main` deploys all four staging services. The production services do not auto-deploy (verified by inspecting Render deploy logs).\n\n**Dependencies**: S1-04, S1-33",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:17:32.181Z",
+          "updated_at": "2026-05-04T02:17:32.181Z"
+        },
+        {
+          "id": "5315fb26-253d-42b3-b053-2a3b69eb674c",
+          "title": "S1-35: Sprint 1 acceptance verification",
+          "description": "**Description**: Walk through every PRD section 12.1 acceptance criterion against the staging environment with the Bullet team. Any failure resets the sprint sign-off.\n\n**Tests**: Acceptance log committed at `docs/sprint-1-acceptance.md` with each criterion ticked, evidence linked, and any deferred items recorded with rationale.\n\n**Dependencies**: S1-22, S1-23, S1-25, S1-26, S1-29, S1-31, S1-32, S1-34",
+          "status": null,
+          "list_name": "Sprint 1: Foundation & Signing Capture",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:17:38.085Z",
+          "updated_at": "2026-05-04T02:17:38.085Z"
+        }
+      ]
+    },
+    {
+      "name": "Sprint 2: Core Fan-Out",
+      "cards": [
+        {
+          "id": "f2a2af68-3731-498f-897b-dbdf4db311ee",
+          "title": "S2-01: Slack incoming webhook integration",
+          "description": "**Description**: Adapter sending one-way notifications to `#bullet_inbound_clients` (and other channels via env config). New-signing notification includes deep links to dashboard, HubSpot, GHL, Drive, Asana, Calendar.\n\n**Tests**: Mocked Slack endpoint receives a well-formed message with all expected deep links on a `pandadoc.signed` event. Backoff retries on 429 (1 msg/sec rate limit) verified.\n\n**Dependencies**: S1-22",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:06:34.310Z",
+          "updated_at": "2026-05-04T02:06:34.310Z"
+        },
+        {
+          "id": "256c2a28-975f-4b89-b711-40588208756a",
+          "title": "S2-02: Asana integration - project + finance task + onboarding subtasks",
+          "description": "**Description**: Inngest function creates `Bullet Clients Status` project, finance task, onboarding subtasks per service-tier template. Stores `asana_project_id` and `asana_finance_task_id` on the client.\n\n**Tests**: Mocked Asana API call creates the expected hierarchy. Idempotency key prevents duplicate project on retry. Concurrency cap 5 enforced.\n\n**Dependencies**: S1-09, S1-22",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:06:54.062Z",
+          "updated_at": "2026-05-04T02:06:54.062Z"
+        },
+        {
+          "id": "6300af9b-dca3-46e4-aded-27166e59f2aa",
+          "title": "S2-03: Asana template checksum monitoring",
+          "description": "**Description**: Daily cron pulls each tracked Asana template, hashes the structure, and alerts Slack on drift.\n\n**Tests**: Mocked template change triggers an alert; unchanged template does not. Template registry stored in DB.\n\n**Dependencies**: S2-01, S2-02",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:21.095Z",
+          "updated_at": "2026-05-04T02:07:21.095Z"
+        },
+        {
+          "id": "e434624d-2770-4d45-9f54-bc1e8f79b76b",
+          "title": "S2-04: Google Sheets - client row creation",
+          "description": "**Description**: Adapter writes a row in the `Client Status Sheet` matching today's schema, including the `SaaS Mode` passthrough column. Stores `sheet_row_id` on the client.\n\n**Tests**: Mocked Sheets API call creates a row with all current columns. Re-run for the same client updates the existing row, does not create a duplicate.\n\n**Dependencies**: S1-09, S1-22",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:39.318Z",
+          "updated_at": "2026-05-04T02:07:39.318Z"
+        },
+        {
+          "id": "98991334-f670-4fb9-b382-cfce7347ac76",
+          "title": "S2-05: Google Drive - folder tree creation + sharing",
+          "description": "**Description**: Creates the actively-used folder tree per client (legacy folders skipped pending plan section 11 Q-2). Applies sharing per service-account configuration. Stores `drive_folder_id` on the client.\n\n**Tests**: Mocked Drive API creates the expected folder structure. Sharing permissions match the configured spec. Idempotent on retry (returns existing folder id).\n\n**Dependencies**: S1-09, S1-22",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:57.826Z",
+          "updated_at": "2026-05-04T02:07:57.826Z"
+        },
+        {
+          "id": "466e0dd6-0ab3-4cd3-890d-82f1e67e73e3",
+          "title": "S2-06: Google Calendar - kick-off booking + change subscription",
+          "description": "**Description**: Books the kick-off call via the existing GHL calendar link. Subscribes to calendar-change events; date changes propagate to Asana finance task in S3-13 (groundwork now).\n\n**Tests**: Mocked Calendar API creates the booking and stores the event id. A simulated calendar webhook for a date change is received and persisted as an `onboarding_events` row of type `calendar.kickoff_changed`.\n\n**Dependencies**: S1-09, S1-22",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:17.770Z",
+          "updated_at": "2026-05-04T02:08:17.770Z"
+        },
+        {
+          "id": "34ac08fd-896c-474b-b065-66f1951bbc10",
+          "title": "S2-07: HubSpot integration - contact read + stage mirror",
+          "description": "**Description**: Read contact fields used at PandaDoc template creation time. Mirror onboarding stage transitions back to HubSpot deal (optional but cheap to add now).\n\n**Tests**: Mocked HubSpot API returns contact data; client row populated with contact fields. Stage transition updates the deal stage; failure does not block the fan-out (writes a `failed` `platform_actions` row but the rest proceeds).\n\n**Dependencies**: S1-09, S1-22",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:40.493Z",
+          "updated_at": "2026-05-04T02:08:40.493Z"
+        },
+        {
+          "id": "c830d3f5-b69c-4dc9-a846-aee3ee6ff0f7",
+          "title": "S2-08: Inngest fan-out workflow + per-platform concurrency",
+          "description": "**Description**: Single Inngest workflow function fans out to S2-01 through S2-07 in parallel with per-platform concurrency caps from PRD section 6.3.\n\n**Tests**: A `pandadoc.signed` event triggers all six fan-out actions and they execute concurrently subject to the caps. A burst of 20 simulated signings respects the per-platform caps (verified via Inngest run logs).\n\n**Dependencies**: S2-01, S2-02, S2-04, S2-05, S2-06, S2-07",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:57.194Z",
+          "updated_at": "2026-05-04T02:08:57.194Z"
+        },
+        {
+          "id": "e0a85880-717f-4661-8b04-e8f3f3034de4",
+          "title": "S2-09: Idempotency + retry policy enforcement",
+          "description": "**Description**: Every fan-out function obeys the PRD section 6.1 - 6.4 rules: idempotency_key, exponential backoff (1m, 5m, 15m, 1h, 6h), max 5 attempts, dead-letter on final failure.\n\n**Tests**: A function that fails 4 times then succeeds records 5 attempts and final `status=success`. A function that fails 5 times records `status=dead_lettered`. Slack escalation alert fires on attempt 3.\n\n**Dependencies**: S2-08",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:15.436Z",
+          "updated_at": "2026-05-04T02:09:15.436Z"
+        },
+        {
+          "id": "30e3762a-c460-41f8-96f0-2fce4fd9c734",
+          "title": "S2-10: Dashboard /actions cross-client action health",
+          "description": "**Description**: View showing all `platform_actions` filtered by status (failed, retrying, dead-lettered). Per-row Inngest deep-link. 10s polling.\n\n**Tests**: Playwright: a seeded set of actions in mixed states renders correctly. Filter controls update the list. Inngest deep-link opens the correct run page.\n\n**Dependencies**: S1-31, S2-09",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:34.689Z",
+          "updated_at": "2026-05-04T02:09:34.689Z"
+        },
+        {
+          "id": "174c6147-b187-4209-80de-f722546ccb75",
+          "title": "S2-11: Manual retry button (dead-letter recovery)",
+          "description": "**Description**: Per-action retry button on `/actions` (founder + PD only). Re-enqueues the action via Inngest with a fresh attempt counter.\n\n**Tests**: Clicking retry on a dead-lettered action enqueues an Inngest event; on success the row flips to `status=success`. AM role does not see the button.\n\n**Dependencies**: S2-10",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:54.524Z",
+          "updated_at": "2026-05-04T02:09:54.524Z"
+        },
+        {
+          "id": "1865e6bf-b9a2-490a-8366-5e231b3e3b03",
+          "title": "S2-12: GHL OB V2 portal completion webhook",
+          "description": "**Description**: `POST /webhooks/ghl/portal` verifies signature, dedupes on `(event_type=ghl.portal_completed, external_id=response.id)`, persists `onboarding_events`.\n\n**Tests**: Valid event creates one row; replay creates none. Tampered signature rejected.\n\n**Dependencies**: S1-08, S1-19",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:12.013Z",
+          "updated_at": "2026-05-04T02:10:12.013Z"
+        },
+        {
+          "id": "a5a6010e-31d4-4836-8318-b21f1f27f336",
+          "title": "S2-13: Portal data ingestion to client_knowledge",
+          "description": "**Description**: Inngest function transforms the GHL portal payload into structured `client_knowledge` rows with `source=portal` and computed embeddings.\n\n**Tests**: Sample portal payload produces the expected set of knowledge rows. Re-running for the same response id is idempotent.\n\n**Dependencies**: S1-30, S2-12",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:30.592Z",
+          "updated_at": "2026-05-04T02:10:30.592Z"
+        },
+        {
+          "id": "c41e2a4c-7c35-4436-8588-47e44c18bdb5",
+          "title": "S2-14: campaign_flow_type field + PD selection UI",
+          "description": "**Description**: PD picks `low_ticket_checkout` or `high_ticket_consultation` on the client detail page. Default suggestion inferred from portal answers (`group_size=small AND consultation_price>0` -> high-ticket; else low-ticket). Audit-logged.\n\n**Tests**: PD can select a value; AM cannot. Default suggestion populates from portal data. Selection writes to `clients.campaign_flow_type` and an `audit_log` row.\n\n**Dependencies**: S1-32, S2-13",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:49.618Z",
+          "updated_at": "2026-05-04T02:10:49.618Z"
+        },
+        {
+          "id": "9a242fd4-c4c3-4705-9dbe-b8114f6fa861",
+          "title": "S2-15: Pricing calculator - subscription anchor",
+          "description": "**Description**: Pure function: `anchor_value = monthly_price / 30.4 * offer_days`. Returns the worked breakdown alongside the result.\n\n**Tests**: `£200 / 30.4 * 21` returns `£138.16` to two decimal places. Edge cases: zero offer_days returns 0; negative inputs raise. Worked-string contains the inputs and result.\n\n**Dependencies**: n/a",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:12.002Z",
+          "updated_at": "2026-05-04T02:11:12.002Z"
+        },
+        {
+          "id": "73dcc9bf-d458-42a4-8cf7-b960f45d8239",
+          "title": "S2-16: Pricing calculator - class-pack anchor",
+          "description": "**Description**: Pure function: `anchor_value = drop_in_rate * class_count`.\n\n**Tests**: `£30 * 5 = £150.00`. Worked-string format matches the subscription anchor's contract for consistent dashboard rendering.\n\n**Dependencies**: n/a",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:25.173Z",
+          "updated_at": "2026-05-04T02:11:25.173Z"
+        },
+        {
+          "id": "09e5818b-3b2a-4f9e-8d08-d670ee85b68f",
+          "title": "S2-17: Kick-off transcript capture",
+          "description": "**Description**: Mirror of S1-27 + S1-28 for kick-off calls. Triggers AI follow-up email generation.\n\n**Tests**: Kick-off recording event captures transcript via native or Whisper. `documents` row created with kind `transcript_text`. Triggers the appropriate variant generator.\n\n**Dependencies**: S1-27, S1-28",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:41.054Z",
+          "updated_at": "2026-05-04T02:11:41.054Z"
+        },
+        {
+          "id": "5714e949-1eaf-4723-a3a7-fe9512c0ec62",
+          "title": "S2-18: Kick-off email generator - low-ticket variant",
+          "description": "**Description**: Anthropic call with kick-off transcript + portal answers + sales summary + brand assets + historical-offers corpus. Combines S2-15 / S2-16 outputs. Produces JSON per PRD section 7.2 plus calculation transparency string.\n\n**Tests**: Fixture inputs produce JSON validating against the schema. `total_value`, `savings`, `percent_off` computed correctly. Three offer-name suggestions returned. Calculation transparency string includes every input and the final result.\n\n**Dependencies**: S2-15, S2-16, S2-17, S1-30",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:52.655Z",
+          "updated_at": "2026-05-04T02:11:52.655Z"
+        },
+        {
+          "id": "b943c0cc-230b-4619-8175-a5fd201bd7c1",
+          "title": "S2-19: Kick-off email generator - high-ticket variant",
+          "description": "**Description**: Anthropic call producing JSON per PRD section 7.3 (prose-only, no maths block).\n\n**Tests**: Fixture inputs produce schema-valid JSON. No `total_value` / `savings` / `percent_off` fields present. `email_body` references the agreed offer structure, ad budget, start date, creative requirements, kickoff date.\n\n**Dependencies**: S2-17, S1-30",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:12:02.284Z",
+          "updated_at": "2026-05-04T02:12:02.284Z"
+        },
+        {
+          "id": "6d4b5f34-c467-49f1-be42-52fd390ee9e4",
+          "title": "S2-20: Dashboard - Ready for PD Review state",
+          "description": "**Description**: Client detail surfaces the AI draft, suggested offer names (low-ticket only), worked pricing or prose, with edit controls. Status badge `Ready for PD Review`.\n\n**Tests**: Playwright: a client with a generated low-ticket draft renders all three offer-name suggestions and the worked maths. PD edits the email body and the change persists. AM cannot edit, only view.\n\n**Dependencies**: S1-32, S2-18, S2-19",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:12:14.099Z",
+          "updated_at": "2026-05-04T02:12:14.099Z"
+        },
+        {
+          "id": "918cefc7-4d9c-4536-9b92-9fe04df476cc",
+          "title": "S2-21: PD confirm action -> Ready for AM to Send",
+          "description": "**Description**: PD clicks Confirm; status transitions; an `audit_log` row is written with the before/after values.\n\n**Tests**: Confirm transitions the client to `Ready for AM to Send`. AM role does not see the Confirm button. Audit-log row captured.\n\n**Dependencies**: S2-20",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:12:24.436Z",
+          "updated_at": "2026-05-04T02:12:24.436Z"
+        },
+        {
+          "id": "e56e6ffc-080d-434e-ac88-07e13b2874f0",
+          "title": "S2-22: AM Send action -> Resend dispatch",
+          "description": "**Description**: AM clicks Send; Resend API call with the confirmed email body. `documents` row of kind `kickoff_followup_email_body` created. `platform_actions` records the send.\n\n**Tests**: Mocked Resend send returns success; client transitions to `Sent`; document row created. Send failure surfaces in `/actions`. Idempotency key prevents double-send on a click stutter.\n\n**Dependencies**: S2-21",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:15:42.859Z",
+          "updated_at": "2026-05-04T02:15:42.859Z"
+        },
+        {
+          "id": "632b441b-623c-4050-bd87-ae3a3dd3e91a",
+          "title": "S2-23: Resend domain setup (SPF / DKIM / DMARC)",
+          "description": "**Description**: Configure DNS records on `bulletdigitalmedia.com` for Resend. Verify status in Resend dashboard.\n\n**Tests**: Resend dashboard reports all three records as verified. A test send to a Gmail address arrives without spam-folder routing and passes SPF/DKIM/DMARC checks (verified in raw headers).\n\n**Dependencies**: n/a (DNS is owned by Bullet; coordinate via Chris)",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:15:55.233Z",
+          "updated_at": "2026-05-04T02:15:55.233Z"
+        },
+        {
+          "id": "362294e6-0a73-4a2b-a94f-7398538c6703",
+          "title": "S2-24: React Email templates",
+          "description": "**Description**: React Email components for: auth confirmation (S1-14), kick-off follow-up email (both variants), tech-requirements email (Sprint 3), dashboard alerts.\n\n**Tests**: Each template renders to HTML and to plain-text fallback. Snapshot tests pin the rendered output. Variables interpolated correctly in fixtures.\n\n**Dependencies**: S2-23",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:05.311Z",
+          "updated_at": "2026-05-04T02:16:05.311Z"
+        },
+        {
+          "id": "2e82328d-4ee4-4c44-8ac3-1e543e38ea29",
+          "title": "S2-25: Resend reply handling + bounce/complaint webhook",
+          "description": "**Description**: `POST /webhooks/resend` records bounces and complaints into `audit_log`. Reply routing rule lands replies in the configured shared inbox.\n\n**Tests**: Mocked bounce webhook creates an audit_log row. Complaint webhook same. Manual test send + reply lands in the configured inbox.\n\n**Dependencies**: S2-22, S2-23",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:16.233Z",
+          "updated_at": "2026-05-04T02:16:16.233Z"
+        },
+        {
+          "id": "7f4c3adc-24b7-4712-bbb4-928d544c8003",
+          "title": "S2-26: End-to-end happy path test",
+          "description": "**Description**: Playwright + API integration test that simulates a PandaDoc signing event and asserts every Sprint 1 + Sprint 2 fan-out completes successfully without human intervention. Asserts the kick-off email path through PD review -> AM send.\n\n**Tests**: A scripted run from `pandadoc.signed` to `Sent` produces a green run with all expected `platform_actions` rows in `success` and the dashboard reflecting the final state.\n\n**Dependencies**: S2-08, S2-22",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:30.742Z",
+          "updated_at": "2026-05-04T02:16:30.742Z"
+        },
+        {
+          "id": "58808009-acee-40b0-8af2-4cca5f203700",
+          "title": "S2-27: MVP demo to Bullet team",
+          "description": "**Description**: Live walkthrough on staging. Validate against a simulated onboarding flow with the Bullet team observing. Capture feedback into `docs/dashboard-feedback/client-feedback-log.md`.\n\n**Tests**: Demo checklist signed off by John or Stephen; feedback log updated; any P0 issues converted into Sprint 3 tasks before sprint sign-off.\n\n**Dependencies**: S2-26",
+          "status": null,
+          "list_name": "Sprint 2: Core Fan-Out",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:16:43.171Z",
+          "updated_at": "2026-05-04T02:16:43.171Z"
+        }
+      ]
+    },
+    {
+      "name": "Sprint 3: Financial, Comms & Kick-Off",
+      "cards": [
+        {
+          "id": "7e3807ff-efd4-495b-8ce4-053003326107",
+          "title": "S3-01: Stripe customer creation + UK / International routing",
+          "description": "**Description**: Inngest function creates a Stripe customer on the appropriate account (UK or International) based on `clients.legal_entity`. Stores `stripe_customer_id`.\n\n**Tests**: Mocked Stripe API: UK client creates customer on UK account; International on the other. Idempotency key prevents duplicate creation.\n\n**Dependencies**: S2-08",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:06:37.778Z",
+          "updated_at": "2026-05-04T02:06:37.778Z"
+        },
+        {
+          "id": "76757e88-e1f8-4c97-b80e-c72ae3847fea",
+          "title": "S3-02: Stripe payment_method.attached webhook",
+          "description": "**Description**: `POST /webhooks/stripe` verifies signature, persists `payment_method.attached`, attaches the method to the customer.\n\n**Tests**: Valid webhook with signature attaches PM; tampered signature rejected; replay is idempotent.\n\n**Dependencies**: S3-01",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:06:56.340Z",
+          "updated_at": "2026-05-04T02:06:56.340Z"
+        },
+        {
+          "id": "1472b14c-dbcb-4408-8433-2bd3346fa565",
+          "title": "S3-03: Stripe deferred subscription activation",
+          "description": "**Description**: Subscription created only after the kick-off follow-up email is sent (S2-22). Inngest function listens for `client.kickoff_email_sent` event and creates the subscription with native Stripe idempotency.\n\n**Tests**: Subscription created exactly once per client. Premature trigger (before send) does not create one. Failure surfaces in `/actions`.\n\n**Dependencies**: S2-22, S3-02",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:25.540Z",
+          "updated_at": "2026-05-04T02:07:25.540Z"
+        },
+        {
+          "id": "8ee9a3c9-6fdd-46a1-be55-d865b3b7ffa3",
+          "title": "S3-04: Stripe Amex flagging in dashboard",
+          "description": "**Description**: Detect Amex payment method via Stripe webhook brand field. Surface a distinct Amex flag on the client detail page; pipeline does not stall on missing PM for Amex clients.\n\n**Tests**: Amex test PM triggers the flag; Visa does not. Pipeline continues for an Amex client without a captured PM (subscription activation deferred to manual capture, recorded in audit log).\n\n**Dependencies**: S3-02",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:43.272Z",
+          "updated_at": "2026-05-04T02:07:43.272Z"
+        },
+        {
+          "id": "1a7bf695-6ed6-405d-a29b-5fc4593191ec",
+          "title": "S3-05: Xero OAuth setup + token refresh",
+          "description": "**Description**: OAuth 2.0 flow with offline access. Tokens stored encrypted in env-protected DB rows; refresh handled automatically.\n\n**Tests**: Initial OAuth handshake succeeds (manual). Refresh token swap after expiry succeeds without manual intervention. Token-revocation case logs cleanly and alerts Slack.\n\n**Dependencies**: n/a",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:00.781Z",
+          "updated_at": "2026-05-04T02:08:00.781Z"
+        },
+        {
+          "id": "d912e374-bb29-46e7-a81a-a6aba3ac6a31",
+          "title": "S3-06: Xero contact creation with chart-of-accounts + tracking categories",
+          "description": "**Description**: Inngest function creates a Xero contact with the appropriate chart-of-accounts and tracking categories per `legal_entity`. Stores `xero_contact_id`.\n\n**Tests**: Mocked Xero API: UK and International route to different chart-of-accounts (exact rule pending plan Q-3). Idempotent. Rate limit (60 req/min) backoff verified.\n\n**Dependencies**: S3-05, S2-08",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:22.341Z",
+          "updated_at": "2026-05-04T02:08:22.341Z"
+        },
+        {
+          "id": "c37313db-8fe0-4887-9ccc-d66f30bf3ede",
+          "title": "S3-07: Timely client + project creation",
+          "description": "**Description**: Inngest function creates a Timely client and project; project budget = `monthly_fee_usd / 100` hours. Stores `timely_client_id` and `timely_project_id`. Team assignment remains a dashboard-driven action.\n\n**Tests**: Mocked Timely API: client and project created with the correct budget. Idempotent. Concurrency cap 3 enforced.\n\n**Dependencies**: S2-08",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:43.539Z",
+          "updated_at": "2026-05-04T02:08:43.539Z"
+        },
+        {
+          "id": "1c2a9f59-9d6a-4d67-87d9-f04604a3f8e1",
+          "title": "S3-08: client_assets population per client",
+          "description": "**Description**: On `pandadoc.signed`, populate `client_assets` rows from a configurable per-service-tier template (e.g. `ad_account_access`, `regulatory_docs`, `headshot`, `brand_guidelines`, `face_to_camera_video`, `logo_files`, etc.).\n\n**Tests**: A signed agreement for a known service tier creates the expected set of `client_assets` rows in `status=required`. Idempotent on replay.\n\n**Dependencies**: S2-08",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:00.992Z",
+          "updated_at": "2026-05-04T02:09:00.992Z"
+        },
+        {
+          "id": "51225bb5-89aa-4c60-9e68-63954b3075a6",
+          "title": "S3-09: Dashboard asset checklist UI",
+          "description": "**Description**: Per-client live checklist: asset type, status, requested at, source url. Actions: mark received, mark approved, mark waived, send chase email.\n\n**Tests**: Playwright: PD or AM can mark received; status flips; audit-log row written. Mark waived requires a note (enforced).\n\n**Dependencies**: S3-08, S1-32",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:20.247Z",
+          "updated_at": "2026-05-04T02:09:20.247Z"
+        },
+        {
+          "id": "46a94cc2-5b5e-45cf-afc6-f2390d61d821",
+          "title": "S3-10: Single conditional asset-chase email template",
+          "description": "**Description**: One React Email template with conditional blocks for each outstanding asset type. Replaces the 16-branch GHL Outstanding Elements workflow entirely.\n\n**Tests**: Snapshot tests for representative asset combinations (e.g. only headshot missing; ad account + regulatory docs missing; everything required). Manual send to a test inbox renders correctly.\n\n**Dependencies**: S2-24",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:38.559Z",
+          "updated_at": "2026-05-04T02:09:38.559Z"
+        },
+        {
+          "id": "ec74aabd-362a-46d7-b6ba-34a29d4b8090",
+          "title": "S3-11: Send chase email action wired to template",
+          "description": "**Description**: \"Send chase email\" button on the asset checklist composes the conditional email from current `client_assets` state and sends via Resend.\n\n**Tests**: A client with two outstanding assets receives an email referencing exactly those two. `platform_actions` records the send. Idempotency window of 30 minutes prevents accidental double-chase.\n\n**Dependencies**: S3-09, S3-10",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:57.550Z",
+          "updated_at": "2026-05-04T02:09:57.550Z"
+        },
+        {
+          "id": "239b2977-e42f-49ae-940b-ffd9a0ed1cda",
+          "title": "S3-12: Preserve existing GHL conditional workflows",
+          "description": "**Description**: Continue triggering existing GHL workflows where they remain (post-signing portal link, survey reminders). No rebuild; just ensure the trigger fires.\n\n**Tests**: A `pandadoc.signed` event still triggers the post-signing portal link workflow in GHL (verified via GHL workflow logs in staging). Survey-reminder cadence unchanged.\n\n**Dependencies**: S2-08",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:17.010Z",
+          "updated_at": "2026-05-04T02:10:17.010Z"
+        },
+        {
+          "id": "900cdfc0-e3b7-429a-b127-2089b93bc066",
+          "title": "S3-13: Calendar -> Asana date propagation",
+          "description": "**Description**: Calendar-change webhook (S2-06) updates the Asana finance task due date idempotently. Eliminates Steve's Monday manual sync.\n\n**Tests**: Simulated calendar reschedule for a known client updates the Asana finance task date. Re-running the same change is a no-op. Failure surfaces in `/actions`.\n\n**Dependencies**: S2-02, S2-06",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:34.023Z",
+          "updated_at": "2026-05-04T02:10:34.023Z"
+        },
+        {
+          "id": "28386d91-6b60-41b5-98b0-ffba1b18016b",
+          "title": "S3-14: Sprint 3 acceptance verification",
+          "description": "**Description**: Walk through every PRD section 12.3 acceptance criterion against staging with the Bullet team.\n\n**Tests**: Acceptance log committed at `docs/sprint-3-acceptance.md` with each criterion ticked and evidence linked.\n\n**Dependencies**: S3-01, S3-03, S3-04, S3-06, S3-07, S3-09, S3-10, S3-11, S3-12, S3-13",
+          "status": null,
+          "list_name": "Sprint 3: Financial, Comms & Kick-Off",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:53.047Z",
+          "updated_at": "2026-05-04T02:10:53.047Z"
+        }
+      ]
+    },
+    {
+      "name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+      "cards": [
+        {
+          "id": "c587de82-f554-448b-9b0b-0b3836b58653",
+          "title": "S4-01: Firecrawl integration - client website scrape",
+          "description": "**Description**: Tool function `scrape_website(url)` calls Firecrawl, stores raw HTML in R2 (`clients/{id}/scraped/{hash}.html`), returns markdown + metadata.\n\n**Tests**: Real Firecrawl scrape against a fixture URL returns markdown; R2 object created. Retry on transient failure. Cost-cap alerting in place.\n\n**Dependencies**: S1-21 (R2 buckets)",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:06:41.828Z",
+          "updated_at": "2026-05-04T02:06:41.828Z"
+        },
+        {
+          "id": "60c17e47-f4d7-47a4-8e2e-0e788ec0f5df",
+          "title": "S4-02: Claude web_search competitor discovery",
+          "description": "**Description**: Tool function `search_competitors(location, business_type)` uses Claude's built-in `web_search` to discover competing gyms/studios. Returns up to five candidates with name, url, distance.\n\n**Tests**: Fixture input returns at least three candidates with required fields. Distances computed against the client's geocoded address.\n\n**Dependencies**: n/a",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:06:59.254Z",
+          "updated_at": "2026-05-04T02:06:59.254Z"
+        },
+        {
+          "id": "63d9bfe9-4b43-4056-8c31-65a6f13bbbad",
+          "title": "S4-03: Firecrawl - competitor page scrape",
+          "description": "**Description**: Tool function `scrape_competitor_page(url)` fetches a competitor's page and extracts services, pricing signals, USPs.\n\n**Tests**: Fixture competitor URL produces the expected structured fields. Failure on a 404 surfaces cleanly to the agent loop.\n\n**Dependencies**: S4-01",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:27.662Z",
+          "updated_at": "2026-05-04T02:07:27.662Z"
+        },
+        {
+          "id": "39fee74a-a3f8-4373-96d2-454a8ceab3e9",
+          "title": "S4-04: Meta Marketing API - audience size",
+          "description": "**Description**: Tool function `get_meta_audience_size(geo, demographics)` returns an estimated audience size. Aggressive caching to respect quota.\n\n**Tests**: Fixture geo returns a numeric estimate. Cache hit on repeat call within TTL. Rate-limit backoff verified.\n\n**Dependencies**: n/a",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:07:45.844Z",
+          "updated_at": "2026-05-04T02:07:45.844Z"
+        },
+        {
+          "id": "8b116d0e-a1e2-4ed4-8246-85e395f26e66",
+          "title": "S4-05: Research agent (Claude Agent SDK) tool loop",
+          "description": "**Description**: Claude Agent SDK orchestration that calls S4-01 to S4-04 per client to produce the four output blocks per PRD section 7.4.\n\n**Tests**: End-to-end run for a fixture client produces a `research_results` row of each kind (`website_summary`, `competitors`, `audience_size`, `offer_suggestions`). Output schemas validate.\n\n**Dependencies**: S4-01, S4-02, S4-03, S4-04",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:04.135Z",
+          "updated_at": "2026-05-04T02:08:04.135Z"
+        },
+        {
+          "id": "6e2f328f-48e4-48bd-a128-fc1effcf0aa7",
+          "title": "S4-06: Dashboard /clients/[id]/research view",
+          "description": "**Description**: Renders all four research output blocks with citations. Surfaced ahead of the kick-off call in the client detail page header.\n\n**Tests**: Playwright: a client with research results renders all four blocks with citation links. A client without research shows a clear empty state.\n\n**Dependencies**: S4-05, S1-32",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:24.890Z",
+          "updated_at": "2026-05-04T02:08:24.890Z"
+        },
+        {
+          "id": "8b23b284-1e32-41dd-9328-8ee9a755795f",
+          "title": "S4-07: Dashboard /clients/[id]/knowledge semantic search",
+          "description": "**Description**: Per-client knowledge view: structured fact list + free-text semantic search using pgvector.\n\n**Tests**: Playwright: search \"pricing\" returns rows whose embeddings rank highest. Filter by `source` works. Empty query renders the structured fact list.\n\n**Dependencies**: S1-30",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:08:46.305Z",
+          "updated_at": "2026-05-04T02:08:46.305Z"
+        },
+        {
+          "id": "0b259dfb-b866-4405-8a84-ec644282d29b",
+          "title": "S4-08: Dashboard polish - time-in-step and bottleneck view",
+          "description": "**Description**: Per-client time-in-step indicator on `/clients`. Aggregate bottleneck view showing which steps clients sit in longest.\n\n**Tests**: Time-in-step computed correctly from `step_entered_at`. Bottleneck view aggregates across the active client population.\n\n**Dependencies**: S1-31, S2-10",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:04.048Z",
+          "updated_at": "2026-05-04T02:09:04.048Z"
+        },
+        {
+          "id": "b34b7b88-398b-478f-ba67-301d517b830f",
+          "title": "S4-09: Dashboard /admin/users and /admin/integrations",
+          "description": "**Description**: User management (founder + PD only) and per-platform credential health view (founder only). Integration health: last successful call timestamp, recent failure count.\n\n**Tests**: PD can manage users; AM gets 403. Integration health polls every 30s. A simulated credential failure flips the indicator within one polling cycle.\n\n**Dependencies**: S1-32",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:23.142Z",
+          "updated_at": "2026-05-04T02:09:23.142Z"
+        },
+        {
+          "id": "1b4ebe2f-6450-4870-8975-4d248c9c36e6",
+          "title": "S4-10: Reconciliation runbooks",
+          "description": "**Description**: Markdown runbooks under `docs/runbooks/` covering: PandaDoc reconciliation discrepancy, dead-letter recovery, Stripe webhook gap, Xero token revocation, Resend deliverability incident.\n\n**Tests**: Each runbook walks through a scripted scenario. A new engineer can follow each runbook end-to-end without external clarification (validated by a peer review walkthrough).\n\n**Dependencies**: S1-23, S2-11, S3-02, S3-05, S2-25",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:09:42.608Z",
+          "updated_at": "2026-05-04T02:09:42.608Z"
+        },
+        {
+          "id": "783f2b7d-16d8-4622-8cb2-1ab0a8d9a949",
+          "title": "S4-11: R2 lifecycle rules",
+          "description": "**Description**: 12-month auto-purge for transcript audio in `bullet-prod-artefacts`.\n\n**Tests**: Lifecycle rule applied; verified via Cloudflare dashboard. A test object with a backdated timestamp is purged on next lifecycle run.\n\n**Dependencies**: S1-21",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:00.950Z",
+          "updated_at": "2026-05-04T02:10:00.950Z"
+        },
+        {
+          "id": "7bbc4792-9b97-4ef4-981c-3792fe05f998",
+          "title": "S4-12: Production deployment + cutover prep",
+          "description": "**Description**: Promote all services from staging to production (api, worker, cron, dashboard). Production Neon, R2, Inngest envs in place. Final secrets review. Pre-pilot smoke test.\n\n**Tests**: Production `/healthz` returns 200 across all four services. A canary `pandadoc.signed` event in production fan-outs to all integrations end-to-end. Staging continues to work as the pre-prod env.\n\n**Dependencies**: S3-14",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:20.821Z",
+          "updated_at": "2026-05-04T02:10:20.821Z"
+        },
+        {
+          "id": "60f3ea32-ebaf-4f5b-98db-2989ea4f6365",
+          "title": "S4-13: Pilot - 3 to 5 real clients onboarded end-to-end",
+          "description": "**Description**: Coordinate with Bullet to route the next three to five new signings through the production system. Bullet team self-serves the dashboard.\n\n**Tests**: Each pilot client reaches `current_step=live` via the automated flow. Any human interventions are logged in `audit_log` with reason. No silent partial failures.\n\n**Dependencies**: S4-12",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:37.276Z",
+          "updated_at": "2026-05-04T02:10:37.276Z"
+        },
+        {
+          "id": "fa89bf86-de21-4b18-ae76-20814bfdfca8",
+          "title": "S4-14: Measure agreement-to-go-live and capture pilot results",
+          "description": "**Description**: For each pilot client, compute the time from `pandadoc.signed` to `current_step=live`. Capture results in `docs/pilot-results.md` against the baseline (~2 weeks) and target (1 day on the happy path).\n\n**Tests**: `docs/pilot-results.md` committed with per-client metrics, observed bottlenecks, and recommended Phase 2 follow-ups.\n\n**Dependencies**: S4-13",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:10:56.316Z",
+          "updated_at": "2026-05-04T02:10:56.316Z"
+        },
+        {
+          "id": "66128a5f-093a-4d4e-a1a1-c6d363b73dcd",
+          "title": "S4-15: Stretch - GHL AI builder feasibility evaluation",
+          "description": "**Description**: Evaluate whether GHL's AI builder API exposes the hooks needed to feed our knowledge profile into automated funnel/page generation. Document feasibility for Phase 2 in `docs/ghl-ai-builder-feasibility.md`.\n\n**Tests**: Feasibility doc committed with API surface mapped, blockers listed, and a recommendation (build / defer / drop).\n\n**Dependencies**: n/a",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:15.673Z",
+          "updated_at": "2026-05-04T02:11:15.673Z"
+        },
+        {
+          "id": "2a6c91a2-228c-4c60-88a9-ebf999151c56",
+          "title": "S4-16: Sprint 4 acceptance verification + Phase 1 sign-off",
+          "description": "**Description**: Walk through every PRD section 12.4 acceptance criterion against production. Confirm every Phase 1 success criterion (PRD section 1.4, plan section 10) is met or has an explicit deferral logged.\n\n**Tests**: Acceptance log committed at `docs/sprint-4-acceptance.md`. Phase 1 sign-off recorded in `docs/CHANGELOG.md` under the appropriate dated entry.\n\n**Dependencies**: S4-05, S4-06, S4-07, S4-08, S4-09, S4-10, S4-11, S4-13, S4-14",
+          "status": null,
+          "list_name": "Sprint 4: Sales Intelligence, Polish & Pilot",
+          "tags": [],
+          "notes": [],
+          "created_at": "2026-05-04T02:11:29.222Z",
+          "updated_at": "2026-05-04T02:11:29.222Z"
+        }
+      ]
+    },
+    {
+      "name": "Next Up",
+      "cards": []
+    },
+    {
+      "name": "In Progress",
+      "cards": []
+    },
+    {
+      "name": "To Review",
+      "cards": []
+    },
+    {
+      "name": "Completed",
+      "cards": []
+    }
+  ]
+}
