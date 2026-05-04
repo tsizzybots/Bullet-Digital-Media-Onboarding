@@ -93,6 +93,8 @@ Key constraints:
 
 If a task touches code AND introduces a decision/discovery, log both - one as Added/Changed/Fixed, the other as Decision/Discovery.
 
+**Never ask for permission to update the changelog.** Logging is unconditional and automatic. Whenever any of the trigger conditions above occur, update `docs/CHANGELOG.md` in the same response that produced the change. Do not say "want me to log this?" or "should I update the changelog?" - just do it. The only exception is if the user has explicitly told you not to log a specific item in the current conversation.
+
 ## Document Formatting Rules
 
 - Never use em dashes (-). Always use standard hyphens (-).
