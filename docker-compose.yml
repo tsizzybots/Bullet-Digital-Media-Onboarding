@@ -1,0 +1,58 @@
+# Local development stack for the Bullet Digital Media Phase 1 build.
+# Brings up Postgres 16 (with pgvector available) and the Inngest dev server.
+#
+# Usage:
+#   cp .env.example .env       # one-time
+#   docker compose up          # foreground
+#   docker compose up -d       # detached
+#   docker compose down        # stop, keep volumes
+#   docker compose down -v     # stop, wipe Postgres data volume
+#
+# The `vector` and `citext` extensions are created by Alembic (S1-05), not by
+# this file - keeps the dev DB and migrated DB shape identical, so "works
+# locally, breaks on Neon" cannot happen at the schema level.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: bullet-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bullet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bullet}
+      POSTGRES_DB: ${POSTGRES_DB:-bullet_dev}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - bullet-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  inngest:
+    image: inngest/inngest:latest
+    container_name: bullet-inngest
+    restart: unless-stopped
+    # `apps/api` does not register an Inngest worker yet (that lands in S1-19).
+    # Until then, run with --no-discovery to keep the dev server quiet, and
+    # point it at the future worker URL on the host. Once S1-19 lands, drop
+    # the flag (or change `command:` to `inngest dev` only) so the dev server
+    # discovers the worker registered at host.docker.internal:8000/api/inngest.
+    command: >
+      inngest dev
+      --no-discovery
+      -u http://host.docker.internal:8000/api/inngest
+    ports:
+      - "${INNGEST_DEV_PORT:-8288}:8288"
+    # Linux compatibility for host.docker.internal (no-op on macOS / Windows).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  bullet-postgres-data: {}

@@ -16,7 +16,7 @@ This repo is the monorepo for the Phase 1 onboarding automation build (sole acti
 - pnpm 10.x (`packageManager` in root `package.json` pins 10.17.0)
 - Python 3.12 (`.python-version` pins 3.12)
 - [`uv`](https://docs.astral.sh/uv/) 0.11+
-- Docker (for `docker compose` local dev, added in Sprint 1 task S1-02)
+- Docker (for the local Postgres + Inngest stack — see [Local development](#local-development))
 
 **Install everything**
 
@@ -46,6 +46,58 @@ make build              # pnpm -r build
 make test               # uv pytest + pnpm -r test
 make lint               # pnpm -r lint + ruff check apps/api
 ```
+
+---
+
+## Local development
+
+The local stack runs Postgres 16 (with `pgvector` available) and the Inngest dev server in Docker. The `apps/api` FastAPI service and `apps/dashboard` Next.js app are started separately on the host (Sprint 1 tasks S1-13 / S1-16).
+
+**One-time setup**
+
+```bash
+cp .env.example .env
+```
+
+The defaults in `.env.example` match `docker-compose.yml` and work end-to-end with no edits.
+
+**Start the stack**
+
+```bash
+docker compose up         # foreground, Ctrl-C to stop
+docker compose up -d      # detached
+```
+
+**Service URLs**
+
+| Service | URL |
+|---------|-----|
+| Postgres | `postgresql://bullet:bullet@localhost:5432/bullet_dev` |
+| Inngest dev UI | <http://localhost:8288> |
+
+**Verify pgvector**
+
+```bash
+uv run scripts/verify_pgvector.py
+```
+
+The script connects to the dev DB and runs `CREATE EXTENSION IF NOT EXISTS vector;` then confirms the row exists in `pg_extension`. Expect `OK: pgvector extension available on localhost:5432/bullet_dev`. Idempotent — safe to re-run.
+
+The script declares its own dependencies ([PEP 723](https://peps.python.org/pep-0723/) inline metadata) so `uv` resolves `psycopg[binary]` on demand without touching `apps/api`'s pyproject. If you prefer a regular Python env, `pip install 'psycopg[binary]'` then `python scripts/verify_pgvector.py`.
+
+**Stop / reset**
+
+```bash
+docker compose down       # stop, keep the Postgres data volume
+docker compose down -v    # stop and wipe the data volume (fresh DB next boot)
+```
+
+**Notes**
+
+- The `vector` and `citext` extensions are **not** pre-created by docker-compose. The first Alembic migration (S1-05) creates them, so the dev DB and the migrated DB stay shape-identical.
+- The Inngest dev server runs with `--no-discovery` until S1-19 lands and registers a worker on `host.docker.internal:8000/api/inngest`. Drop the flag in `docker-compose.yml` once that worker exists.
+- Image policy: Postgres pinned to `pgvector/pgvector:pg16`; Inngest tracks `inngest/inngest:latest` deliberately (local-only tool, frequent fixes published).
+- Port already in use? Diagnose with `lsof -i :5432` or `lsof -i :8288` and free the port (or override `POSTGRES_PORT` / `INNGEST_DEV_PORT` in `.env`). Don't kill processes blindly.
 
 ---
 
