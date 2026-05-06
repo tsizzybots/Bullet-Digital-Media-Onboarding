@@ -12,7 +12,7 @@ This document is the canonical, ordered task list for Phase 1 development. Every
 
 **Naming**: Tasks are numbered `S{sprint}-{nn}` (e.g. `S1-01` = Sprint 1, task 1). Order within a sprint reflects build order; tasks without dependencies on earlier tasks in the same sprint can run in parallel.
 
-**Resend assumption**: Q-01 (outbound email provider) is treated as resolved to **Resend with a single system mailbox** (`onboarding@bulletdigitalmedia.com`) for the purpose of this plan. If Bullet later mandates per-AM Gmail, Sprint 2 email tasks (`S2-26` through `S2-29`) will be revised; nothing else shifts.
+**Email provider**: Q-01 was confirmed by Bullet on 06/05/2026 - **Resend with a single system mailbox** (`onboarding@bulletdigitalmedia.com`). All system-sent client emails route through Resend; replies land in a shared Bullet inbox via a catch-all rule. No per-AM Gmail-API delegated-send work. See `docs/openquestions.md` Resolved.
 
 **Definition of "live and testable"**: Sprint 4 closes when the production stack is deployed on Render, the pilot clients have been onboarded end-to-end through the automated flow, and Bullet can self-serve the dashboard, trigger real signings, and observe real outcomes.
 
@@ -599,7 +599,7 @@ Goal: Research agent live, dashboard polish complete, three to five pilot client
 - **TDD discipline**: For every task above, the test descriptions are the contract. Write tests first, watch them fail, then implement, then watch them pass.
 - **Changelog**: Every task that introduces a decision, discovery, addition, change, removal, or fix must update `docs/CHANGELOG.md` in the same PR.
 - **Open questions**: Any new blocking implementation question discovered during a sprint goes into `docs/openquestions.md` immediately, with the next free `Q-NN` id.
-- **Q-01 assumption**: Resend with a single system mailbox is assumed throughout. If Bullet later picks per-AM Gmail, tasks `S2-22`, `S2-23`, `S2-24`, `S2-25`, `S3-10`, `S3-11` will be revised; nothing else shifts.
+- **Q-01 (resolved 06/05/2026)**: Resend with a single system mailbox is the confirmed approach. Tasks `S2-22`, `S2-23`, `S2-24`, `S2-25`, `S3-10`, `S3-11` are locked to Resend. See `docs/openquestions.md` Resolved.
 
 ---
 

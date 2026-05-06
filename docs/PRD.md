@@ -83,9 +83,9 @@ Roles enforced in FastAPI endpoint dependencies and mirrored in Next.js route gr
 
 ### 3.1 Provisional (pending Bullet)
 
-| Area | Provisional | Pending |
-|------|-------------|---------|
-| Outbound email provider | Resend (single system mailbox) | **Q-01** in `docs/openquestions.md` |
+| Area | Decision | Confirmed |
+|------|----------|-----------|
+| Outbound email provider | Resend (single system mailbox) | Q-01 resolved 06/05/2026 - see `docs/openquestions.md` Resolved |
 
 ---
 
@@ -347,7 +347,7 @@ One subsection per platform. All integrations go through `apps/api/integrations/
 - **Docs**: optional sync (export from database; not the primary store)
 - **Drive**: folder tree creation; structure mirrors today's actively used folders only (legacy folders skipped pending Section 11 Q-2)
 - **Calendar**: book kick-off call via existing GHL calendar link; subscribe to calendar-change events for kick-off-date propagation to Asana
-- **Gmail**: reserved for kick-off follow-up email if Q-01 resolves to per-AM Gmail. Provisional default does not use Gmail.
+- **Gmail**: not used for any system-originated outbound. Q-01 resolved 06/05/2026 in favour of Resend single mailbox. GoHighLevel-native workflow emails (post-signing portal link, survey reminders) continue to fire from GHL where they still make sense; everything else goes via Resend.
 
 ### 5.10 Meta Marketing API
 
@@ -355,12 +355,13 @@ One subsection per platform. All integrations go through `apps/api/integrations/
 - **Use**: audience size queries for the research agent (Sprint 4); ad-account confirmation
 - **Rate limits**: per-account quota; backoff and cache aggressively
 
-### 5.11 Resend (provisional, pending Q-01)
+### 5.11 Resend (confirmed - Q-01 resolved 06/05/2026)
 
 - **Auth**: API key in Render env group
 - **Domain**: `bulletdigitalmedia.com` - SPF / DKIM / DMARC required pre-Sprint 1
+- **System mailbox**: single Bullet-owned mailbox (e.g. `onboarding@bulletdigitalmedia.com`) used for every system-originated outbound (auth confirmation, kick-off follow-up email, technical-requirements email, dashboard alerts)
 - **Templates**: React Email components for auth confirmation, kick-off follow-up email (both variants), tech-requirements email, dashboard alerts
-- **Reply handling**: catch-all routing rule -> shared inbox or AM forwarding (depending on Q-01 outcome)
+- **Reply handling**: catch-all routing rule on the inbound side delivers replies to a shared Bullet inbox; per-message reply-to header preserves thread context where useful
 - **Idempotency**: header-based dedupe per outbound message id
 
 ### 5.12 Firecrawl (Sprint 4)
@@ -545,7 +546,7 @@ A daily cron at 03:00 UK time:
 The dashboard surfaces every Step 4 hand-off state explicitly (per plan Section 3.3):
 - `Ready for Performance Director Review` - shows AI-drafted email, suggested offer names, worked pricing (low-ticket) or prose (high-ticket); PD can edit and confirm
 - `Ready for Account Manager to Send` - PD confirmed; AM picks up and clicks Send
-- `Sent` - email sent via Resend (provisional)
+- `Sent` - email sent via Resend
 
 ### 8.2 Asset checklist
 
@@ -639,7 +640,7 @@ Replaces the 16-branch GHL Outstanding Elements workflow. Per-client live checkl
 - Buckets: `bullet-prod-artefacts`, `bullet-staging-artefacts`
 - Lifecycle rule: transcript audio purged at 12 months
 
-### 11.5 Resend (provisional)
+### 11.5 Resend (confirmed - Q-01 resolved 06/05/2026)
 
 - Single domain: `bulletdigitalmedia.com`
 - DNS records (SPF, DKIM, DMARC) required pre-Sprint 1
@@ -689,7 +690,7 @@ Every criterion is testable. Failing one blocks sprint sign-off.
 - [ ] Kick-off follow-up email generator (high-ticket variant): prose-only confirmation generated; no maths block
 - [ ] Dashboard surfaces `Ready for PD Review` and `Ready for AM to Send` states explicitly per Step 4
 - [ ] PD can edit AI-drafted email body, override offer name, adjust pricing
-- [ ] AM can click Send; email sent (via Resend if Q-01 resolves to Resend)
+- [ ] AM can click Send; email sent via Resend
 - [ ] End-to-end happy path: PandaDoc signing creates all non-financial artefacts automatically with no human intervention
 - [ ] **MVP demo to Bullet team**: validated against simulated onboarding flow
 
@@ -723,9 +724,7 @@ Every criterion is testable. Failing one blocks sprint sign-off.
 
 ### 13.1 Open implementation questions (Bullet must answer)
 
-| Question | File | Blocks |
-|----------|------|--------|
-| Q-01: Outbound email provider - single system mailbox or per-AM Gmail? | `docs/openquestions.md` | Sprint 2, Sprint 3 |
+(none currently - Q-01 resolved 06/05/2026 in favour of Resend single mailbox; see `docs/openquestions.md` Resolved)
 
 ### 13.2 Plan-scope open questions (carried over from Section 11 of the plan)
 

@@ -14,6 +14,15 @@ Entry types:
 
 ## [Unreleased]
 
+### 06/05/2026 - Q-01 resolved: Resend single mailbox confirmed
+
+- **Decision**: Q-01 (outbound email provider) confirmed by Bullet on 06/05/2026 - **single system mailbox via Resend**. All system-originated client emails (kick-off follow-up email both variants, technical-requirements email replacement, auth confirmation, dashboard alerts) send from one Bullet-owned mailbox (e.g. `onboarding@bulletdigitalmedia.com`) over Resend. Replies route via a catch-all rule into a shared Bullet inbox; per-message reply-to header preserves thread context where useful. No per-AM Gmail-API delegated-send work. GoHighLevel-native workflow emails (post-signing portal link, survey reminders) continue to fire from GHL where they still make sense.
+- **Changed**: `docs/openquestions.md` - Q-01 moved to **Resolved** with the verbatim answer recorded.
+- **Changed**: `docs/phase-1-plan.md` - Section 4 integrations table updated (Resend added as the system outbound channel; Gmail/GHL row demoted to legacy passthrough only). Section 11 "Resolved since the previous draft" gains the Q-01 entry.
+- **Changed**: `docs/PRD.md` - Section 3 provisional table promoted to a confirmed-decisions table (Q-01 marked confirmed). Section 5.9 Gmail line rewritten to "not used for any system-originated outbound". Section 5.11 and Section 11.5 headings flipped from `(provisional, pending Q-01)` to `(confirmed - Q-01 resolved 06/05/2026)`. Section 8.1 `Sent` state and Section 12.2 acceptance criterion no longer hedged on Q-01. Section 13.1 cleared (no open implementation questions).
+- **Changed**: `docs/development-sprints.md` - opening Q-01 assumption note and cross-cutting reminders updated to reflect Q-01 as resolved (was previously "treated as resolved for the purpose of this plan"). Tasks `S2-22`, `S2-23`, `S2-24`, `S2-25`, `S3-10`, `S3-11` are now locked to Resend.
+- **Changed**: StrikeFlow card S2-22 (`AM Send action -> Resend dispatch`) - confirmation note added recording the Q-01 resolution.
+
 ### 04/05/2026 - Client progress page + /update-progress automation
 
 - **Added**: `progress-site/` - standalone Vite + React 19 + Tailwind 4 + Framer Motion static site that renders all 92 StrikeFlow cards as a client-facing progress dashboard. Dark mode by default, single-brand IzzyAgents header, "By Sprint / By Status" grouping toggle, "All / Done / Active / Upcoming" filters, slide-in detail panel with description and notes timeline. Mirrors the WZY Revenue Dashboard pattern. Initial build verified: 391 modules, 711ms, no errors.

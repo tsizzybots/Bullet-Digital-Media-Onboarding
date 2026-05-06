@@ -312,7 +312,8 @@ Each of these has a line of status in the dashboard so the team can see, at a gl
 | Google Sheets | Write | Google Sheets API |
 | Google Docs | Write (optional sync) | Google Docs API (generated from database, not primary store) |
 | Google Drive | Write | Drive API (folder creation + sharing) |
-| Gmail | Send | Gmail API or GoHighLevel email automation (to preserve existing conditional logic) |
+| Resend | Send | All system-sent client emails (kick-off follow-up, technical-requirements, dashboard alerts, auth confirmation) from a single Bullet-owned mailbox - confirmed 06/05/2026 (see Section 11 Resolved) |
+| Gmail / GHL email | Send (legacy passthrough only) | GoHighLevel-native workflow emails (post-signing portal link, survey reminders) continue to fire from GHL where they still make sense; not used for any system-originated outbound |
 | Google Calendar | Write | Calendar API |
 | Meta Business Manager | Read | Marketing API (ad account confirmation + audience sizing for research agent) |
 
@@ -533,6 +534,7 @@ Several prior questions were resolved by Steve's Loom walkthroughs and the 21/04
 - ~~16-branch Outstanding Elements replacement: Stephen confirmed on 24/04/2026 ("1 Email with conditional blocks sounds great"). Single client-assets table + live dashboard checklist + one conditional email template, per Section 3.10.~~
 - ~~Offer pricing calculator scope: Stephen confirmed on 24/04/2026 that AI computes the full priced offer (two anchor variants, consultation, body scans 1/2/3) AND a deliberate human review point sits between the kick-off call and the email send, surfaced in the dashboard as `Ready for PD Review` -> `Ready for AM to Send`. See Section 3.5.~~
 - ~~Pricing/discount calculation applicability: Stephen confirmed on 30/04/2026 that the pricing/discount calculation applies to low-ticket / checkout-based campaigns only (large group class facilities). Higher-ticket / consultation-booking clients (smaller, more expensive) receive a prose-only confirmation email - no anchor maths, no savings/% off block. The generator branches at the top on a structured `campaign_flow_type` field set by the PD on the kick-off call. See Section 3.5.~~
+- ~~Outbound email provider (Q-01): Bullet confirmed on 06/05/2026 - single system mailbox via Resend. All system-sent client emails (kick-off follow-up, technical-requirements replacement, auth confirmation, dashboard alerts) send from one Bullet-owned mailbox (e.g. `onboarding@bulletdigitalmedia.com`) over Resend. Replies route via a catch-all rule into a shared Bullet inbox. No per-AM Gmail-API delegated-send work. GHL-native workflow emails (portal link, survey reminders) continue to fire from GHL where they still make sense. See `docs/openquestions.md` Resolved.~~
 
 ### Still open (carried forward)
 
