@@ -14,6 +14,32 @@ Entry types:
 
 ## [Unreleased]
 
+### 06/05/2026 - S1-01: Monorepo scaffold
+
+- **Added**: monorepo skeleton at the repo root. New top-level files: `package.json` (pnpm workspace root, `packageManager: pnpm@10.17.0`, Node `>=20`), `pnpm-workspace.yaml` (`apps/*` + `packages/*`), `.npmrc`, `pyproject.toml` (uv workspace, `requires-python >=3.12,<3.13`, members `apps/api`), `.python-version` (3.12), `.nvmrc` (20), `.editorconfig`, `.gitattributes`, `.env.example`, `Makefile` (single entrypoint covering both stacks). Workspace members: `apps/api/` (FastAPI scaffold via uv: `pyproject.toml`, `ruff.toml`, `src/bullet_api/__init__.py`, `tests/test_smoke.py`, README), `apps/dashboard/` (TS scaffold: `package.json`, strict `tsconfig.json`, `src/index.ts`, README), `packages/shared/` (TS scaffold: `package.json`, `tsconfig.json`, `src/index.ts`, README - empty placeholder until S1-17 codegen).
+- **Added**: `.pre-commit-config.yaml` with `gitleaks` (secret scanning) plus the standard `pre-commit-hooks` hygiene set (trailing-whitespace, end-of-file-fixer, check-yaml/json/toml, check-merge-conflict, check-added-large-files=1024kb, mixed-line-ending=lf). Hygiene hooks exclude `docs/`, `emails/`, `meeting_notes/`, `questionnaire_responses/`, `scope/`, `progress-site/dist/` to avoid churning narrative content.
+- **Added**: `.gitleaks.toml` extending the upstream default ruleset with an allowlist for the same narrative-content paths plus `.env.example`.
+- **Added**: `.github/workflows/ci.yml` (three parallel jobs: pre-commit incl. gitleaks; pnpm typecheck/build with Node 20 + pnpm 10.17.0; uv ruff/pytest with Python 3.12 + uv 0.11.7) and `.github/workflows/lint-actions.yml` (actionlint).
+- **Changed**: `.gitignore` - extended to cover `.env*` (with `!.env.example` exception), `.venv/`, `.pnpm-store/`, `.next/`, `out/`, `coverage/`, `*.tsbuildinfo`, `*.egg-info/`, `.pytest_cache/`, `.ruff_cache/`, `.mypy_cache/`, `.idea/`, `.vscode/`, `*.log`, `logs/`. Original entries (macOS, output/, node_modules/, dist/, `__pycache__/`, `*.pyc`) preserved.
+- **Changed**: `README.md` - rewritten to lead with monorepo quickstart (`pnpm install`, `uv sync --all-packages`, `uvx pre-commit install`) and repo layout, with the existing project-context narrative preserved below. All `docs/` links retained.
+- **Decision**: GitHub repo to be renamed `tsizzybots/Bullet-Digital-Media-Onboarding` -> `tsizzybots/bullet_digital_media` to align with the PRD spec. GitHub auto-redirects HTTPS git URLs after rename, so the existing Render `progress-site` deploy continues to work; Render's repo connection will be updated post-rename so future webhooks use the new name.
+- **Decision**: `progress-site/` stays at the repo root and is **not** a pnpm workspace member. The pnpm workspace globs are `apps/*` + `packages/*` only. Reason: progress-site is the client-facing static site (separate concern from the internal `apps/dashboard` ops surface), already deployed via `render.yaml`, and moving it would force a Render path change for no functional gain. `render.yaml` and `progress-site/` are untouched by this scaffold.
+- **Decision**: secret-scanning tool is `gitleaks` via the `pre-commit` framework (vs detect-secrets or trufflehog). Reason: industry standard, single binary auto-installed by pre-commit, fast staged-files mode, catches the `sk_test_`-style keys named in S1-21's acceptance test.
+- **Decision**: runtimes pinned to **Python 3.12 + Node 20 LTS**. Reason: both are current LTS lines, broadly supported by FastAPI / SQLAlchemy / Next.js 15, stable on Render. uv handles the local 3.12 download even on machines with 3.13 preinstalled.
+- **Discovery**: `uv sync` from a workspace root only installs the root project, **not** workspace members. Required flag is `uv sync --all-packages`. Captured in the Makefile `install` target, the CI `python` job, and the README quickstart so future contributors don't hit it.
+- **Discovery**: the `pre-commit` framework's `--all-files` mode operates on git-tracked files only. New (unstaged) files appear as "no files to check" in hook output until `git add`-ed. Worth knowing when interpreting first-run logs on a fresh scaffold.
+
+**Verification (all passing, 06/05/2026)**
+
+| Step | Command | Result |
+|---|---|---|
+| 1 | `pnpm install` | OK, 3 workspace projects |
+| 2 | `uv sync --all-packages` | OK, 27 packages installed (fastapi, uvicorn, pytest, ruff, etc.) |
+| 3 | `uvx pre-commit run --all-files` | OK, all hooks pass clean |
+| 4 | Pre-commit blocks fake API key | OK, exit 1; gitleaks found 3 leaks (github-pat, stripe-access-token, generic-api-key) |
+| 5 | `actionlint .github/workflows/*.yml` | OK, exit 0 |
+| 6 | `pnpm -r typecheck` + `uv run pytest apps/api -q` | OK, both clean (1 pytest passed) |
+
 ### 06/05/2026 - Q-01 resolved: Resend single mailbox confirmed
 
 - **Decision**: Q-01 (outbound email provider) confirmed by Bullet on 06/05/2026 - **single system mailbox via Resend**. All system-originated client emails (kick-off follow-up email both variants, technical-requirements email replacement, auth confirmation, dashboard alerts) send from one Bullet-owned mailbox (e.g. `onboarding@bulletdigitalmedia.com`) over Resend. Replies route via a catch-all rule into a shared Bullet inbox; per-message reply-to header preserves thread context where useful. No per-AM Gmail-API delegated-send work. GoHighLevel-native workflow emails (post-signing portal link, survey reminders) continue to fire from GHL where they still make sense.

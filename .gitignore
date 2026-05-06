@@ -1,13 +1,45 @@
+# ──────────────────────────────────────────────────────────────
+# Bullet Digital Media monorepo .gitignore
+# ──────────────────────────────────────────────────────────────
+
 # macOS
 .DS_Store
 
 # Local rendered artefacts (HTML/PDF generated from markdown)
 output/
 
-# Node / Vite build artefacts (progress-site)
-node_modules/
-dist/
+# Secrets / env (.env.example is the template, kept in repo)
+.env
+.env.*
+!.env.example
 
-# Python
+# Node / pnpm / Vite / Next
+node_modules/
+.pnpm-store/
+dist/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# Python / uv / pytest / ruff
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+!.vscode/settings.example.json
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/

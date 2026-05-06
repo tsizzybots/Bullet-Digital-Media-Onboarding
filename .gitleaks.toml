@@ -1,0 +1,20 @@
+# Bullet Digital Media gitleaks config.
+# Inherits the upstream default ruleset and layers an allowlist for paths
+# that contain narrative content (planning docs, meeting transcripts, source
+# emails, questionnaire CSVs) where false positives would otherwise dominate.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths excluded from secret scanning"
+paths = [
+    '''^docs/''',
+    '''^emails/''',
+    '''^meeting_notes/''',
+    '''^questionnaire_responses/''',
+    '''^scope/''',
+    '''^progress-site/dist/''',
+    '''^output/''',
+    '''^\.env\.example$''',
+]

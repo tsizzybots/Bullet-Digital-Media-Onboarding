@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+
+# Lockfiles owned by tool, do not diff noisily
+pnpm-lock.yaml linguist-generated=true
+uv.lock        linguist-generated=true

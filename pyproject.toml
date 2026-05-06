@@ -1,0 +1,8 @@
+[project]
+name = "bullet-digital-media"
+version = "0.0.0"
+description = "Bullet Digital Media x IzzyAgents - Phase 1 onboarding automation monorepo"
+requires-python = ">=3.12,<3.13"
+
+[tool.uv.workspace]
+members = ["apps/api"]
