@@ -14,6 +14,34 @@ Entry types:
 
 ## [Unreleased]
 
+### 11/05/2026 - S1-05: SQLAlchemy + Alembic setup
+
+- **Added**: `apps/api` async database layer. `bullet_api.config.Settings` (pydantic-settings) loads `DATABASE_URL` from env; `bullet_api.config.get_async_database_url()` rewrites the canonical `postgresql://` scheme to `postgresql+asyncpg://` so the same env var drives `psql`, `scripts/verify_pgvector.py`, the SQLAlchemy async engine, and Alembic. `bullet_api.db` exposes `Base` (DeclarativeBase, ready for S1-06+ models), `engine` (`AsyncEngine` with `pool_pre_ping=True`), `AsyncSessionLocal` (async sessionmaker, `expire_on_commit=False`), and `get_session` (FastAPI dependency that rolls back on exception).
+- **Added**: dependencies in `apps/api/pyproject.toml`: `sqlalchemy[asyncio]>=2.0.36,<3.0`, `asyncpg>=0.30,<1.0`, `alembic>=1.14,<2.0`, `pydantic-settings>=2.6,<3.0`, `greenlet>=3.1,<4.0` (pinned explicitly so the SQLAlchemy async dependency is visible).
+- **Added**: Alembic scaffold under `apps/api/` - `alembic.ini` (script_location=`alembic`, `prepend_sys_path=src`, blank `sqlalchemy.url` so env.py owns it, UTC timestamps + numeric prefix in `file_template`), `alembic/env.py` (async migrations via `AsyncEngine` + `connection.run_sync(do_run_migrations)`, `target_metadata=Base.metadata` so future autogenerate works), `alembic/script.py.mako` (matches repo Python style, `from __future__ import annotations` baked in).
+- **Added**: first migration `apps/api/alembic/versions/0001_create_extensions.py` - `CREATE EXTENSION IF NOT EXISTS vector` then `citext` on upgrade; reverse order on downgrade. No tables (those start at S1-06). `IF NOT EXISTS`/`IF EXISTS` keeps the migration safe against Neon branches that may have the extension pre-installed by the control plane.
+- **Added**: pytest `db` marker plus `apps/api/tests/conftest.py` and `apps/api/tests/test_db_smoke.py`. Conftest probes the engine once at collection time via a throwaway `NullPool` engine; tests marked `@pytest.mark.db` skip cleanly when `DATABASE_URL` is unreachable. The `async_session` fixture also uses a `NullPool` engine so the per-function event loops that `pytest-asyncio` creates in auto mode cannot poison a pooled connection. Two tests added: `SELECT 1` against the async session, and a query asserting both extensions are present in `pg_extension`.
+- **Added**: Makefile targets `db-upgrade`, `db-downgrade`, `db-revision m="..."`, `db-reset` (all delegate to `cd apps/api && uv run alembic ...`).
+- **Changed**: `.github/workflows/ci.yml` - the `python` job now spins up a `pgvector/pgvector:pg16` service container (user/password/db match `.env.example`, `pg_isready` healthcheck), exports `DATABASE_URL=postgresql://bullet:bullet@localhost:5432/bullet_dev`, and runs `alembic upgrade head` -> `alembic downgrade base` -> `alembic upgrade head` -> `pytest` so every PR gates on real migration + reversibility + DB smoke tests.
+- **Changed**: `.env.example` comment for `DATABASE_URL` rewritten to explain that the canonical `postgresql://` scheme is intentional and is rewritten internally to `+asyncpg` by SQLAlchemy and Alembic.
+- **Changed**: `README.md` - added a "Database migrations" subsection under "Local development" documenting `make db-upgrade`/`db-downgrade`/`db-reset`/`db-revision` and the URL-rewriting contract.
+- **Decision**: Alembic config lives at `apps/api/alembic.ini` + `apps/api/alembic/`, co-located with the models that S1-06+ will add. Reason: keeps the entire DB story (config, models, migrations, session factory) in one workspace package; future `alembic revision --autogenerate` picks up `Base.metadata` from the same import root.
+- **Decision**: `DATABASE_URL` in `.env` stays in canonical `postgresql://` form. SQLAlchemy session and Alembic `env.py` rewrite to `postgresql+asyncpg://` internally. Reason: keeps `psql`, `scripts/verify_pgvector.py` (psycopg), and the Neon CLI working from the same env var; no special-casing per tool.
+- **Decision**: per-PR Neon branching support means `env.py` reads `DATABASE_URL` from environment - nothing else. The CI workflow in S1-33 will inject the per-PR branch URL into that env var. `env.py` does not call the Neon API; this keeps the migration code path identical whether it's pointed at local Postgres, a Neon branch, staging, or production.
+- **Discovery**: `pytest-asyncio` in `auto` mode (`asyncio_mode = "auto"` from S1-01) creates a fresh event loop per test function. Connections held in a SQLAlchemy async engine's pool become bound to a closed loop between tests, surfacing as `RuntimeError: Event loop is closed` on the second DB-touching test. Fix used in `conftest.py`: build the test engine with `NullPool` and dispose it per-fixture. The production `engine` in `bullet_api.db.session` remains pooled and is unaffected.
+
+**Verification (all passing, 11/05/2026, locally against docker-compose Postgres on port 5433)**
+
+| Step | Command | Result |
+|---|---|---|
+| 1 | `uv sync --all-packages` | OK, 8 new packages installed (sqlalchemy 2.0.49, asyncpg 0.31.0, alembic 1.18.4, pydantic-settings 2.14.1, greenlet 3.5.0, mako/markupsafe) |
+| 2 | `alembic upgrade head` | OK, runs `0001_create_extensions`; `vector` + `citext` rows present in `pg_extension`; `alembic_version=0001_create_extensions` |
+| 3 | `alembic downgrade base` | OK, both extensions dropped; `alembic_version` empty |
+| 4 | `alembic upgrade head` (re-apply) | OK, both extensions reinstalled, idempotent against pre-existing state |
+| 5 | `pytest apps/api -v` against live DB | 3 passed (version smoke + 2 DB smoke) |
+| 6 | `pytest apps/api -v` with unreachable DB | 1 passed, 2 skipped (skip path verified) |
+| 7 | `ruff check apps/api` | All checks passed |
+
 ### 06/05/2026 - S1-02: Docker Compose local dev environment
 
 - **Added**: `docker-compose.yml` at repo root brings up the local dev stack with two services - `pgvector/pgvector:pg16` (Postgres 16 with pgvector compiled in, named volume `bullet-postgres-data`, `pg_isready` healthcheck) and `inngest/inngest:latest` (dev server, UI on `localhost:8288`, started with `--no-discovery` and `-u http://host.docker.internal:8000/api/inngest` until S1-19 wires the worker). Linux compatibility via `extra_hosts: host.docker.internal:host-gateway`. Ports configurable through `.env`.
