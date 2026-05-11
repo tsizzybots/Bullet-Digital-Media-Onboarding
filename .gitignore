@@ -43,3 +43,6 @@ venv/
 # Logs
 *.log
 logs/
+
+# Claude Code project-local MCP server config (user-managed, not shared)
+.mcp.json
