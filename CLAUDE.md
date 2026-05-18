@@ -104,7 +104,7 @@ If a task touches code AND introduces a decision/discovery, log both - one as Ad
 
 ## GitHub
 - Account: `tsizzybots` - always use this account for this project
-- Repo: `tsizzybots/bullet_digital_media`
+- Repo: `tsizzybots/Bullet-Digital-Media-Onboarding` (the rename to `bullet_digital_media` planned in the S1-01 changelog entry was never executed; the original repo name remains in use)
 - Before pushing, ensure active account: `gh auth switch --user tsizzybots`
 
 ## StrikeFlow Integration

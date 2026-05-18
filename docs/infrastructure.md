@@ -204,7 +204,7 @@ These services Bullet already has accounts for. We just need access to integrate
 
 ### B12. GitHub
 
-- **What we need**: We already have the repo at `tsizzybots/bullet_digital_media`. No action from Bullet beyond confirming the IzzyAgents engineering team has push access (they do, since IzzyAgents owns the org).
+- **What we need**: We already have the repo at `tsizzybots/Bullet-Digital-Media-Onboarding`. No action from Bullet beyond confirming the IzzyAgents engineering team has push access (they do, since IzzyAgents owns the org).
 - **Sprint**: 1 blocker.
 - **Action from Bullet**: None. Listed here for completeness.
 

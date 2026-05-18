@@ -24,7 +24,7 @@ Goal: Project scaffold, database, auth, dashboard shell live. PandaDoc signing e
 
 ### S1-01: Monorepo scaffold
 
-- **Description**: Create the monorepo at `tsizzybots/bullet_digital_media` with `apps/api` (Python via uv), `apps/dashboard` (TS via pnpm workspaces), `packages/shared`. Add root `README.md`, `.gitignore` (including `.env`), `.editorconfig`, pre-commit hook scanning for secrets.
+- **Description**: Create the monorepo at `tsizzybots/Bullet-Digital-Media-Onboarding` with `apps/api` (Python via uv), `apps/dashboard` (TS via pnpm workspaces), `packages/shared`. Add root `README.md`, `.gitignore` (including `.env`), `.editorconfig`, pre-commit hook scanning for secrets.
 - **Tests**: `pnpm install` and `uv sync` both succeed cleanly from a fresh clone. Pre-commit hook rejects a test commit containing a fake API key. CI workflow file lints successfully.
 - **Dependencies**: n/a
 

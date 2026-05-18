@@ -21,8 +21,8 @@ user_invocable: true
 
 - **Board ID**: `c01081f2-c27c-4a8c-b7c5-0b2857254cd9`
 - **Board name**: Bullet Digital Media
-- **Repo**: `tsizzybots/bullet_digital_media`
-- **Render service**: `bullet-progress` (static site)
+- **Repo**: `tsizzybots/Bullet-Digital-Media-Onboarding`
+- **Render service**: `Bullet-Digital-Media-Progress` (slug `bullet-digital-media-progress`, static site in IzzyAgents Render workspace)
 - **GitHub account**: `tsizzybots` (run `gh auth switch --user tsizzybots` before push)
 
 ## Execution steps
@@ -78,7 +78,7 @@ Use UK date format (e.g. `04/05/2026`) per project formatting rules. Use a plain
 
 Per the global rule "never auto-commit/push", **ask the user**:
 
-> "Snapshot updated and committed. Push to `tsizzybots/bullet_digital_media` so Render redeploys `bullet-progress`?"
+> "Snapshot updated and committed. Push to `tsizzybots/Bullet-Digital-Media-Onboarding` so Render redeploys `bullet-digital-media-progress`?"
 
 If yes:
 ```bash
@@ -104,4 +104,4 @@ If no, stop and report success.
 | `progress-site/src/App.tsx` | Top-level UI, "Last updated" reads `generated_at` |
 | `progress-site/src/main.tsx` | Static site entry — imports the snapshot |
 | `scripts/transform_snapshot.py` | StrikeFlow → BoardSnapshot transform |
-| `render.yaml` | Render config — `bullet-progress` static site auto-deploys on push |
+| `render.yaml` | Render config — note that `bullet-digital-media-progress` deploys via its own per-service GitHub connection, NOT via this file |

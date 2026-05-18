@@ -14,6 +14,18 @@ Entry types:
 
 ## [Unreleased]
 
+### 18/05/2026 - Repo name and Render service name doc corrections
+
+- **Discovery**: the GitHub repo rename from `tsizzybots/Bullet-Digital-Media-Onboarding` to `tsizzybots/bullet_digital_media` recorded as a Decision under 11/05/2026 (`docs/CHANGELOG.md` line 120) and as Added under the same date never actually executed on GitHub. Confirmed today via `gh repo view`: only `tsizzybots/Bullet-Digital-Media-Onboarding` exists; the new name returns "Could not resolve to a Repository". A push against the new URL today failed with exit 128 "Repository not found"; rolling the remote URL back to the original name made the push succeed. The historical CHANGELOG line is left in place as a record of what was decided at the time; this entry supersedes it.
+- **Discovery**: similarly, the Render service for the client progress dashboard is named `Bullet-Digital-Media-Progress` (slug `bullet-digital-media-progress`, `srv-d7s18ajbc2fs738mgei0`, URL `https://bullet-digital-media-progress.onrender.com`) - not `bullet-progress` as documented in several places. The package name in `progress-site/package.json` is `bullet-progress`, which is the source of the doc drift, but the Render service was named differently when it was created via "New Static Site" in the dashboard.
+- **Decision**: do not execute the GitHub repo rename. Keep `tsizzybots/Bullet-Digital-Media-Onboarding` as the canonical repo name and update all active docs to match. Rationale: rename is reversible later if wanted, but every doc currently referencing the wrong name is actively misleading future contributors and Claude sessions. Faster to align docs to reality than to chase a rename that did not happen.
+- **Changed**: `CLAUDE.md` `## GitHub` section - corrected repo name and added a parenthetical noting the planned rename was never executed.
+- **Changed**: `package.json` `repository.url` - corrected to `Bullet-Digital-Media-Onboarding.git`.
+- **Changed**: `docs/PRD.md` §11.6 CI/CD - corrected repo reference.
+- **Changed**: `docs/infrastructure.md` §B12 GitHub - corrected repo reference.
+- **Changed**: `docs/development-sprints.md` S1-01 description - corrected repo reference.
+- **Changed**: `.claude/skills/update-progress/SKILL.md` - corrected repo name in two places and corrected the Render service name from `bullet-progress` to `bullet-digital-media-progress` in three places.
+
 ### 18/05/2026 - Render workspace remediation (S1-03 / S1-04 follow-up)
 
 - **Decision**: the canonical Render workspace for this project is the **client-owned** `Agents's workspace` (`tea-d80mkougvqtc73dmah20`, owner `agents@bulletdigitalmedia.com`), not the IzzyAgents workspace (`tea-cunci5popnds73d4n8g0`) where S1-03 originally created the env groups and S1-04 wired the staging services. Reason: billing, ownership, and access control sit with the client. All Phase 1 services (`bullet-api-*`, `bullet-worker-*`, `bullet-cron-*`, `bullet-dashboard-*`) and env groups (`bullet-staging-env`, `bullet-prod-env`) live in the client workspace going forward.

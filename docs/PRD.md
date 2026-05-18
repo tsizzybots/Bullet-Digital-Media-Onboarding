@@ -648,7 +648,7 @@ Replaces the 16-branch GHL Outstanding Elements workflow. Per-client live checkl
 
 ### 11.6 CI / CD
 
-- GitHub repo: `tsizzybots/bullet_digital_media`
+- GitHub repo: `tsizzybots/Bullet-Digital-Media-Onboarding`
 - GitHub Actions: lint + typecheck + tests on every PR; deploy to Render staging on merge to `main`; manual promote to production via Render dashboard
 - No staging-to-prod auto-promote in Phase 1
 
