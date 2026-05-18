@@ -8,9 +8,40 @@ the goal is that no other module reads `os.environ` directly.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# libpq-only query string parameters that asyncpg does NOT accept. Neon's
+# canonical URL ships with `?sslmode=require&channel_binding=require`; if
+# either reaches asyncpg via the SQLAlchemy URL it raises
+# `TypeError: connect() got an unexpected keyword argument 'sslmode'`
+# at pool checkout, taking down `alembic upgrade head`, the FastAPI app,
+# and any worker. SSL is configured separately via `connect_args` on the
+# SQLAlchemy engine (see `bullet_api.db.session`).
+_LIBPQ_ONLY_QUERY_PARAMS = frozenset(
+    {
+        "sslmode",
+        "sslrootcert",
+        "sslcert",
+        "sslkey",
+        "sslpassword",
+        "sslcrl",
+        "sslcrldir",
+        "sslcompression",
+        "channel_binding",
+        "gssencmode",
+        "krbsrvname",
+        "gsslib",
+    }
+)
+
+
+AsyncpgSslMode = Literal[
+    "disable", "allow", "prefer", "require", "verify-ca", "verify-full"
+]
 
 
 class Settings(BaseSettings):
@@ -27,7 +58,53 @@ class Settings(BaseSettings):
             "Canonical Postgres URL (postgresql://user:pass@host:port/db). "
             "Used as-is by psql and verify_pgvector.py; rewritten to "
             "postgresql+asyncpg:// by get_async_database_url() for "
-            "SQLAlchemy async + Alembic."
+            "SQLAlchemy async + Alembic. Any libpq-only query params "
+            "(sslmode, channel_binding, etc.) are stripped during rewrite."
+        ),
+    )
+    database_ssl_mode: AsyncpgSslMode = Field(
+        default="prefer",
+        description=(
+            "asyncpg ssl mode applied via connect_args on the SQLAlchemy "
+            "engine. 'prefer' works for both local docker Postgres (TLS "
+            "absent, falls back to plain) and Neon (TLS mandatory, used "
+            "automatically). Render env groups for staging / prod should "
+            "force 'require' (or stricter) so a mis-configured local "
+            "override cannot disable TLS in those environments."
+        ),
+    )
+
+    # ----- S1-14 email confirmation flow -----
+    email_token_secret: str = Field(
+        default="dev-insecure-change-me",
+        description=(
+            "Secret used by itsdangerous to sign email confirmation tokens. "
+            "Must be set to a high-entropy value in staging and production "
+            "Render env groups; the dev default is intentionally obvious so "
+            "it never lands in production silently."
+        ),
+    )
+    resend_api_key: str = Field(
+        default="",
+        description=(
+            "API key for Resend (https://resend.com). Empty in dev / local "
+            "test - the Resend client will refuse to send when the key is "
+            "empty so a misconfigured deployment fails loudly."
+        ),
+    )
+    email_from: str = Field(
+        default="onboarding@bulletdigitalmedia.com",
+        description=(
+            "From address used on outbound system mail. Resolved 06/05/2026 "
+            "Q-01: single system mailbox; per-user from-addresses not used "
+            "in Phase 1."
+        ),
+    )
+    email_confirmation_base_url: str = Field(
+        default="http://localhost:3000/confirm",
+        description=(
+            "Base URL the user clicks to confirm. The token is appended as "
+            "`/{token}`. Render env groups set this to the dashboard host."
         ),
     )
 
@@ -37,18 +114,52 @@ def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
 
 
+def _strip_libpq_query_params(url: str) -> str:
+    """Return `url` with any libpq-only query params removed.
+
+    Preserves the order of remaining params and keeps blank values
+    (e.g. `?application_name=`) intact so an explicit empty-string value
+    still survives the round-trip.
+    """
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    kept = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() not in _LIBPQ_ONLY_QUERY_PARAMS
+    ]
+    new_query = urlencode(kept)
+    return urlunparse(parsed._replace(query=new_query))
+
+
 def get_async_database_url(url: str | None = None) -> str:
     """Return the DATABASE_URL rewritten for SQLAlchemy's asyncpg driver.
 
-    Accepts either the canonical `postgresql://` form (preferred in .env) or
-    an already-qualified `postgresql+asyncpg://` form. Anything else is
-    returned unchanged so explicit overrides are respected.
+    Two transformations:
+
+    1. Scheme rewrite. `postgresql://` (or `postgres://`) becomes
+       `postgresql+asyncpg://`. An already-qualified `postgresql+asyncpg://`
+       URL passes through unchanged. Any other scheme is returned as-is so
+       explicit overrides are respected.
+
+    2. libpq-only query params are stripped. Neon's canonical URL ships
+       with `?sslmode=require&channel_binding=require`; asyncpg rejects
+       both. SSL is configured separately via `connect_args` on the
+       SQLAlchemy engine (see `bullet_api.db.session`).
+
+    The canonical `DATABASE_URL` env var is never mutated - psql,
+    scripts/verify_pgvector.py, and any other libpq-speaking tool continue
+    to consume the original string unchanged. Only the copy handed to
+    SQLAlchemy / Alembic is rewritten.
     """
     raw = url if url is not None else get_settings().database_url
     if raw.startswith("postgresql+asyncpg://"):
+        async_url = raw
+    elif raw.startswith("postgresql://"):
+        async_url = "postgresql+asyncpg://" + raw[len("postgresql://") :]
+    elif raw.startswith("postgres://"):
+        async_url = "postgresql+asyncpg://" + raw[len("postgres://") :]
+    else:
         return raw
-    if raw.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + raw[len("postgresql://") :]
-    if raw.startswith("postgres://"):
-        return "postgresql+asyncpg://" + raw[len("postgres://") :]
-    return raw
+    return _strip_libpq_query_params(async_url)

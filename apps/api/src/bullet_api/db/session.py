@@ -10,12 +10,20 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from bullet_api.config import get_async_database_url
+from bullet_api.config import get_async_database_url, get_settings
 
+# SSL is set here via connect_args, not in the URL query string. Neon's
+# canonical URL carries `?sslmode=require&channel_binding=require` which
+# asyncpg rejects (libpq-only params). `get_async_database_url()` strips
+# those before they reach the engine; TLS is re-enabled below through the
+# asyncpg-native `ssl` connect arg, defaulting to "prefer" so the same
+# build runs unchanged against local docker Postgres (no TLS) and Neon
+# (TLS mandatory and auto-upgraded).
 engine = create_async_engine(
     get_async_database_url(),
     pool_pre_ping=True,
     future=True,
+    connect_args={"ssl": get_settings().database_ssl_mode},
 )
 
 AsyncSessionLocal = async_sessionmaker(

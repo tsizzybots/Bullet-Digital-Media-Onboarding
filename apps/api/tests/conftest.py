@@ -20,38 +20,47 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
-    async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
 
-from bullet_api.config import get_async_database_url
+from bullet_api.config import get_async_database_url, get_settings
 
 
 def _build_test_engine():
     return create_async_engine(
         get_async_database_url(),
         poolclass=NullPool,
+        connect_args={"ssl": get_settings().database_ssl_mode},
     )
 
 
 @pytest_asyncio.fixture
 async def async_session() -> AsyncIterator[AsyncSession]:
-    """Yield an AsyncSession backed by a NullPool engine, then dispose."""
+    """Yield an AsyncSession bound to a per-test outer transaction.
+
+    Any `session.commit()` inside the test (or a handler under test) only
+    releases a SAVEPOINT inside the outer transaction; the fixture rolls
+    the outer transaction back on teardown so the test never persists
+    state to Neon. This keeps the live-Neon test pattern viable for
+    handlers that legitimately need to commit (S1-13 login, S1-14
+    confirmation, etc.).
+    """
     engine = _build_test_engine()
-    session_factory = async_sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-    )
-    try:
-        async with session_factory() as session:
-            try:
-                yield session
-            finally:
-                await session.rollback()
-    finally:
-        await engine.dispose()
+    async with engine.connect() as connection:
+        outer = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            yield session
+        finally:
+            await session.close()
+            if outer.is_active:
+                await outer.rollback()
+    await engine.dispose()
 
 
 def pytest_collection_modifyitems(
