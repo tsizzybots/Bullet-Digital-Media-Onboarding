@@ -2,6 +2,16 @@
 # Bullet Digital Media — Render Blueprint
 # ─────────────────────────────────────────────────
 #
+# Workspace: this Blueprint targets the client-owned Render workspace
+# `Agents's workspace` (tea-d80mkougvqtc73dmah20, owner
+# agents@bulletdigitalmedia.com). The IzzyAgents workspace
+# (tea-cunci5popnds73d4n8g0) hosts the legacy static site
+# `Bullet-Digital-Media-Progress` (slug bullet-digital-media-progress,
+# srv-d7s18ajbc2fs738mgei0), which auto-deploys from this same repo
+# via its own per-service GitHub connection - NOT via this Blueprint.
+# It is therefore safe to push render.yaml changes without touching
+# the IzzyAgents workspace.
+#
 # Service naming: `bullet-<role>-<env>`. Phase 1 ships staging only;
 # production services are added later in Sprint 1 by duplicating the
 # staging blocks with `-prod` suffixes and pointing them at
@@ -42,25 +52,15 @@ envVarGroups:
         value: "20"
 
 services:
-  # ─── Static Site (client progress dashboard) ──────────
-  - type: web
-    name: bullet-progress
-    runtime: static
-    buildCommand: |
-      cd progress-site &&
-      npm install &&
-      cp ../public/izzyagents-white.png public/ &&
-      npx vite build
-    staticPublishPath: progress-site/dist
-    pullRequestPreviewsEnabled: true
-    headers:
-      - path: /*
-        name: Cache-Control
-        value: public, max-age=3600
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+  # NOTE: the legacy static site `Bullet-Digital-Media-Progress`
+  # (slug bullet-digital-media-progress) lives in the IzzyAgents
+  # workspace and is intentionally NOT declared here. It was never
+  # actually instantiated as a Blueprint service - the previous
+  # render.yaml `bullet-progress` block was aspirational. The live
+  # service auto-deploys from this repo via its own per-service
+  # GitHub connection. To rebuild or reconfigure it, edit it
+  # directly in the Render dashboard. See docs/CHANGELOG.md entry
+  # 18/05/2026 (workspace remediation) for context.
 
   # ─── FastAPI (staging) ────────────────────────────────
   # Fully functional: serves GET /healthz returning {"status":"ok"}.
