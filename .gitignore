@@ -46,3 +46,6 @@ logs/
 
 # Claude Code project-local MCP server config (user-managed, not shared)
 .mcp.json
+
+# Playwright MCP scratch output (page snapshots, console logs, may contain secrets)
+.playwright-mcp/

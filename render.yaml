@@ -1,6 +1,26 @@
 # ─────────────────────────────────────────────────
 # Bullet Digital Media — Render Blueprint
 # ─────────────────────────────────────────────────
+#
+# Service naming: `bullet-<role>-<env>`. The prod env group is
+# declared up-front (S1-03) so its DATABASE_URL slot is ready when
+# the first prod service lands later in Sprint 1. Staging services
+# and their env group land in S1-04.
+
+envVarGroups:
+  - name: bullet-prod-env
+    envVars:
+      # Neon production connection string. Pasted into the Render
+      # dashboard via the env group screen; never committed. No prod
+      # services consume this group yet (they land later in Sprint 1)
+      # - the group exists now so the secret is in place before those
+      # services boot.
+      - key: DATABASE_URL
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: NODE_VERSION
+        value: "20"
 
 services:
   # ─── Static Site (client progress dashboard) ──────────
