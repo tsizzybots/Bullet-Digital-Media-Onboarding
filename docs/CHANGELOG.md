@@ -14,6 +14,14 @@ Entry types:
 
 ## [Unreleased]
 
+### 18/05/2026 - Render workspace remediation executed
+
+- **Added**: Render Blueprint instance `bullet-digital-media` (`exs-d85d158js32c73aefn70`) connected to `tsizzybots/Bullet-Digital-Media-Onboarding` `main` in the client-owned `Agents's workspace` (`tea-d80mkougvqtc73dmah20`). First sync committed `88c0930`. Created in the workspace: env groups `bullet-staging-env` (`evg-d85d1brtqb8s73fu56fg`) and `bullet-prod-env` (`evg-d85d1brtqb8s73fu56h0`); web service `bullet-api-staging` (`srv-d85d1brtqb8s73fu56n0`); background worker `bullet-worker-staging` (`srv-d85d1brtqb8s73fu56mg`); cron job `bullet-cron-staging` (`crn-d85d1brtqb8s73fu56m0`); static site `bullet-dashboard-staging`. All four services are Blueprint-managed; staging env group linked to API, worker, and cron.
+- **Added**: `DATABASE_URL` secret populated in `bullet-staging-env` (Neon staging pooled URL) and `bullet-prod-env` (Neon prod pooled URL) via the Render dashboard. Values match `.env.neon` (gitignored).
+- **Verified**: `curl https://bullet-api-staging.onrender.com/healthz` returns HTTP 200 `{"status":"ok"}` in ~325ms - confirms the S1-04 `/healthz` test contract is now satisfied end-to-end against the client workspace.
+- **Removed**: orphaned env groups in IzzyAgents workspace (`tea-cunci5popnds73d4n8g0`) - `bullet-staging-env` (`evg-d8591rh9rddc73a5c7gg`) and `bullet-prod-env` (`evg-d85926t7vvec73fr2drg`, the actual prod env group ID; earlier CHANGELOG referenced a placeholder). Both had zero linked services at time of deletion. IzzyAgents workspace now contains zero env groups for this project.
+- **Discovery**: Render's env-group delete confirmation requires typing `sudo delete <group-name>` into a Sudo Command field - a hard interlock against accidental destruction. Useful to know for future cleanup or scripting.
+
 ### 18/05/2026 - Repo name and Render service name doc corrections
 
 - **Discovery**: the GitHub repo rename from `tsizzybots/Bullet-Digital-Media-Onboarding` to `tsizzybots/bullet_digital_media` recorded as a Decision under 11/05/2026 (`docs/CHANGELOG.md` line 120) and as Added under the same date never actually executed on GitHub. Confirmed today via `gh repo view`: only `tsizzybots/Bullet-Digital-Media-Onboarding` exists; the new name returns "Could not resolve to a Repository". A push against the new URL today failed with exit 128 "Repository not found"; rolling the remote URL back to the original name made the push succeed. The historical CHANGELOG line is left in place as a record of what was decided at the time; this entry supersedes it.
