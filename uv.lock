@@ -114,6 +114,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "greenlet" },
     { name = "httpx" },
+    { name = "inngest" },
     { name = "itsdangerous" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -137,6 +138,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1.0" },
     { name = "greenlet", specifier = ">=3.1,<4.0" },
     { name = "httpx", specifier = ">=0.27,<1.0" },
+    { name = "inngest", specifier = ">=0.4,<1.0" },
     { name = "itsdangerous", specifier = ">=2.2,<3.0" },
     { name = "pydantic-settings", specifier = ">=2.6,<3.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36,<3.0" },
@@ -336,12 +338,36 @@ wheels = [
 ]
 
 [[package]]
+name = "inngest"
+version = "0.5.18"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jcs" },
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c5/ce/56283a2f9d0ce80e47a37d4f66784f04b0067b668578205a4d09c206ccea/inngest-0.5.18.tar.gz", hash = "sha256:b41104ecd5bf3b733766db8107355f0edfbde42cff4b6196f1b6958f54155c88", size = 95297, upload-time = "2026-03-11T17:42:57.013Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/46/ffe9355a03da71b5a85f817da57f058fe98f33b883d8b201316a948e7c9e/inngest-0.5.18-py3-none-any.whl", hash = "sha256:7a584cb36448adfaa37e66192e545a30bad1bb5ec0ffd145b1126a8c72e4a0a6", size = 143711, upload-time = "2026-03-11T17:42:55.155Z" },
+]
+
+[[package]]
 name = "itsdangerous"
 version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9c/cb/8ac0172223afbccb63986cc25049b154ecfb5e85932587206f42317be31d/itsdangerous-2.2.0.tar.gz", hash = "sha256:e0050c0b7da1eea53ffaf149c0cfbb5c6e2e2b69c4bef22c81fa6eb73e5f6173", size = 54410, upload-time = "2024-04-16T21:28:15.614Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl", hash = "sha256:c6242fc49e35958c8b15141343aa660db5fc54d4f13a1db01a3f5891b98700ef", size = 16234, upload-time = "2024-04-16T21:28:14.499Z" },
+]
+
+[[package]]
+name = "jcs"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/e5/9d547f0d42ba00f68eec773aa7b2145e0c0335eb632cbaf519f480a429af/jcs-0.2.1.tar.gz", hash = "sha256:9f20360b2f3b0a410d65493b448f96306d80e37fb46283f3f4aa5db2c7c1472b", size = 6886, upload-time = "2022-04-10T14:41:24.904Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/d4/9a99bc15266a842bd14a1913afdb05182888ebab035666c1ce8a64537ca2/jcs-0.2.1-py3-none-any.whl", hash = "sha256:e23a3e1de60f832d33cd811bb9c3b3be79219cdf95f63b88f0972732c3fa8476", size = 7603, upload-time = "2022-04-10T14:41:23.207Z" },
 ]
 
 [[package]]

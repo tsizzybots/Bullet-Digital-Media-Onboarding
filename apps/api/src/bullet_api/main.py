@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
+import inngest.fast_api
 from fastapi import Depends, FastAPI
 
 from bullet_api import __version__
@@ -19,9 +20,11 @@ from bullet_api.auth import (
     confirmation_router,
     get_current_user,
     login_router,
+    logout_router,
     require_founder,
 )
 from bullet_api.logging_config import configure_logging
+from bullet_api.worker.client import FUNCTIONS, inngest_client
 
 configure_logging()
 
@@ -34,8 +37,15 @@ app = FastAPI(
     ),
 )
 
+# Mount the Inngest serve endpoint at /api/inngest. Inngest Cloud calls this
+# path to invoke registered background functions. For local dev the Inngest
+# dev server (docker-compose, port 8288) handles routing to this same endpoint
+# via -u http://host.docker.internal:8000/api/inngest (see docker-compose.yml).
+inngest.fast_api.serve(app, inngest_client, FUNCTIONS)
+
 app.include_router(login_router)
 app.include_router(confirmation_router)
+app.include_router(logout_router)
 
 
 @app.get("/healthz", tags=["meta"])

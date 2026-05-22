@@ -108,6 +108,27 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- S1-19 Inngest -----
+    inngest_signing_key: str = Field(
+        default="",
+        description=(
+            "Inngest signing key for webhook verification. Set in Render env groups "
+            "for staging/prod. Empty in local dev - Inngest dev server does not "
+            "require a signing key."
+        ),
+    )
+    inngest_event_key: str = Field(
+        default="",
+        description=(
+            "Inngest event key for sending events. Set in Render env groups. "
+            "Empty in local dev - the dev server accepts unsigned events."
+        ),
+    )
+    inngest_serve_path: str = Field(
+        default="/api/inngest",
+        description="URL path where Inngest calls this service.",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
