@@ -36,6 +36,32 @@ envVarGroups:
         value: "3.12"
       - key: NODE_VERSION
         value: "20"
+      # Authentication (S1-14)
+      - key: EMAIL_TOKEN_SECRET
+        sync: false
+      - key: DATABASE_SSL_MODE
+        value: "require"
+      # Resend email (S1-14)
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: "onboarding@bulletdigitalmedia.com"
+      - key: EMAIL_CONFIRMATION_BASE_URL
+        sync: false  # https://bullet-dashboard-staging.onrender.com/confirm
+      # Inngest (S1-19)
+      - key: INNGEST_SIGNING_KEY
+        sync: false
+      - key: INNGEST_EVENT_KEY
+        sync: false
+      # Cloudflare R2 transcript storage (S1-27)
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
 
   - name: bullet-prod-env
     envVars:
@@ -50,6 +76,32 @@ envVarGroups:
         value: "3.12"
       - key: NODE_VERSION
         value: "20"
+      # Authentication (S1-14)
+      - key: EMAIL_TOKEN_SECRET
+        sync: false
+      - key: DATABASE_SSL_MODE
+        value: "require"
+      # Resend email (S1-14)
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: "onboarding@bulletdigitalmedia.com"
+      - key: EMAIL_CONFIRMATION_BASE_URL
+        sync: false  # https://bullet-dashboard.onrender.com/confirm
+      # Inngest (S1-19)
+      - key: INNGEST_SIGNING_KEY
+        sync: false
+      - key: INNGEST_EVENT_KEY
+        sync: false
+      # Cloudflare R2 transcript storage (S1-27)
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
 
 services:
   # NOTE: the legacy static site `Bullet-Digital-Media-Progress`
@@ -78,9 +130,13 @@ services:
       - fromGroup: bullet-staging-env
 
   # ─── Inngest worker (staging) ─────────────────────────
-  # Placeholder: long-running process that prints a marker line and
-  # sleeps. Replaced in S1-19 when Inngest worker registration lands.
-  # Background workers do not expose an HTTP port, so no /healthz.
+  # S1-19: Inngest background functions are served via the FastAPI HTTP
+  # endpoint (bullet-api-staging /api/inngest). Inngest Cloud calls that
+  # endpoint to invoke registered functions; no separate TCP server is
+  # needed here. This worker process logs a health line and sleeps so
+  # Render keeps a long-running dyno available for future Inngest SDK
+  # worker mode or out-of-band jobs (S1-25+). Real job logic replaces
+  # the sleep in those later tasks.
   - type: worker
     name: bullet-worker-staging
     runtime: python
@@ -89,27 +145,32 @@ services:
     branch: main
     buildCommand: pip install uv && uv sync --frozen
     startCommand: >-
-      uv run python -c "import time, sys;
-      print('bullet-worker-staging placeholder - replace in S1-19', flush=True);
-      sys.stdout.flush();
+      uv run python -c "
+      import time, logging;
+      logging.basicConfig(level=logging.INFO);
+      logging.info('bullet-worker-staging: Inngest functions served via bullet-api-staging /api/inngest');
+      logging.info('This process monitors Inngest job health. Real background jobs land in S1-25+.');
       [time.sleep(3600) for _ in iter(int, 1)]"
     envVars:
       - fromGroup: bullet-staging-env
 
   # ─── Next.js dashboard (staging) ──────────────────────
-  # Placeholder: static one-pager. S1-16 replaces this block with the
-  # real Next.js build (runtime: node, buildCommand: pnpm build, etc.)
-  # and at that point adds an app/healthz/route.ts endpoint.
+  # S1-21: Upgraded from static placeholder to Next.js web service.
+  # S1-16 (running in parallel) delivers the actual Next.js scaffold
+  # under apps/dashboard. The health check endpoint is added by S1-16.
   - type: web
     name: bullet-dashboard-staging
-    runtime: static
+    runtime: node
+    rootDir: apps/dashboard
+    plan: starter
     branch: main
-    buildCommand: >-
-      mkdir -p .placeholder &&
-      printf '%s'
-      '<!doctype html><html><head><meta charset="utf-8"><title>bullet-dashboard-staging</title></head><body><h1>placeholder</h1><p>Next.js scaffold lands in S1-16.</p></body></html>'
-      > .placeholder/index.html
-    staticPublishPath: .placeholder
+    buildCommand: npm install -g pnpm && pnpm install && pnpm build
+    startCommand: pnpm start
+    healthCheckPath: /api/healthz
+    envVars:
+      - fromGroup: bullet-staging-env
+      - key: NEXT_PUBLIC_API_URL
+        value: https://bullet-api-staging.onrender.com
 
   # ─── Cron job (staging) ───────────────────────────────
   # Render's native cron-job type runs a command on schedule with no
