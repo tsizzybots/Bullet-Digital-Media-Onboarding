@@ -22,6 +22,7 @@ from bullet_api.auth.dependencies import (
     require_role,
 )
 from bullet_api.auth.login import router as login_router
+from bullet_api.auth.sessions import router as logout_router
 
 __all__ = [
     "CurrentUser",
@@ -29,6 +30,7 @@ __all__ = [
     "generate_confirmation_token",
     "get_current_user",
     "login_router",
+    "logout_router",
     "require_am",
     "require_engineer",
     "require_founder",
