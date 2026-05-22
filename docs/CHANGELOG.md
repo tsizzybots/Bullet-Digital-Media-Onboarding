@@ -14,6 +14,65 @@ Entry types:
 
 ## [Unreleased]
 
+### 22/05/2026 - S1-19: Inngest setup (prod + staging + local)
+
+- **Added**: `inngest==0.5.18` (+ `jcs==0.2.1`) to `apps/api/pyproject.toml` dependencies via `uv add "inngest>=0.4,<1.0"`.
+- **Added**: `apps/api/src/bullet_api/worker/__init__.py` - new `worker` sub-package.
+- **Added**: `apps/api/src/bullet_api/worker/client.py` - `_make_client()` builds an `inngest.Inngest` client with `app_id="bullet-api"`. Signing key and event key are injected from settings only when non-empty (local dev uses the Inngest dev server which requires neither). `noop_function` is a `@inngest_client.create_function` registered on the `bullet/noop` event - serves as connectivity smoke test. `FUNCTIONS` list is the single import point for `main.py`.
+- **Added**: `apps/api/src/bullet_api/config.py` - three new settings: `inngest_signing_key`, `inngest_event_key`, `inngest_serve_path` (default `/api/inngest`). All default to empty/safe values for local dev.
+- **Changed**: `apps/api/src/bullet_api/main.py` - imports `inngest.fast_api` and calls `inngest.fast_api.serve(app, inngest_client, FUNCTIONS)` to mount the serve endpoint at `/api/inngest`. Inngest Cloud calls this path to invoke registered functions. Local dev routes to the same endpoint via the Inngest dev server (docker-compose port 8288, `-u http://host.docker.internal:8000/api/inngest`).
+- **Changed**: `render.yaml` `bullet-worker-staging` - upgraded from placeholder sleep to a logging health process. Comment explains Inngest functions are served via the FastAPI HTTP endpoint, not this worker dyno. Real job logic lands in S1-25+.
+- **Verified**: `uv run python -c "from bullet_api.worker.client import FUNCTIONS; print('OK:', len(FUNCTIONS), 'functions')"` prints `OK: 1 functions`. `ruff check src/` clean.
+- **Decision**: Inngest functions are served via the existing FastAPI web service (`/api/inngest`), not a dedicated worker process. Inngest Cloud calls the HTTP endpoint; the worker dyno in render.yaml is reserved for future out-of-band jobs that cannot run inside a request/response cycle.
+
+### 22/05/2026 - S1-21: Render env groups + secret hygiene
+
+- **Changed**: `render.yaml` `bullet-staging-env` and `bullet-prod-env` - added all Phase 1 secrets: `EMAIL_TOKEN_SECRET`, `DATABASE_SSL_MODE` (hardcoded `require` in both envs), `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_CONFIRMATION_BASE_URL`, `INNGEST_SIGNING_KEY`, `INNGEST_EVENT_KEY`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`. All secrets are `sync: false` (pasted into Render dashboard, never committed). `DATABASE_SSL_MODE` forces `require` for both staging and prod, overriding the `prefer` default in `config.py`.
+- **Changed**: `render.yaml` `bullet-dashboard-staging` - upgraded from `type: static` HTML placeholder to a full `type: web` Next.js service (`runtime: node`, `rootDir: apps/dashboard`, `buildCommand: pnpm install && pnpm build`, `startCommand: pnpm start`, `healthCheckPath: /api/healthz`). Consumes `bullet-staging-env` group plus `NEXT_PUBLIC_API_URL` pointing at the staging API. Wires with S1-16 (Next.js scaffold).
+- **Decision**: `DATABASE_SSL_MODE` is explicitly declared as `require` in the Render env groups rather than relying on the `prefer` default. This means a dev override cannot silently downgrade TLS in staging or prod.
+- **Decision**: R2 env vars (transcript storage) declared now in S1-21 so they are in place before S1-27 lands, avoiding a second env-group edit pass at that point.
+
+### 22/05/2026 - S1-33: GitHub Actions CI workflow
+
+- **Added**: `.github/workflows/ci.yml` - Full PR/push CI workflow with four parallel jobs: `pre-commit` (gitleaks + hooks), `python-checks` (ruff lint + format check), `typescript-checks` (tsc + eslint best-effort), and `python-tests` (pytest with per-PR Neon branch).
+- **Added**: `.github/CODEOWNERS` - Requires review from `@tsizzybots` for all files.
+- **Added**: `.github/pull_request_template.md` - PR template with Summary, StrikeFlow card link, test plan checklist, and local lint/typecheck checklist.
+- **Changed**: `ci.yml` trigger updated from `pull_request: branches: [main]` to `pull_request: types: [opened, synchronize, reopened]` for correct PR event coverage.
+- **Changed**: `ci.yml` Python job split into `python-checks` (lint only, runs in parallel with TS checks) and `python-tests` (runs after `python-checks` passes) to give faster feedback on lint failures before running the full test suite.
+- **Changed**: Local Postgres service container replaced with per-PR Neon ephemeral branches using `neondatabase/create-branch-action@v5` / `neondatabase/delete-branch-action@v5`. Branch is always torn down (`if: always()`) even on test failure.
+- **Decision**: `continue-on-error: true` on Neon branch creation means tests still run against `NEON_STAGING_DATABASE_URL` fallback if the Neon API is temporarily unavailable, keeping CI unblocked.
+- **Decision**: mypy disabled for now (TODO comment in workflow); will be enabled once mypy config is added to `apps/api/pyproject.toml`.
+- **Decision**: eslint runs with `|| true` best-effort flag during dashboard conversion; will be tightened once `eslint-config-next` is fully configured.
+- **Added**: Three GitHub secrets documented in workflow header comments: `NEON_API_KEY`, `NEON_PROJECT_ID`, `NEON_STAGING_DATABASE_URL` - must be set in repo settings before CI can run Python tests.
+
+### 22/05/2026 - S1-16: Next.js 15 dashboard scaffold
+
+- **Added**: `apps/dashboard/next.config.ts` - Next.js 15 config with `output: 'standalone'` for Render containerised deployments.
+- **Added**: `apps/dashboard/tailwind.config.ts` - Tailwind CSS v3 config with `darkMode: 'class'`, custom CSS-variable-based colour tokens (background, foreground, primary, muted, border, card) wired to shadcn/ui conventions.
+- **Added**: `apps/dashboard/postcss.config.mjs` - PostCSS config for Tailwind + Autoprefixer.
+- **Added**: `apps/dashboard/components.json` - shadcn/ui base config (style: default, rsc: true, baseColor: slate, cssVariables: true). No components installed yet; config establishes the alias and CSS-variable contract for S1-31+.
+- **Added**: `apps/dashboard/src/app/globals.css` - Tailwind directives + dark-palette CSS variable defaults in `:root`. Dark palette is set as the only palette (no light toggle); `html.dark` is always present.
+- **Added**: `apps/dashboard/src/lib/utils.ts` - `cn()` helper combining clsx + tailwind-merge, per shadcn/ui convention.
+- **Added**: `apps/dashboard/src/app/layout.tsx` - Root layout. Sets `<html lang="en" className="dark">` so dark mode is always active. Imports globals.css.
+- **Added**: `apps/dashboard/src/app/page.tsx` - Root route; immediately redirects to `/clients`.
+- **Added**: `apps/dashboard/src/app/login/page.tsx` - Login page placeholder (full implementation deferred to S1-18).
+- **Added**: `apps/dashboard/src/app/clients/page.tsx` - Clients list placeholder (full implementation deferred to S1-31).
+- **Added**: `apps/dashboard/src/app/api/healthz/route.ts` - Health check endpoint returning `{"status":"ok"}`. Public (excluded from middleware auth guard).
+- **Added**: `apps/dashboard/src/middleware.ts` - Next.js middleware auth guard. Passes `/login` and `/api/healthz` through without auth check. All other routes require a `session` cookie; absent cookie redirects to `/login?next=<pathname>`.
+- **Added**: `apps/dashboard/src/app/(founder)/layout.tsx`, `(pd)/layout.tsx`, `(am)/layout.tsx` - Route group layouts establishing role-boundary segments for future per-role pages.
+- **Removed**: `apps/dashboard/src/index.ts` (TS stub), `apps/dashboard/dist/` (compiled stub output) - replaced by Next.js App Router structure.
+- **Changed**: `apps/dashboard/package.json` - replaced TS-only devDep setup with full Next.js 15 + React 19 + Tailwind v3 + shadcn/ui utility dependency set.
+- **Changed**: `apps/dashboard/tsconfig.json` - replaced outDir/rootDir-based config with Next.js-idiomatic tsconfig (noEmit, bundler moduleResolution, next plugin, @/* path alias).
+- **Decision**: dark palette set as `:root` defaults (not a `.dark {}` override block). Since dark mode is always-on for this project, a single palette avoids the overhead of a class-toggled override chain.
+- **Decision**: `output: 'standalone'` in next.config.ts from day one. Render deploys the dashboard as a Docker container; standalone output ensures the build artifact is self-contained without a full node_modules copy.
+
+### 22/05/2026 - S1-15: POST /auth/logout + session lifecycle tests
+
+- **Added**: `apps/api/src/bullet_api/auth/sessions.py` - `POST /auth/logout` endpoint. Reads the raw session token from the `session` cookie, computes its sha256 hash, deletes the matching row from `sessions`, clears the browser cookie via `response.delete_cookie`, and returns `{"status": "ok"}`. The `get_current_user` dependency is declared alongside the raw Cookie parameter so unauthenticated calls (no cookie, expired session) receive 401 before any DB work is attempted.
+- **Added**: `apps/api/tests/test_sessions.py` - 4 tests: (a) logout deletes the session row, (b) same cookie is rejected by GET /me after logout, (c) an expired session is rejected at GET /me with 401, (d) logout with no cookie returns 401. All seed real user and session rows; all pass against Neon staging (22/05/2026, 38s).
+- **Changed**: `apps/api/src/bullet_api/auth/__init__.py` - imports `logout_router` from `sessions.py` and adds it to `__all__`.
+- **Changed**: `apps/api/src/bullet_api/main.py` - includes `logout_router` so the route is registered on the ASGI app.
+
 ### 18/05/2026 - S1-14: Resend email confirmation flow
 
 - **Added**: `itsdangerous>=2.2,<3.0` and `httpx>=0.27,<1.0` API dependencies. itsdangerous signs the time-limited confirmation token (no users-table migration needed - the token is stateless); httpx is the HTTP client used by `ResendEmailClient`.
