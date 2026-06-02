@@ -39,9 +39,7 @@ _LIBPQ_ONLY_QUERY_PARAMS = frozenset(
 )
 
 
-AsyncpgSslMode = Literal[
-    "disable", "allow", "prefer", "require", "verify-ca", "verify-full"
-]
+AsyncpgSslMode = Literal["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]
 
 
 class Settings(BaseSettings):
@@ -107,6 +105,28 @@ class Settings(BaseSettings):
             "`/{token}`. Render env groups set this to the dashboard host."
         ),
     )
+
+    # ----- S1-17 dashboard CORS -----
+    cors_allow_origins: str = Field(
+        default="http://localhost:3000",
+        description=(
+            "Comma-separated list of browser origins allowed to call the API "
+            "with credentials (the dashboard). Local dev defaults to the "
+            "Next.js dev server; Render env groups set this to the staging / "
+            "prod dashboard host(s). Parsed into a list by "
+            "`cors_allow_origins_list`. Credentialed CORS forbids the `*` "
+            "wildcard, so origins must be enumerated explicitly."
+        ),
+    )
+
+    @property
+    def cors_allow_origins_list(self) -> list[str]:
+        """Split `cors_allow_origins` into a clean list of origins.
+
+        Blank entries are dropped so a trailing comma or an empty env value
+        does not produce an `""` origin that would match nothing.
+        """
+        return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
 
     # ----- S1-19 Inngest -----
     inngest_signing_key: str = Field(

@@ -2,7 +2,7 @@
 # Single entrypoint covering both pnpm (TS) and uv (Python) stacks.
 
 .PHONY: install lint typecheck build test precommit-install precommit-run \
-        api-test api-dev dashboard-build clean help \
+        api-test api-dev dashboard-build clean help codegen \
         db-upgrade db-downgrade db-revision db-reset db-seed-team
 
 help:
@@ -13,6 +13,7 @@ help:
 	@echo "  lint               Run linters across both stacks"
 	@echo "  typecheck          Run TS typecheck across all workspace packages"
 	@echo "  build              Build all workspace packages"
+	@echo "  codegen            Regenerate the OpenAPI doc + typed TS client (S1-17)"
 	@echo "  test               Run JS + Python test suites"
 	@echo "  api-dev            Run the FastAPI app locally on :8000 with reload"
 	@echo "  db-upgrade         Run Alembic upgrade head against DATABASE_URL"
@@ -41,6 +42,18 @@ typecheck:
 
 build:
 	pnpm -r --if-present build
+
+# Regenerate the OpenAPI document and the typed TS client (S1-17).
+# Step 1 dumps apps/api's OpenAPI schema to packages/shared/openapi.json;
+# step 2 generates the TS types from it. app.openapi() is pure schema
+# generation - no server is started and no DB connection is opened, so the
+# DATABASE_URL below only satisfies the required Settings field (never used
+# to connect) and INNGEST_DEV=1 lets the app import without a signing key.
+# CI runs this and fails on any git diff (drift between the committed client
+# and the live API contract).
+codegen:
+	cd apps/api && DATABASE_URL=postgresql://codegen:codegen@localhost:5432/codegen INNGEST_DEV=1 uv run python scripts/dump_openapi.py
+	pnpm --filter @bullet/shared codegen
 
 test: api-test
 	pnpm -r --if-present test

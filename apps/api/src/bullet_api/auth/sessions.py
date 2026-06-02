@@ -22,6 +22,7 @@ from bullet_api.auth.dependencies import (
     get_current_user,
 )
 from bullet_api.db import get_session
+from bullet_api.schemas import StatusResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -31,13 +32,13 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-@router.post("/logout")
+@router.post("/logout", response_model=StatusResponse)
 async def logout(
     response: Response,
     _user: Annotated[CurrentUser, Depends(get_current_user)],
     session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
     db: Annotated[AsyncSession, Depends(get_session)] = None,  # type: ignore[assignment]
-) -> dict[str, str]:
+) -> StatusResponse:
     """Invalidate the caller's current session.
 
     Status codes:
@@ -58,4 +59,4 @@ async def logout(
         await db.commit()
 
     response.delete_cookie(key=SESSION_COOKIE_NAME)
-    return {"status": "ok"}
+    return StatusResponse(status="ok")

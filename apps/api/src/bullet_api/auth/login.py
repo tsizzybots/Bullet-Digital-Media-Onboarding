@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bullet_api.auth.brute_force import BruteForceTracker, get_tracker
 from bullet_api.auth.dependencies import SESSION_COOKIE_NAME
 from bullet_api.db import get_session
+from bullet_api.schemas import StatusResponse
 
 # Session lifetime per PRD §6.1 / S1-15 plan.
 SESSION_LIFETIME = timedelta(days=7)
@@ -71,14 +72,14 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-@router.post("/login")
+@router.post("/login", response_model=StatusResponse)
 async def login(
     body: LoginRequest,
     request: Request,
     response: Response,
     db: Annotated[AsyncSession, Depends(get_session)],
     tracker: Annotated[BruteForceTracker, Depends(get_tracker)],
-) -> dict[str, str]:
+) -> StatusResponse:
     """Verify credentials and issue a session cookie.
 
     Status codes:
@@ -100,10 +101,7 @@ async def login(
         )
 
     result = await db.execute(
-        text(
-            "SELECT id, password_hash, email_confirmed "
-            "FROM users WHERE email = :e"
-        ),
+        text("SELECT id, password_hash, email_confirmed FROM users WHERE email = :e"),
         {"e": body.email},
     )
     row = result.first()
@@ -132,8 +130,7 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "Email not confirmed. Please complete the confirmation "
-                "link sent to your inbox."
+                "Email not confirmed. Please complete the confirmation link sent to your inbox."
             ),
         )
 
@@ -169,4 +166,4 @@ async def login(
         samesite="lax",
         max_age=int(SESSION_LIFETIME.total_seconds()),
     )
-    return {"status": "ok"}
+    return StatusResponse(status="ok")

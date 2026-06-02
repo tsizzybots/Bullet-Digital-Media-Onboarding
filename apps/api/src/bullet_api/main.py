@@ -13,6 +13,7 @@ from typing import Annotated
 
 import inngest.fast_api
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from bullet_api import __version__
 from bullet_api.auth import (
@@ -23,7 +24,14 @@ from bullet_api.auth import (
     logout_router,
     require_founder,
 )
+from bullet_api.config import get_settings
 from bullet_api.logging_config import configure_logging
+from bullet_api.schemas import (
+    AdminPingResponse,
+    HealthzResponse,
+    MeResponse,
+    VersionResponse,
+)
 from bullet_api.worker.client import FUNCTIONS, inngest_client
 
 configure_logging()
@@ -35,6 +43,19 @@ app = FastAPI(
         "Bullet Digital Media onboarding orchestration API. "
         "Phase 1 - sales call to campaign go-live automation."
     ),
+)
+
+# Browser CORS for the dashboard (S1-17). The dashboard runs on a different
+# origin (localhost:3000 in dev, the dashboard host in staging/prod) and
+# calls this API directly with the session cookie, so credentialed CORS is
+# required. `allow_credentials=True` forbids the `*` wildcard, hence the
+# explicit origin allowlist from settings.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_settings().cors_allow_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Mount the Inngest serve endpoint at /api/inngest. Inngest Cloud calls this
@@ -49,40 +70,40 @@ app.include_router(logout_router)
 
 
 @app.get("/healthz", tags=["meta"])
-async def healthz() -> dict[str, str]:
+async def healthz() -> HealthzResponse:
     """Liveness probe consumed by Render's health check."""
-    return {"status": "ok"}
+    return HealthzResponse(status="ok")
 
 
 @app.get("/version", tags=["meta"])
-async def version() -> dict[str, str]:
+async def version() -> VersionResponse:
     """Return the current API version. Used by deploy verification + the
     dashboard's build-info widget."""
-    return {"version": __version__}
+    return VersionResponse(version=__version__)
 
 
 @app.get("/me", tags=["auth"])
 async def me(
     user: Annotated[CurrentUser, Depends(get_current_user)],
-) -> dict[str, object]:
+) -> MeResponse:
     """Return the authenticated user's profile. 401 if no live session.
 
     Used by the dashboard on bootstrap to populate the header and decide
     which role-gated routes to render.
     """
-    return {
-        "id": str(user.id),
-        "email": user.email,
-        "full_name": user.full_name,
-        "role": user.role,
-    }
+    return MeResponse(
+        id=str(user.id),
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role,
+    )
 
 
 @app.get("/admin/ping", tags=["admin"])
 async def admin_ping(
     user: Annotated[CurrentUser, Depends(require_founder)],
-) -> dict[str, str]:
+) -> AdminPingResponse:
     """Smoke endpoint for the `require_founder` dependency. Returns 200
     only when the caller's session belongs to a `founder`; 403 for any
     other role; 401 with no session cookie."""
-    return {"status": "ok", "email": user.email}
+    return AdminPingResponse(status="ok", email=user.email)

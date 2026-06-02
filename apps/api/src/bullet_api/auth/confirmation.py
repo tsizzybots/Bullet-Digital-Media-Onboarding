@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bullet_api.config import get_settings
 from bullet_api.db import get_session
 from bullet_api.email import EmailClient, EmailMessage, get_email_client
+from bullet_api.schemas import ResendConfirmationRequest, StatusResponse
 
 # 24 hour token expiry per S1-14 spec.
 CONFIRMATION_TOKEN_MAX_AGE = timedelta(hours=24)
@@ -105,19 +106,17 @@ async def send_confirmation_email(
     )
 
 
-@router.post("/confirm/{token}")
+@router.post("/confirm/{token}", response_model=StatusResponse)
 async def confirm_email(
     token: str,
     db: Annotated[AsyncSession, Depends(get_session)],
-) -> dict[str, str]:
+) -> StatusResponse:
     """Flip `email_confirmed` and stamp `email_confirmed_at` for the user
     encoded in `token`. Idempotent for already-confirmed users."""
     user_id = _decode_confirmation_token(token)
 
     result = await db.execute(
-        text(
-            "SELECT email_confirmed FROM users WHERE id = :u"
-        ),
+        text("SELECT email_confirmed FROM users WHERE id = :u"),
         {"u": user_id},
     )
     row = result.first()
@@ -130,43 +129,35 @@ async def confirm_email(
         )
     already_confirmed: bool = row[0]
     if already_confirmed:
-        return {"status": "already_confirmed"}
+        return StatusResponse(status="already_confirmed")
 
     await db.execute(
         text(
-            "UPDATE users SET "
-            "  email_confirmed = true, "
-            "  email_confirmed_at = now() "
-            "WHERE id = :u"
+            "UPDATE users SET   email_confirmed = true,   email_confirmed_at = now() WHERE id = :u"
         ),
         {"u": user_id},
     )
     await db.commit()
-    return {"status": "confirmed"}
+    return StatusResponse(status="confirmed")
 
 
-@router.post("/resend-confirmation")
+@router.post("/resend-confirmation", response_model=StatusResponse)
 async def resend_confirmation(
-    payload: dict[str, str],
+    body: ResendConfirmationRequest,
     db: Annotated[AsyncSession, Depends(get_session)],
     email_client: Annotated[EmailClient, Depends(get_email_client)],
-) -> dict[str, str]:
+) -> StatusResponse:
     """Re-send the confirmation email for an unconfirmed user.
 
-    Body: `{"email": "..."}`. Always returns 200 with the same status
-    regardless of whether the email matched a real user - this keeps the
-    endpoint from being a free user-enumeration oracle.
+    Body: `{"email": "..."}` (validated as an email address; a malformed
+    or missing value is rejected with 422 by request validation). Always
+    returns 200 with the same status regardless of whether the email
+    matched a real user - this keeps the endpoint from being a free
+    user-enumeration oracle.
     """
-    email = (payload.get("email") or "").strip()
-    if not email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="email is required",
-        )
+    email = body.email
     result = await db.execute(
-        text(
-            "SELECT id, email_confirmed FROM users WHERE email = :e"
-        ),
+        text("SELECT id, email_confirmed FROM users WHERE email = :e"),
         {"e": email},
     )
     row = result.first()
@@ -179,4 +170,4 @@ async def resend_confirmation(
                 email_client=email_client,
             )
     # Same response for hit / miss / already-confirmed.
-    return {"status": "sent_if_unconfirmed"}
+    return StatusResponse(status="sent_if_unconfirmed")

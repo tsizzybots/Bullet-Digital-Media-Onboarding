@@ -128,6 +128,11 @@ services:
     healthCheckPath: /healthz
     envVars:
       - fromGroup: bullet-staging-env
+      # S1-17: browser origins allowed for credentialed CORS (the dashboard).
+      # Credentialed CORS forbids `*`, so the dashboard host is listed
+      # explicitly. Comma-separate to allow more origins (e.g. a preview URL).
+      - key: CORS_ALLOW_ORIGINS
+        value: https://bullet-dashboard-staging.onrender.com
 
   # ─── Inngest worker (staging) ─────────────────────────
   # S1-19: Inngest background functions are served via the FastAPI HTTP
