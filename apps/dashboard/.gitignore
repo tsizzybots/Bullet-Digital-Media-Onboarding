@@ -1,0 +1,6 @@
+# Playwright E2E artefacts (S1-18)
+/test-results/
+/playwright-report/
+/playwright/.cache/
+# Seeded fixtures written by global-setup; never committed.
+/e2e/.fixtures.json

@@ -2,7 +2,7 @@
 # Single entrypoint covering both pnpm (TS) and uv (Python) stacks.
 
 .PHONY: install lint typecheck build test precommit-install precommit-run \
-        api-test api-dev dashboard-build clean help codegen \
+        api-test api-dev dashboard-build clean help codegen e2e \
         db-upgrade db-downgrade db-revision db-reset db-seed-team
 
 help:
@@ -15,6 +15,7 @@ help:
 	@echo "  build              Build all workspace packages"
 	@echo "  codegen            Regenerate the OpenAPI doc + typed TS client (S1-17)"
 	@echo "  test               Run JS + Python test suites"
+	@echo "  e2e                Run the Playwright E2E suite (needs Postgres up + db-upgrade + DATABASE_URL)"
 	@echo "  api-dev            Run the FastAPI app locally on :8000 with reload"
 	@echo "  db-upgrade         Run Alembic upgrade head against DATABASE_URL"
 	@echo "  db-downgrade       Run Alembic downgrade -1"
@@ -60,6 +61,13 @@ test: api-test
 
 api-test:
 	uv run pytest apps/api -q
+
+# Playwright E2E suite (S1-18). Assumes the docker Postgres is up, migrations
+# have been applied (make db-upgrade), and DATABASE_URL is exported. Playwright
+# boots both the API (:8000) and the dashboard (:3000) itself and seeds the two
+# fixture users via globalSetup before running the auth specs.
+e2e:
+	pnpm --filter @bullet/dashboard test:e2e
 
 # Mirrors the Render staging start command. Render runs without --reload.
 api-dev:
