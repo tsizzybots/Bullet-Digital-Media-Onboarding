@@ -188,7 +188,7 @@ jobs:
       # Always clean up the ephemeral branch, even if earlier steps failed.
       - name: Delete Neon branch
         if: always() && steps.neon-branch.outcome == 'success'
-        uses: neondatabase/delete-branch-action@v5
+        uses: neondatabase/delete-branch-action@v3
         with:
           project_id: ${{ secrets.NEON_PROJECT_ID }}
           branch: ci/pr-${{ github.event.number || github.run_id }}
