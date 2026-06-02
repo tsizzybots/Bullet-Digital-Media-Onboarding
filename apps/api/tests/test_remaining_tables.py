@@ -106,10 +106,7 @@ async def test_invalid_document_kind_is_rejected(
     client_id = await _make_client(async_session)
     with pytest.raises(DBAPIError):
         await async_session.execute(
-            text(
-                "INSERT INTO documents (client_id, kind) "
-                "VALUES (:cid, 'NOT_A_KIND')"
-            ),
+            text("INSERT INTO documents (client_id, kind) VALUES (:cid, 'NOT_A_KIND')"),
             {"cid": client_id},
         )
 

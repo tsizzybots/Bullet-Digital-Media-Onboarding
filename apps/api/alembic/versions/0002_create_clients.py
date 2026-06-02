@@ -127,9 +127,7 @@ def upgrade() -> None:
         "clients",
         [sa.text("created_at DESC")],
     )
-    op.create_index(
-        "ix_clients_parent_client_id", "clients", ["parent_client_id"]
-    )
+    op.create_index("ix_clients_parent_client_id", "clients", ["parent_client_id"])
 
 
 def downgrade() -> None:

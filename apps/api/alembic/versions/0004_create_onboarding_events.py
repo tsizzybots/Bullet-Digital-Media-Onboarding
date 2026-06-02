@@ -59,12 +59,8 @@ def upgrade() -> None:
         ),
     )
 
-    op.create_index(
-        "ix_onboarding_events_client_id", "onboarding_events", ["client_id"]
-    )
-    op.create_index(
-        "ix_onboarding_events_event_type", "onboarding_events", ["event_type"]
-    )
+    op.create_index("ix_onboarding_events_client_id", "onboarding_events", ["client_id"])
+    op.create_index("ix_onboarding_events_event_type", "onboarding_events", ["event_type"])
     op.create_index(
         "ix_onboarding_events_occurred_at_desc",
         "onboarding_events",
@@ -73,13 +69,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_onboarding_events_occurred_at_desc", table_name="onboarding_events"
-    )
-    op.drop_index(
-        "ix_onboarding_events_event_type", table_name="onboarding_events"
-    )
-    op.drop_index(
-        "ix_onboarding_events_client_id", table_name="onboarding_events"
-    )
+    op.drop_index("ix_onboarding_events_occurred_at_desc", table_name="onboarding_events")
+    op.drop_index("ix_onboarding_events_event_type", table_name="onboarding_events")
+    op.drop_index("ix_onboarding_events_client_id", table_name="onboarding_events")
     op.drop_table("onboarding_events")

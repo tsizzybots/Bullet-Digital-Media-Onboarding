@@ -90,9 +90,7 @@ def upgrade() -> None:
         # UNIQUE constraint guarantees a retried Inngest run cannot fan out
         # twice; the writer code does INSERT ... ON CONFLICT DO NOTHING and
         # then reads back the existing row to resume.
-        sa.Column(
-            "idempotency_key", sa.Text(), nullable=False, unique=True
-        ),
+        sa.Column("idempotency_key", sa.Text(), nullable=False, unique=True),
         sa.Column("status", status, nullable=False),
         sa.Column("payload", postgresql.JSONB(), nullable=True),
         sa.Column("response", postgresql.JSONB(), nullable=True),
@@ -109,17 +107,13 @@ def upgrade() -> None:
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
     )
 
-    op.create_index(
-        "ix_platform_actions_client_id", "platform_actions", ["client_id"]
-    )
+    op.create_index("ix_platform_actions_client_id", "platform_actions", ["client_id"])
     op.create_index(
         "ix_platform_actions_client_platform_action",
         "platform_actions",
         ["client_id", "platform", "action"],
     )
-    op.create_index(
-        "ix_platform_actions_status", "platform_actions", ["status"]
-    )
+    op.create_index("ix_platform_actions_status", "platform_actions", ["status"])
     op.create_index(
         "ix_platform_actions_started_at_desc",
         "platform_actions",
@@ -130,17 +124,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_platform_actions_started_at_desc", table_name="platform_actions"
-    )
+    op.drop_index("ix_platform_actions_started_at_desc", table_name="platform_actions")
     op.drop_index("ix_platform_actions_status", table_name="platform_actions")
     op.drop_index(
         "ix_platform_actions_client_platform_action",
         table_name="platform_actions",
     )
-    op.drop_index(
-        "ix_platform_actions_client_id", table_name="platform_actions"
-    )
+    op.drop_index("ix_platform_actions_client_id", table_name="platform_actions")
     op.drop_table("platform_actions")
     bind = op.get_bind()
     postgresql.ENUM(name="platform_action_status").drop(bind, checkfirst=False)

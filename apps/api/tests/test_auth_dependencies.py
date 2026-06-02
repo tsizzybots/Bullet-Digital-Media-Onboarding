@@ -56,12 +56,7 @@ async def _seed_user_with_session(
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     expires_at = datetime.now(UTC) + expires_in
     await db.execute(
-        text(
-            "INSERT INTO sessions "
-            "  (user_id, token_hash, expires_at) "
-            "VALUES "
-            "  (:u, :h, :exp)"
-        ),
+        text("INSERT INTO sessions   (user_id, token_hash, expires_at) VALUES   (:u, :h, :exp)"),
         {"u": user_id, "h": token_hash, "exp": expires_at},
     )
     return user_id, raw_token
@@ -81,9 +76,7 @@ async def client(
     app.dependency_overrides[get_session] = _override
     try:
         transport = ASGITransport(app=app)
-        async with AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as ac:
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
     finally:
         app.dependency_overrides.clear()
@@ -115,9 +108,7 @@ async def test_admin_ping_returns_200_for_founder(
     async_session: AsyncSession, client: AsyncClient
 ) -> None:
     _, token = await _seed_user_with_session(async_session, role="founder")
-    response = await client.get(
-        "/admin/ping", cookies={"session": token}
-    )
+    response = await client.get("/admin/ping", cookies={"session": token})
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
@@ -128,12 +119,8 @@ async def test_admin_ping_returns_200_for_founder(
 async def test_admin_ping_returns_403_for_account_manager(
     async_session: AsyncSession, client: AsyncClient
 ) -> None:
-    _, token = await _seed_user_with_session(
-        async_session, role="account_manager"
-    )
-    response = await client.get(
-        "/admin/ping", cookies={"session": token}
-    )
+    _, token = await _seed_user_with_session(async_session, role="account_manager")
+    response = await client.get("/admin/ping", cookies={"session": token})
     assert response.status_code == 403
     assert response.json()["detail"] == "Insufficient role"
 
@@ -150,9 +137,7 @@ async def test_admin_ping_returns_401_without_session_cookie(
 async def test_admin_ping_returns_401_for_unknown_token(
     client: AsyncClient,
 ) -> None:
-    response = await client.get(
-        "/admin/ping", cookies={"session": "this-token-does-not-exist"}
-    )
+    response = await client.get("/admin/ping", cookies={"session": "this-token-does-not-exist"})
     assert response.status_code == 401
 
 
@@ -170,16 +155,11 @@ async def test_admin_ping_returns_401_for_expired_session(
     # Confirm the row was stored as expired - guard against clock skew
     # between local + Neon making the seed look "live" by accident.
     check = await async_session.execute(
-        text(
-            "SELECT expires_at > now() AS is_live FROM sessions "
-            "WHERE token_hash = :h"
-        ),
+        text("SELECT expires_at > now() AS is_live FROM sessions WHERE token_hash = :h"),
         {"h": hashlib.sha256(raw_token.encode()).hexdigest()},
     )
     assert check.scalar_one() is False
-    response = await client.get(
-        "/admin/ping", cookies={"session": raw_token}
-    )
+    response = await client.get("/admin/ping", cookies={"session": raw_token})
     assert response.status_code == 401
 
 
@@ -187,9 +167,7 @@ async def test_admin_ping_returns_401_for_expired_session(
 async def test_me_returns_profile_for_authenticated_user(
     async_session: AsyncSession, client: AsyncClient
 ) -> None:
-    user_id, token = await _seed_user_with_session(
-        async_session, role="performance_director"
-    )
+    user_id, token = await _seed_user_with_session(async_session, role="performance_director")
     response = await client.get("/me", cookies={"session": token})
     assert response.status_code == 200
     body = response.json()

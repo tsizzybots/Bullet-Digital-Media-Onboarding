@@ -65,9 +65,7 @@ def _generate_temp_password() -> str:
     return secrets.token_urlsafe(12)
 
 
-async def _seed_into(
-    session: AsyncSession, users: Iterable[SeedUser]
-) -> dict[str, str | None]:
+async def _seed_into(session: AsyncSession, users: Iterable[SeedUser]) -> dict[str, str | None]:
     """Insert any missing rows into the live session.
 
     Returns a `{email: temp_password|None}` map. `None` means the row

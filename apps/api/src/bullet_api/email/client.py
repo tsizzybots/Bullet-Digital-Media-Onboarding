@@ -58,8 +58,7 @@ class ResendEmailClient:
             # var is missing - a Render env group misconfiguration should
             # be surfaced in the logs / 500 response, not papered over.
             raise RuntimeError(
-                "RESEND_API_KEY is empty; cannot send email. "
-                "Set it on the Render env group."
+                "RESEND_API_KEY is empty; cannot send email. Set it on the Render env group."
             )
         payload = {
             "from": message.from_email or self._default_from,

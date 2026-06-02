@@ -22,25 +22,18 @@ def test_neon_canonical_url_strips_libpq_only_params() -> None:
     assert "sslmode" not in rewritten
     assert "channel_binding" not in rewritten
     # User, host, and database path must survive the rewrite untouched.
-    assert (
-        "neondb_owner:secret@ep-foo-pooler.eu-west-2.aws.neon.tech/neondb"
-        in rewritten
-    )
+    assert "neondb_owner:secret@ep-foo-pooler.eu-west-2.aws.neon.tech/neondb" in rewritten
 
 
 def test_postgresql_short_scheme_rewritten_to_asyncpg() -> None:
     assert (
-        get_async_database_url("postgresql://u:p@h:5432/db")
-        == "postgresql+asyncpg://u:p@h:5432/db"
+        get_async_database_url("postgresql://u:p@h:5432/db") == "postgresql+asyncpg://u:p@h:5432/db"
     )
 
 
 def test_postgres_short_scheme_rewritten_to_asyncpg() -> None:
     # `postgres://` is the legacy short form used by some hosts (Heroku, etc.).
-    assert (
-        get_async_database_url("postgres://u:p@h/db")
-        == "postgresql+asyncpg://u:p@h/db"
-    )
+    assert get_async_database_url("postgres://u:p@h/db") == "postgresql+asyncpg://u:p@h/db"
 
 
 def test_already_async_scheme_is_preserved_but_query_still_cleaned() -> None:
@@ -59,9 +52,7 @@ def test_unknown_scheme_is_returned_unchanged() -> None:
 
 
 def test_no_query_string_is_idempotent() -> None:
-    assert _strip_libpq_query_params("postgresql://u:p@h/db") == (
-        "postgresql://u:p@h/db"
-    )
+    assert _strip_libpq_query_params("postgresql://u:p@h/db") == ("postgresql://u:p@h/db")
 
 
 def test_strip_is_case_insensitive_on_keys() -> None:

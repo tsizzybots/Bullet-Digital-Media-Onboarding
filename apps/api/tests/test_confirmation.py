@@ -43,9 +43,7 @@ async def confirm_client(
     app.dependency_overrides[get_email_client] = _email_override
     try:
         transport = ASGITransport(app=app)
-        async with AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as ac:
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac, fake_email
     finally:
         app.dependency_overrides.clear()
@@ -85,10 +83,7 @@ async def test_confirm_within_24h_flips_email_confirmed(
     assert response.json()["status"] == "confirmed"
 
     row = await async_session.execute(
-        text(
-            "SELECT email_confirmed, email_confirmed_at IS NOT NULL "
-            "FROM users WHERE id = :u"
-        ),
+        text("SELECT email_confirmed, email_confirmed_at IS NOT NULL FROM users WHERE id = :u"),
         {"u": user_id},
     )
     confirmed, has_timestamp = row.one()
@@ -178,9 +173,7 @@ async def test_resend_confirmation_sends_via_email_client(
     email = f"confirm_resend_{uuid.uuid4().hex[:8]}@example.com"
     await _make_user(async_session, email=email, email_confirmed=False)
 
-    response = await client.post(
-        "/auth/resend-confirmation", json={"email": email}
-    )
+    response = await client.post("/auth/resend-confirmation", json={"email": email})
     assert response.status_code == 200
     assert response.json()["status"] == "sent_if_unconfirmed"
 
@@ -203,9 +196,7 @@ async def test_resend_for_already_confirmed_user_sends_nothing(
     email = f"confirm_done_{uuid.uuid4().hex[:8]}@example.com"
     await _make_user(async_session, email=email, email_confirmed=True)
 
-    response = await client.post(
-        "/auth/resend-confirmation", json={"email": email}
-    )
+    response = await client.post("/auth/resend-confirmation", json={"email": email})
     assert response.status_code == 200
     assert len(fake_email.sent) == 0
 
@@ -236,9 +227,7 @@ async def test_send_confirmation_email_uses_injected_client(
     user_id = await _make_user(async_session, email=email)
     fake = FakeEmailClient()
 
-    message_id = await send_confirmation_email(
-        user_id=user_id, email=email, email_client=fake
-    )
+    message_id = await send_confirmation_email(user_id=user_id, email=email, email_client=fake)
     assert message_id.startswith("fake-")
     assert len(fake.sent) == 1
     assert fake.sent[0].to == email

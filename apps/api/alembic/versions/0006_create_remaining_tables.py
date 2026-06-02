@@ -72,9 +72,7 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     # ENUM types - all declared with create_type=False then created once.
     # ------------------------------------------------------------------
-    document_kind = postgresql.ENUM(
-        *DOCUMENT_KIND_VALUES, name="document_kind", create_type=False
-    )
+    document_kind = postgresql.ENUM(*DOCUMENT_KIND_VALUES, name="document_kind", create_type=False)
     research_result_kind = postgresql.ENUM(
         *RESEARCH_RESULT_KIND_VALUES,
         name="research_result_kind",
@@ -90,9 +88,7 @@ def upgrade() -> None:
         name="client_asset_status",
         create_type=False,
     )
-    user_role = postgresql.ENUM(
-        *USER_ROLE_VALUES, name="user_role", create_type=False
-    )
+    user_role = postgresql.ENUM(*USER_ROLE_VALUES, name="user_role", create_type=False)
     document_kind.create(bind, checkfirst=False)
     research_result_kind.create(bind, checkfirst=False)
     client_asset_type.create(bind, checkfirst=False)
@@ -111,9 +107,7 @@ def upgrade() -> None:
             primary_key=True,
             server_default=sa.text("gen_random_uuid()"),
         ),
-        sa.Column(
-            "email", postgresql.CITEXT(), nullable=False, unique=True
-        ),
+        sa.Column("email", postgresql.CITEXT(), nullable=False, unique=True),
         sa.Column("password_hash", sa.Text(), nullable=False),
         sa.Column("full_name", sa.Text(), nullable=False),
         sa.Column("role", user_role, nullable=False),
@@ -123,12 +117,8 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("false"),
         ),
-        sa.Column(
-            "email_confirmed_at", sa.DateTime(timezone=True), nullable=True
-        ),
-        sa.Column(
-            "last_login_at", sa.DateTime(timezone=True), nullable=True
-        ),
+        sa.Column("email_confirmed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -154,12 +144,8 @@ def upgrade() -> None:
             sa.ForeignKey("users.id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column(
-            "token_hash", sa.Text(), nullable=False, unique=True
-        ),
-        sa.Column(
-            "expires_at", sa.DateTime(timezone=True), nullable=False
-        ),
+        sa.Column("token_hash", sa.Text(), nullable=False, unique=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("ip", postgresql.INET(), nullable=True),
         sa.Column("user_agent", sa.Text(), nullable=True),
         sa.Column(
@@ -170,9 +156,7 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_sessions_user_id", "sessions", ["user_id"])
-    op.create_index(
-        "ix_sessions_expires_at", "sessions", ["expires_at"]
-    )
+    op.create_index("ix_sessions_expires_at", "sessions", ["expires_at"])
 
     # ------------------------------------------------------------------
     # audit_log
@@ -204,9 +188,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
         ),
     )
-    op.create_index(
-        "ix_audit_log_actor_user_id", "audit_log", ["actor_user_id"]
-    )
+    op.create_index("ix_audit_log_actor_user_id", "audit_log", ["actor_user_id"])
     op.create_index(
         "ix_audit_log_entity_type_entity_id",
         "audit_log",
@@ -276,9 +258,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
         ),
     )
-    op.create_index(
-        "ix_research_results_client_id", "research_results", ["client_id"]
-    )
+    op.create_index("ix_research_results_client_id", "research_results", ["client_id"])
 
     # ------------------------------------------------------------------
     # client_assets
@@ -299,12 +279,8 @@ def upgrade() -> None:
         ),
         sa.Column("asset_type", client_asset_type, nullable=False),
         sa.Column("status", client_asset_status, nullable=False),
-        sa.Column(
-            "requested_at", sa.DateTime(timezone=True), nullable=True
-        ),
-        sa.Column(
-            "fulfilled_at", sa.DateTime(timezone=True), nullable=True
-        ),
+        sa.Column("requested_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("fulfilled_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("source_url", sa.Text(), nullable=True),
         sa.Column("notes", sa.Text(), nullable=True),
     )
@@ -335,23 +311,17 @@ def downgrade() -> None:
         type_="foreignkey",
     )
 
-    op.drop_index(
-        "ix_client_assets_client_id_status", table_name="client_assets"
-    )
+    op.drop_index("ix_client_assets_client_id_status", table_name="client_assets")
     op.drop_table("client_assets")
 
-    op.drop_index(
-        "ix_research_results_client_id", table_name="research_results"
-    )
+    op.drop_index("ix_research_results_client_id", table_name="research_results")
     op.drop_table("research_results")
 
     op.drop_index("ix_documents_client_id", table_name="documents")
     op.drop_table("documents")
 
     op.drop_index("ix_audit_log_occurred_at_desc", table_name="audit_log")
-    op.drop_index(
-        "ix_audit_log_entity_type_entity_id", table_name="audit_log"
-    )
+    op.drop_index("ix_audit_log_entity_type_entity_id", table_name="audit_log")
     op.drop_index("ix_audit_log_actor_user_id", table_name="audit_log")
     op.drop_table("audit_log")
 

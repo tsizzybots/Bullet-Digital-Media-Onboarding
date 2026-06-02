@@ -13,8 +13,7 @@ from bullet_api.scripts.seed_team import TEAM_USERS, seed_team
 # rows that may exist in Neon staging from earlier seeder runs. Roles
 # still match the user_role enum.
 _TEST_USERS = tuple(
-    type(u)(email=f"test_{u.email}", full_name=u.full_name, role=u.role)
-    for u in TEAM_USERS
+    type(u)(email=f"test_{u.email}", full_name=u.full_name, role=u.role) for u in TEAM_USERS
 )
 
 
@@ -32,9 +31,7 @@ async def test_seeder_is_idempotent(async_session: AsyncSession) -> None:
 
     emails = [u.email for u in _TEST_USERS]
     result = await async_session.execute(
-        text(
-            "SELECT count(*) FROM users WHERE email = ANY(:emails)"
-        ),
+        text("SELECT count(*) FROM users WHERE email = ANY(:emails)"),
         {"emails": emails},
     )
     # Exactly 4 rows for the 4 test users; not 8.
@@ -51,9 +48,7 @@ async def test_seeded_passwords_verify_under_argon2id(
     hasher = PasswordHasher()
     for user in _TEST_USERS:
         password = generated[user.email]
-        assert password is not None, (
-            f"{user.email} expected a fresh temp password on first seed"
-        )
+        assert password is not None, f"{user.email} expected a fresh temp password on first seed"
         result = await async_session.execute(
             text("SELECT password_hash FROM users WHERE email = :e"),
             {"e": user.email},
@@ -72,10 +67,7 @@ async def test_seeded_users_are_email_unconfirmed(
     await seed_team(session=async_session, users=_TEST_USERS)
     emails = [u.email for u in _TEST_USERS]
     result = await async_session.execute(
-        text(
-            "SELECT email, email_confirmed FROM users "
-            "WHERE email = ANY(:emails)"
-        ),
+        text("SELECT email, email_confirmed FROM users WHERE email = ANY(:emails)"),
         {"emails": emails},
     )
     rows = result.all()
@@ -92,11 +84,7 @@ async def test_seeded_roles_match_brief(
     must persist exactly those role assignments."""
     await seed_team(session=async_session, users=_TEST_USERS)
     result = await async_session.execute(
-        text(
-            "SELECT email, role FROM users "
-            "WHERE email = ANY(:emails) "
-            "ORDER BY email"
-        ),
+        text("SELECT email, role FROM users WHERE email = ANY(:emails) ORDER BY email"),
         {"emails": [u.email for u in _TEST_USERS]},
     )
     actual = {email: role for email, role in result.all()}

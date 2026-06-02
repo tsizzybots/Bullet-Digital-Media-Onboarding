@@ -86,14 +86,10 @@ def upgrade() -> None:
         # FK to users(id) is deferred to migration 0006 (S1-10) where
         # the users table is created. Until then this is a plain nullable
         # UUID; the constraint is added at the end of 0006's upgrade().
-        sa.Column(
-            "captured_by", postgresql.UUID(as_uuid=True), nullable=True
-        ),
+        sa.Column("captured_by", postgresql.UUID(as_uuid=True), nullable=True),
     )
 
-    op.create_index(
-        "ix_client_knowledge_client_id", "client_knowledge", ["client_id"]
-    )
+    op.create_index("ix_client_knowledge_client_id", "client_knowledge", ["client_id"])
     op.create_index(
         "ix_client_knowledge_client_id_source",
         "client_knowledge",
@@ -126,14 +122,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS ix_client_knowledge_embedding_ivfflat")
     op.execute("DROP INDEX IF EXISTS ix_client_knowledge_value_gin")
-    op.drop_index(
-        "ix_client_knowledge_captured_at_desc", table_name="client_knowledge"
-    )
-    op.drop_index(
-        "ix_client_knowledge_client_id_source", table_name="client_knowledge"
-    )
+    op.drop_index("ix_client_knowledge_captured_at_desc", table_name="client_knowledge")
+    op.drop_index("ix_client_knowledge_client_id_source", table_name="client_knowledge")
     op.drop_index("ix_client_knowledge_client_id", table_name="client_knowledge")
     op.drop_table("client_knowledge")
-    postgresql.ENUM(name="client_knowledge_source").drop(
-        op.get_bind(), checkfirst=False
-    )
+    postgresql.ENUM(name="client_knowledge_source").drop(op.get_bind(), checkfirst=False)

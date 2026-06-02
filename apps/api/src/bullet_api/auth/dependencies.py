@@ -51,9 +51,7 @@ def _hash_session_token(token: str) -> str:
 
 
 async def get_current_user(
-    session_token: Annotated[
-        str | None, Cookie(alias=SESSION_COOKIE_NAME)
-    ] = None,
+    session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
     db: Annotated[AsyncSession, Depends(get_session)] = None,  # type: ignore[assignment]
 ) -> CurrentUser:
     """FastAPI dependency. 401 if no cookie or no matching live session."""
