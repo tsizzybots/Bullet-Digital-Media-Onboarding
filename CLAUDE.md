@@ -107,9 +107,10 @@ If a task touches code AND introduces a decision/discovery, log both - one as Ad
 - Repo: `tsizzybots/Bullet-Digital-Media-Onboarding` (the rename to `bullet_digital_media` planned in the S1-01 changelog entry was never executed; the original repo name remains in use)
 - Before pushing, ensure active account: `gh auth switch --user tsizzybots`
 
-## StrikeFlow Integration
-- Board Name: "Bullet Digital Media"
-- Board ID: c01081f2-c27c-4a8c-b7c5-0b2857254cd9
+## Flow Integration
+- Board Name: "Bullet Digital Media Onboarding"
+- Board ID: b78ad970-8628-4325-aaa8-4b9b1763c789
+- Project board has been migrated from StrikeFlow (28/05/2026); the original StrikeFlow board (`c01081f2-c27c-4a8c-b7c5-0b2857254cd9`) is retained as read-only backup only. All new card work happens on Flow via the `mcp__flow__*` tools.
 
 ## Future Phases (Not Yet Active)
 
