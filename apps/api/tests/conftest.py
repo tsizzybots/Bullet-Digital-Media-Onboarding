@@ -13,18 +13,27 @@ production engine in `bullet_api.db.session` remains pooled.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 
-import pytest
-import pytest_asyncio
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import (
+# Run the suite in Inngest dev mode. Importing `bullet_api.main` calls
+# `inngest.fast_api.serve(...)`, which raises SigningKeyMissingError in
+# Inngest's default cloud mode when no signing key is set (the case in CI and
+# local test runs). Tests never talk to Inngest Cloud, so dev mode is correct
+# here. `setdefault` runs at conftest import - before any test module imports
+# the app - and leaves an explicitly-set INNGEST_DEV untouched.
+os.environ.setdefault("INNGEST_DEV", "1")
+
+import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     create_async_engine,
 )
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool  # noqa: E402
 
-from bullet_api.config import get_async_database_url, get_settings
+from bullet_api.config import get_async_database_url, get_settings  # noqa: E402
 
 
 def _build_test_engine():
@@ -63,9 +72,7 @@ async def async_session() -> AsyncIterator[AsyncSession]:
     await engine.dispose()
 
 
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Skip @pytest.mark.db tests when DATABASE_URL is unreachable."""
 
     async def _can_connect() -> bool:
@@ -87,9 +94,7 @@ def pytest_collection_modifyitems(
     if reachable:
         return
 
-    skip_marker = pytest.mark.skip(
-        reason="DATABASE_URL is not reachable; skipping live-DB tests."
-    )
+    skip_marker = pytest.mark.skip(reason="DATABASE_URL is not reachable; skipping live-DB tests.")
     for item in items:
         if "db" in item.keywords:
             item.add_marker(skip_marker)
