@@ -26,6 +26,7 @@ from bullet_api.auth import (
 )
 from bullet_api.config import get_settings
 from bullet_api.logging_config import configure_logging
+from bullet_api.observability.sentry import init_sentry
 from bullet_api.schemas import (
     AdminPingResponse,
     HealthzResponse,
@@ -35,6 +36,10 @@ from bullet_api.schemas import (
 from bullet_api.worker.client import FUNCTIONS, inngest_client
 
 configure_logging()
+# No-op unless SENTRY_DSN is set (Render staging / prod). Must run before
+# the FastAPI app is constructed so the Starlette/FastAPI integration patches
+# the request handlers when Sentry is active.
+init_sentry(get_settings())
 
 app = FastAPI(
     title="bullet-api",
@@ -107,3 +112,14 @@ async def admin_ping(
     only when the caller's session belongs to a `founder`; 403 for any
     other role; 401 with no session cookie."""
     return AdminPingResponse(status="ok", email=user.email)
+
+
+@app.get("/_debug/sentry", include_in_schema=False, tags=["debug"])
+async def _debug_sentry(user: Annotated[CurrentUser, Depends(require_founder)]) -> None:
+    """Founder-gated, hidden from OpenAPI (no codegen drift). Raises on
+    purpose so an operator can confirm Sentry capture + PII scrubbing end to
+    end in staging. The email / transcript below are hardcoded FAKE values -
+    no real PII is ever sent."""
+    email = "scrub-check@example.com"
+    transcript = "fake transcript body for scrub verification"
+    raise RuntimeError(f"Sentry scrub test for {email} / {transcript[:8]}")

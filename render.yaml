@@ -53,6 +53,10 @@ envVarGroups:
         sync: false
       - key: INNGEST_EVENT_KEY
         sync: false
+      # Sentry (S1-20)
+      # Shared per environment: applies to every service in this env group.
+      - key: SENTRY_ENVIRONMENT
+        value: "staging"
       # Cloudflare R2 transcript storage (S1-27)
       - key: R2_ACCOUNT_ID
         sync: false
@@ -93,6 +97,15 @@ envVarGroups:
         sync: false
       - key: INNGEST_EVENT_KEY
         sync: false
+      # Sentry (S1-20)
+      # Shared per environment: applies to every service in this env group.
+      # When the -prod services are instantiated later in Sprint 1, each
+      # gets its own per-service SENTRY_DSN / NEXT_PUBLIC_SENTRY_DSN (and the
+      # dashboard build-time SENTRY_AUTH_TOKEN / SENTRY_ORG / SENTRY_PROJECT),
+      # pointing at the *-prod Sentry projects - mirroring the staging
+      # services below.
+      - key: SENTRY_ENVIRONMENT
+        value: "production"
       # Cloudflare R2 transcript storage (S1-27)
       - key: R2_ACCOUNT_ID
         sync: false
@@ -133,6 +146,12 @@ services:
       # explicitly. Comma-separate to allow more origins (e.g. a preview URL).
       - key: CORS_ALLOW_ORIGINS
         value: https://bullet-dashboard-staging.onrender.com
+      # Sentry (S1-20)
+      # Per-service DSN: points at the `bullet-api-staging` Sentry project.
+      # Pasted into the Render dashboard once the Sentry account is upgraded
+      # to allow the extra project; empty until then -> Sentry stays disabled.
+      - key: SENTRY_DSN
+        sync: false
 
   # ─── Inngest worker (staging) ─────────────────────────
   # S1-19: Inngest background functions are served via the FastAPI HTTP
@@ -176,6 +195,22 @@ services:
       - fromGroup: bullet-staging-env
       - key: NEXT_PUBLIC_API_URL
         value: https://bullet-api-staging.onrender.com
+      # Sentry (S1-20)
+      # Per-service DSN for the browser bundle: points at the
+      # `bullet-dashboard-staging` Sentry project. Pasted into the Render
+      # dashboard once the Sentry account is upgraded; empty -> disabled.
+      - key: NEXT_PUBLIC_SENTRY_DSN
+        sync: false
+      # Build-time only: used by the Sentry webpack/next plugin to upload
+      # source maps during `pnpm build`. Not read at runtime.
+      - key: SENTRY_AUTH_TOKEN
+        sync: false
+      # Sentry org slug. Kept sync:false to avoid guessing the slug; pasted
+      # in the Render dashboard.
+      - key: SENTRY_ORG
+        sync: false
+      - key: SENTRY_PROJECT
+        value: "bullet-dashboard-staging"
 
   # ─── Cron job (staging) ───────────────────────────────
   # Render's native cron-job type runs a command on schedule with no

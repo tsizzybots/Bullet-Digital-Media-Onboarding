@@ -149,6 +149,34 @@ class Settings(BaseSettings):
         description="URL path where Inngest calls this service.",
     )
 
+    # ----- S1-20 Sentry error monitoring -----
+    sentry_dsn: str = Field(
+        default="",
+        description=(
+            "Sentry DSN. Empty (local dev / CI / tests) disables Sentry "
+            "entirely - `init_sentry()` no-ops and nothing is ever sent. "
+            "Render staging / prod env groups set this to the project DSN to "
+            "switch error monitoring on."
+        ),
+    )
+    sentry_environment: str = Field(
+        default="local",
+        description=(
+            "Sentry environment tag (local / staging / production). Render "
+            "env groups override this per deployment so issues segregate by "
+            "environment; the `local` default keeps dev events (if a DSN is "
+            "ever set locally) out of the staging / prod streams."
+        ),
+    )
+    sentry_traces_sample_rate: float = Field(
+        default=0.0,
+        description=(
+            "Fraction of transactions captured for performance tracing "
+            "(0.0-1.0). Defaults to 0.0 (no performance data). Render env "
+            "groups raise this for staging / prod if tracing is wanted."
+        ),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
