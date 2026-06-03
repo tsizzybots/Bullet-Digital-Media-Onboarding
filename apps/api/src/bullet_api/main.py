@@ -33,6 +33,7 @@ from bullet_api.schemas import (
     MeResponse,
     VersionResponse,
 )
+from bullet_api.webhooks import pandadoc_router
 from bullet_api.worker.client import FUNCTIONS, inngest_client
 
 configure_logging()
@@ -72,6 +73,7 @@ inngest.fast_api.serve(app, inngest_client, FUNCTIONS)
 app.include_router(login_router)
 app.include_router(confirmation_router)
 app.include_router(logout_router)
+app.include_router(pandadoc_router)
 
 
 @app.get("/healthz", tags=["meta"])

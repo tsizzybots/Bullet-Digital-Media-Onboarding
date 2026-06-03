@@ -177,6 +177,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- S1-22 PandaDoc webhook -----
+    pandadoc_webhook_secret: str = Field(
+        default="",
+        description=(
+            "Shared key for verifying PandaDoc webhook HMAC-SHA256 signatures "
+            "(POST /webhooks/pandadoc). Empty in local dev / tests; set in the "
+            "Render staging / prod env groups. The webhook handler fails closed "
+            "(rejects every request with 401) when this is empty, so a "
+            "mis-configured deployment is loud rather than silently insecure."
+        ),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
