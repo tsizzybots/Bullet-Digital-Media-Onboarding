@@ -194,11 +194,42 @@ class Settings(BaseSettings):
         default="",
         description=(
             "PandaDoc REST API key (header `Authorization: API-Key <key>`) used "
-            "by the manual replay endpoint (POST /admin/pandadoc/replay/{id}) to "
-            "fetch a document by id. Empty in local dev / tests (the "
+            "by the manual replay endpoint (POST /admin/pandadoc/replay/{id}) and "
+            "the nightly reconciliation cron (bullet_api.crons.reconcile_pandadoc) "
+            "to fetch / list documents. Empty in local dev / tests (the "
             "FakePandaDocClient is used); set in the Render staging / prod env "
             "groups. HttpPandaDocClient fails loudly (RuntimeError) if this is "
-            "empty on a real call."
+            "empty on a real call; the reconciliation cron logs 'disabled' and "
+            "exits 0 when empty, so an unconfigured deployment is a safe no-op."
+        ),
+    )
+
+    # ----- S1-23 PandaDoc reconciliation cron -----
+    # NOTE: pandadoc_api_key is shared with the S1-24 replay endpoint above and
+    # so is not redeclared here (a second field would silently shadow the first).
+    pandadoc_api_base_url: str = Field(
+        default="https://api.pandadoc.com",
+        description=(
+            "Base URL for the PandaDoc public API. Overridable per environment "
+            "(e.g. a sandbox host) but defaults to production."
+        ),
+    )
+    slack_webhook_url: str = Field(
+        default="",
+        description=(
+            "Slack incoming-webhook URL for reconciliation alerts (a signed document "
+            "the webhook missed). Empty in local dev / tests; the notifier no-ops and "
+            "logs a warning instead of posting, mirroring the disabled-by-default "
+            "Sentry / PandaDoc-secret pattern."
+        ),
+    )
+    reconciliation_lookback_days: int = Field(
+        default=7,
+        description=(
+            "How many days back the reconciliation cron asks PandaDoc for completed "
+            "documents (completed_from = now - this). Over-fetching is free because the "
+            "onboarding_events (event_type, external_id) unique constraint dedupes, so a "
+            "generous window is self-healing for missed webhook deliveries."
         ),
     )
 

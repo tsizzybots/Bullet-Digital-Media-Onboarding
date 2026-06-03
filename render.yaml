@@ -60,6 +60,15 @@ envVarGroups:
       # PandaDoc webhook (S1-22)
       - key: PANDADOC_WEBHOOK_SECRET
         sync: false
+      # S1-23 PandaDoc reconciliation cron
+      - key: PANDADOC_API_KEY
+        sync: false
+      - key: PANDADOC_API_BASE_URL
+        value: https://api.pandadoc.com
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: RECONCILIATION_LOOKBACK_DAYS
+        value: "7"
       # Cloudflare R2 transcript storage (S1-27)
       - key: R2_ACCOUNT_ID
         sync: false
@@ -112,6 +121,15 @@ envVarGroups:
       # PandaDoc webhook (S1-22)
       - key: PANDADOC_WEBHOOK_SECRET
         sync: false
+      # S1-23 PandaDoc reconciliation cron
+      - key: PANDADOC_API_KEY
+        sync: false
+      - key: PANDADOC_API_BASE_URL
+        value: https://api.pandadoc.com
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: RECONCILIATION_LOOKBACK_DAYS
+        value: "7"
       # Cloudflare R2 transcript storage (S1-27)
       - key: R2_ACCOUNT_ID
         sync: false
@@ -219,10 +237,15 @@ services:
         value: "bullet-dashboard-staging"
 
   # ─── Cron job (staging) ───────────────────────────────
-  # Render's native cron-job type runs a command on schedule with no
-  # HTTP surface. Verification for S1-04 is a one-off manual run that
-  # exits 0. Real reconciliation logic lands when the first job is
-  # defined (later sprint).
+  # S1-23: nightly PandaDoc reconciliation. Pulls completed documents from the
+  # PandaDoc API and, for any signed doc missing an onboarding_events row,
+  # inserts a synthetic pandadoc.signed event + posts a Slack alert (the safety
+  # net for missed webhook deliveries). Idempotent via the (event_type,
+  # external_id) unique constraint, so a run with nothing new is a no-op.
+  # NOTE: Render cron schedules are UTC-only with no DST support. "0 2 * * *" is
+  # 02:00 UTC = 03:00 UK during BST and 02:00 UK during GMT; a daily safety-net
+  # reconcile tolerates this ±1h drift. When PANDADOC_API_KEY is unset the job
+  # logs "disabled" and exits 0.
   - type: cron
     name: bullet-cron-staging
     runtime: python
@@ -231,7 +254,6 @@ services:
     branch: main
     schedule: "0 2 * * *"
     buildCommand: pip install uv && uv sync --frozen
-    startCommand: >-
-      uv run python -c "print('bullet-cron-staging placeholder - replace when first reconciliation job lands')"
+    startCommand: uv run python -m bullet_api.crons.reconcile_pandadoc
     envVars:
       - fromGroup: bullet-staging-env
