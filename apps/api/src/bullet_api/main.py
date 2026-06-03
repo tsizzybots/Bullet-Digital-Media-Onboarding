@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from bullet_api import __version__
+from bullet_api.admin import admin_router
 from bullet_api.auth import (
     CurrentUser,
     confirmation_router,
@@ -74,6 +75,7 @@ app.include_router(login_router)
 app.include_router(confirmation_router)
 app.include_router(logout_router)
 app.include_router(pandadoc_router)
+app.include_router(admin_router)
 
 
 @app.get("/healthz", tags=["meta"])

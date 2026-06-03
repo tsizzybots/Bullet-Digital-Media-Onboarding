@@ -189,6 +189,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- S1-24 PandaDoc API (manual replay) -----
+    pandadoc_api_key: str = Field(
+        default="",
+        description=(
+            "PandaDoc REST API key (header `Authorization: API-Key <key>`) used "
+            "by the manual replay endpoint (POST /admin/pandadoc/replay/{id}) to "
+            "fetch a document by id. Empty in local dev / tests (the "
+            "FakePandaDocClient is used); set in the Render staging / prod env "
+            "groups. HttpPandaDocClient fails loudly (RuntimeError) if this is "
+            "empty on a real call."
+        ),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

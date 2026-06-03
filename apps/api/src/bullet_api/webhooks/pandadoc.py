@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bullet_api.config import get_settings
 from bullet_api.db import get_session
 from bullet_api.webhooks.pandadoc_core import (
+    SignedDocument,
     extract_signed_documents,
     verify_pandadoc_signature,
 )
@@ -51,31 +52,23 @@ def get_pandadoc_secret() -> str:
     return get_settings().pandadoc_webhook_secret
 
 
-@router.post("/pandadoc", include_in_schema=False)
-async def receive_pandadoc_webhook(
-    request: Request,
-    db: Annotated[AsyncSession, Depends(get_session)],
-    secret: Annotated[str, Depends(get_pandadoc_secret)],
-    emitter: Annotated[EventEmitter, Depends(get_event_emitter)],
+async def persist_and_emit_signed_documents(
+    documents: list[SignedDocument],
+    db: AsyncSession,
+    emitter: EventEmitter,
 ) -> dict:
-    raw = await request.body()
-    signature = request.query_params.get("signature")
-    if not verify_pandadoc_signature(raw, signature, secret):
-        # 401 BEFORE any DB write: a forged/tampered request must leave no row.
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid signature")
-    try:
-        payload = json.loads(raw)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid JSON body"
-        ) from exc
+    """Upsert each signed document into onboarding_events and emit a
+    pandadoc.signed event for every newly-inserted row, then commit.
 
-    documents = extract_signed_documents(payload)
-    if not documents:
-        # Valid signature but no signed/completed document in the batch -> ack and ignore
-        # (PandaDoc fires many non-signed states at the same endpoint).
-        return {"status": "ignored", "events": 0}
+    Idempotent via the (event_type, external_id) unique constraint: a
+    document already persisted hits ON CONFLICT DO NOTHING, is not
+    re-emitted, and counts as a duplicate. Commits only AFTER the emit(s)
+    succeed so a failed emit rolls the whole batch back (caller's
+    get_session dependency handles rollback) and the source can retry.
 
+    Returns {"status": "accepted"|"duplicate", "events": <int>}.
+    Assumes `documents` is non-empty (callers handle the empty/"ignored"
+    case before calling)."""
     accepted = 0
     for doc in documents:
         result = await db.execute(
@@ -103,3 +96,31 @@ async def receive_pandadoc_webhook(
     # which is only reached after the signature check passed.
     await db.commit()
     return {"status": "accepted" if accepted else "duplicate", "events": accepted}
+
+
+@router.post("/pandadoc", include_in_schema=False)
+async def receive_pandadoc_webhook(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_session)],
+    secret: Annotated[str, Depends(get_pandadoc_secret)],
+    emitter: Annotated[EventEmitter, Depends(get_event_emitter)],
+) -> dict:
+    raw = await request.body()
+    signature = request.query_params.get("signature")
+    if not verify_pandadoc_signature(raw, signature, secret):
+        # 401 BEFORE any DB write: a forged/tampered request must leave no row.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid signature")
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="invalid JSON body"
+        ) from exc
+
+    documents = extract_signed_documents(payload)
+    if not documents:
+        # Valid signature but no signed/completed document in the batch -> ack and ignore
+        # (PandaDoc fires many non-signed states at the same endpoint).
+        return {"status": "ignored", "events": 0}
+
+    return await persist_and_emit_signed_documents(documents, db, emitter)
