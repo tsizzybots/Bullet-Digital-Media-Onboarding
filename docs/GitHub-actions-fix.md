@@ -3,7 +3,7 @@
 **Date:** 03/06/2026
 **Owner:** Tim (repo admin - only you can add the secrets below)
 **Repo:** `tsizzybots/Bullet-Digital-Media-Onboarding`
-**Status:** CI is 4 of 5 jobs green (confirmed on run `26802053992`, the S1-18 push on 02/06/2026: pre-commit, codegen drift, python lint+typecheck, and TypeScript lint+typecheck all pass). The 5th job (`python-tests`) needs three repository secrets that are not yet configured. Two further CI follow-ups were surfaced by S1-18 (E2E not yet in CI; `next lint` is a no-op) - see the at-a-glance table.
+**Status:** DONE (04/06/2026) - the three Neon `python-tests` secrets are configured and CI is now **5 of 5 green** on `main` (run `26931499074`, commit `f11e3ce`). Adding the secrets made `python-tests` execute for the first time, which surfaced two latent regressions already on `main` (a reserved `created` LogRecord key in the S1-23 cron, and trailing whitespace in a QA report) - both fixed in commit `f11e3ce`. Items 2-4 in the table below remain open dev follow-ups (not blocking CI).
 
 ---
 
@@ -11,12 +11,12 @@
 
 | # | Item | Who | Blocking CI? |
 |---|---|---|---|
-| 1 | Add 3 Neon secrets so `python-tests` can run | **Tim (repo admin only)** | **Yes** - CI is red without it |
+| 1 | DONE (04/06/2026) - 3 Neon secrets added; CI now 5/5 green (run `26931499074`) | Tim - complete | No (was the blocker) |
 | 2 | Wire the S1-18 Playwright E2E suite into CI | Dev task (new card) | No - runs locally via `make e2e` |
 | 3 | Add an ESLint flat config so `next lint` actually runs | Dev task (new card) | No - currently soft-passed with `\|\| true` |
 | 4 | (Optional) bump deprecated Node-20 actions | Dev task | No |
 
-Item 1 is the only thing keeping CI red, and only you (repo admin) can do it - see Action 1 below. Items 2-4 are normal dev cards discovered during S1-18 and do not need repo-admin access.
+Item 1 is now complete (04/06/2026) - CI is 5/5 green. Items 2-4 are normal dev cards discovered during S1-18 and do not need repo-admin access.
 
 ---
 
@@ -33,6 +33,8 @@ After those fixes the only remaining failure is the **`python-tests`** job. It i
 ---
 
 ## Action 1 (urgent, repo-admin only): add three Neon secrets
+
+> **COMPLETED 04/06/2026.** All three secrets below are set on `tsizzybots/Bullet-Digital-Media-Onboarding` (verify with `gh secret list`). `NEON_PROJECT_ID` is `old-credit-26332098` (the `bullet-staging` project). The `NEON_API_KEY` is a *personal* Neon key because the logged-in account is an org member, not an org admin (the org-level "Create new API key" button is disabled); a member's personal key still inherits access to the org's `bullet-staging` project, which is enough for CI branch create/delete. CI run `26931499074` is 5/5 green. The steps below are retained for reference and future key rotation.
 
 Add **three repository secrets** to the GitHub repo.
 
