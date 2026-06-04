@@ -155,7 +155,7 @@ async def reconcile_pandadoc(
         "pandadoc reconciliation pass complete",
         extra={
             "checked": len(documents),
-            "created": created,
+            "created_count": created,
             "completed_from": completed_from.isoformat(),
         },
     )
@@ -211,7 +211,7 @@ def main() -> None:
     result = asyncio.run(_run())
     log.info(
         "pandadoc reconciliation finished",
-        extra={"checked": result.checked, "created": result.created},
+        extra={"checked": result.checked, "created_count": result.created},
     )
 
 
