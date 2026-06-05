@@ -60,8 +60,14 @@ Correctness rules:
   an empty `PANDADOC_API_KEY` are likewise wrapped as NonRetriable.
   Other PandaDoc errors (5xx, 429, timeout) propagate naturally so
   Inngest retries them.
-- An orphan `onboarding_events.id` (audit row deleted) raises
-  `OnboardingEventNotFoundError`, also wrapped NonRetriable.
+- An orphan `onboarding_events.id` (audit row not visible) raises
+  `OnboardingEventNotFoundError` and **propagates** so Inngest retries.
+  The common cause is the producer's emit-before-commit visibility race
+  (S1-22 webhook does INSERT -> emit -> commit, so Inngest can dispatch
+  our function in the small window before the producer's commit lands).
+  A single retry absorbs the race. A genuinely-orphaned row (manual
+  deletion) is rare and still dead-letters after Inngest's default
+  retry budget is exhausted.
 - A per-document concurrency cap (`limit=1`,
   `key="event.data.document_id"`) prevents duplicate PandaDoc fetches and
   duplicate `client.created` emits when two events fire for the same
@@ -113,14 +119,21 @@ LEGAL_ENTITY_PLACEHOLDER = "Unknown - needs review"
 
 
 class OnboardingEventNotFoundError(LookupError):
-    """The Inngest event references an `onboarding_events` row that no
-    longer exists.
+    """The backfill UPDATE matched 0 rows for the given event id.
 
-    Indicates a data-consistency bug: either someone manually deleted the
-    audit row, or the Inngest event references a wrong id. The
-    orchestrator cannot self-heal on retry - the row will not reappear -
-    so the Inngest wrapper translates this into an
-    `inngest.NonRetriableError` and dead-letters immediately.
+    Common cause is the S1-22 webhook's emit-before-commit ordering:
+    the producer INSERTs the audit row, emits `pandadoc.signed`, THEN
+    commits. Inngest can dispatch our orchestrator inside the small
+    window before the producer's commit becomes visible to our separate
+    transaction, in which case the backfill UPDATE matches nothing and
+    we raise this. The Inngest wrapper does NOT translate this into a
+    NonRetriableError - it propagates so Inngest's default retry policy
+    (4 attempts with exponential backoff over ~minutes) absorbs the
+    visibility race. A genuinely-orphaned row (e.g. someone manually
+    deleted the audit row) still dead-letters after retries are
+    exhausted. Asymmetric cost: a transient race self-heals on one
+    retry, vs. a real orphan which would dead-letter under either
+    policy.
     """
 
     def __init__(self, event_id: uuid.UUID) -> None:
@@ -194,9 +207,11 @@ async def create_client_record_core(
         PandaDocPayloadError: the document is missing `Client.Email` or
             another required field. The transaction rolls back.
             Inngest wrapper translates to NonRetriableError.
-        OnboardingEventNotFoundError: the `onboarding_event_id` does not
-            match any row. The transaction rolls back. Inngest wrapper
-            translates to NonRetriableError.
+        OnboardingEventNotFoundError: the backfill UPDATE matched 0 rows
+            for the given event id. The transaction rolls back. The
+            Inngest wrapper does NOT translate this - it propagates so
+            Inngest retries (absorbs the producer's emit-before-commit
+            visibility race). See the class docstring for details.
     """
     fields = extract_client_fields(document)
 
@@ -215,18 +230,21 @@ async def create_client_record_core(
     # `(xmax = 0) AS inserted` reads the system column to detect insert
     # vs conflict in one round-trip. xmax is 0 for a fresh insert and
     # non-zero for an updated row; reliable across PG >= 9.0.
+    # step_entered_at is not in the INSERT - the column's server_default
+    # (now()) populates it on insert, and ON CONFLICT DO UPDATE doesn't
+    # touch it. Same outcome with one fewer redundant value.
     upserted = await session.execute(
         text(
             "INSERT INTO clients ("
             "  email, business_name, legal_entity,"
             "  contact_first_name, contact_last_name, phone,"
             "  pandadoc_document_id, hubspot_contact_id,"
-            "  current_step, step_entered_at"
+            "  current_step"
             ") VALUES ("
             "  :email, :business_name, :legal_entity,"
             "  :contact_first_name, :contact_last_name, :phone,"
             "  :pandadoc_document_id, :hubspot_contact_id,"
-            "  :current_step, now()"
+            "  :current_step"
             ") "
             "ON CONFLICT (pandadoc_document_id) DO UPDATE "
             "  SET pandadoc_document_id = EXCLUDED.pandadoc_document_id "
@@ -300,6 +318,14 @@ async def create_client_record_core(
             "has_template_id": fields.pandadoc_template_id is not None,
             "has_monthly_service_fee": fields.monthly_service_fee is not None,
             "deal_currency": fields.deal_currency,
+            # Address fields are extracted but not yet persisted (no
+            # columns on `clients` for them); logging presence here so
+            # they are visible in production logs until the follow-up
+            # migration adds the columns.
+            "has_address": fields.address is not None,
+            "has_state": fields.state is not None,
+            "has_postal_code": fields.postal_code is not None,
+            "has_country": fields.country is not None,
         },
     )
 
@@ -334,11 +360,16 @@ async def create_client_record(ctx: inngest.Context, step: inngest.Step) -> dict
     (`create_client_record_core`) carries all the correctness logic.
 
     Raises:
-        inngest.NonRetriableError: a structural data error (PandaDoc 404,
-            empty API key, missing required token, orphan event row).
-            Inngest dead-letters immediately.
-        Other exceptions (httpx 5xx / 429 / timeout, SQLAlchemy
-        transient errors): propagate so Inngest retries them.
+        inngest.NonRetriableError: a structural data error that cannot
+            self-heal on retry: PandaDoc 404, empty API key, missing
+            required token (`Client.Email`). Inngest dead-letters
+            immediately.
+        Other exceptions propagate naturally so Inngest's default retry
+        policy can absorb them: httpx 5xx / 429 / timeout, SQLAlchemy
+        transient errors, and `OnboardingEventNotFoundError` (which is
+        most commonly the producer's emit-before-commit visibility race
+        and self-heals on a single retry; persistent orphan still
+        dead-letters after retries are exhausted).
     """
     onboarding_event_id = uuid.UUID(ctx.event.data["onboarding_event_id"])
     document_id = str(ctx.event.data["document_id"])
@@ -362,8 +393,15 @@ async def create_client_record(ctx: inngest.Context, step: inngest.Step) -> dict
                 document=document,
                 emitter=InngestEventEmitter(inngest_client),
             )
-        except (PandaDocPayloadError, OnboardingEventNotFoundError) as exc:
+        except PandaDocPayloadError as exc:
+            # Structural data error - retry will not produce the missing
+            # token. Dead-letter immediately.
             raise inngest.NonRetriableError(str(exc)) from exc
+        # OnboardingEventNotFoundError propagates: Inngest's default
+        # retry policy absorbs the producer's emit-before-commit
+        # visibility race (the row exists, our separate transaction
+        # just cannot see it yet); a persistent orphan still
+        # dead-letters after retries are exhausted.
 
     return {
         "client_id": str(result.client_id),

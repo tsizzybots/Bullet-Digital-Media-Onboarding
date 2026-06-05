@@ -49,3 +49,7 @@ logs/
 
 # Playwright MCP scratch output (page snapshots, console logs, may contain secrets)
 .playwright-mcp/
+
+# Local investigation dumps (apps/api/.tmp holds PandaDoc shape recon output;
+# raw bodies contain real client PII so must never be committed)
+.tmp/

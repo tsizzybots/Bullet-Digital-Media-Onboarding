@@ -357,9 +357,22 @@ async def test_missing_client_email_token_raises_and_writes_no_client(
 async def test_unknown_onboarding_event_id_raises_OnboardingEventNotFoundError(
     async_session: AsyncSession,
 ) -> None:
-    """An orphan event_id is a data-consistency bug, not a PandaDoc
-    payload error. Distinct exception type so log filters / alert
-    routing can tell them apart."""
+    """The CORE raises a distinct exception type for the
+    "backfill UPDATE matched 0 rows" case so log filters / alert routing
+    can tell it apart from PandaDoc payload errors.
+
+    Note on wrapper policy: the Inngest wrapper deliberately does NOT
+    translate this into `inngest.NonRetriableError` (unlike
+    `PandaDocPayloadError`). The most common cause is the S1-22
+    webhook's emit-before-commit ordering creating a brief visibility
+    race; Inngest's default retry policy absorbs that on a single
+    retry. A persistent orphan (e.g. manual deletion) still dead-letters
+    after retries are exhausted - acceptable since manual deletions are
+    rare and asymmetric vs. dropping a valid signing on a transient
+    race. The wrapper's behaviour is not directly tested here (would be
+    testing Inngest's default retry policy); the contract that matters
+    is what this test asserts: the core raises a specific named error.
+    """
     document_id = f"doc_{uuid.uuid4().hex[:12]}"
     missing_event_id = uuid.uuid4()
     document = _detail_body(document_id)
