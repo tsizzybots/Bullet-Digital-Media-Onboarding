@@ -35,7 +35,8 @@ from bullet_api.schemas import (
     VersionResponse,
 )
 from bullet_api.webhooks import pandadoc_router
-from bullet_api.worker.client import FUNCTIONS, inngest_client
+from bullet_api.worker import inngest_client
+from bullet_api.worker.client import FUNCTIONS
 
 configure_logging()
 # No-op unless SENTRY_DSN is set (Render staging / prod). Must run before

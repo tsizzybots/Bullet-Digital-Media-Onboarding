@@ -14,11 +14,19 @@ from typing import Protocol
 
 import inngest
 
-from bullet_api.worker.client import inngest_client
+from bullet_api.worker._inngest import inngest_client
 
 # Used as BOTH the onboarding_events.event_type and the Inngest event name
 # so the persisted audit record and the fan-out trigger stay in lockstep.
 PANDADOC_SIGNED_EVENT = "pandadoc.signed"
+
+# Emitted by the S1-25a `create_client_record` orchestrator once a clients
+# row exists for a freshly-signed PandaDoc. Every downstream fan-out (GHL
+# sub-account creation, Asana project, Stripe subscription, Xero contact,
+# signed-PDF storage in R2, ...) keys off this event rather than
+# `pandadoc.signed` directly, so `client_id` is guaranteed to exist in the
+# payload they receive.
+CLIENT_CREATED_EVENT = "client.created"
 
 
 class EventEmitter(Protocol):
