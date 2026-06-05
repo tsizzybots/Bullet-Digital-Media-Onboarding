@@ -162,8 +162,7 @@ async def fetch_document_for_orchestrator(
         return await pandadoc_client.fetch_document_details(document_id)
     except PandaDocNotFound as exc:
         raise inngest.NonRetriableError(
-            f"PandaDoc returned 404 for document {document_id}; cannot "
-            "create client record."
+            f"PandaDoc returned 404 for document {document_id}; cannot create client record."
         ) from exc
     except RuntimeError as exc:
         # `HttpPandaDocClient` raises RuntimeError when api_key is empty.

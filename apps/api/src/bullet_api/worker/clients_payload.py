@@ -228,8 +228,7 @@ def extract_client_fields(document: dict) -> ExtractedClientFields:
     if email is None:
         raise PandaDocPayloadError(
             f"tokens[{_TOKEN_CLIENT_EMAIL}]",
-            f"PandaDoc document has no {_TOKEN_CLIENT_EMAIL} token; cannot "
-            "identify a client.",
+            f"PandaDoc document has no {_TOKEN_CLIENT_EMAIL} token; cannot identify a client.",
         )
 
     return ExtractedClientFields(

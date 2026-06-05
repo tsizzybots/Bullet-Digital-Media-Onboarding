@@ -237,9 +237,7 @@ def test_metadata_value_unwraps_list_taking_first_non_empty_entry() -> None:
     linked to the deal). The single `clients.hubspot_contact_id` text
     column takes the first non-empty entry; a follow-up linking table
     handles multi-contact properly."""
-    document = _document(
-        metadata={"hubspot.contact_id": ["contact-id-1", "contact-id-2"]}
-    )
+    document = _document(metadata={"hubspot.contact_id": ["contact-id-1", "contact-id-2"]})
     out = extract_client_fields(document)
     assert out.hubspot_contact_id == "contact-id-1"
 

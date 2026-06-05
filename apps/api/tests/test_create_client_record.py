@@ -208,10 +208,7 @@ async def test_missing_legal_entity_falls_back_to_business_name(
     )
 
     row = await async_session.execute(
-        text(
-            "SELECT business_name, legal_entity FROM clients "
-            "WHERE pandadoc_document_id = :doc"
-        ),
+        text("SELECT business_name, legal_entity FROM clients WHERE pandadoc_document_id = :doc"),
         {"doc": document_id},
     )
     client = row.one()
@@ -243,10 +240,7 @@ async def test_missing_both_legal_entity_and_business_name_uses_placeholder_only
     )
 
     row = await async_session.execute(
-        text(
-            "SELECT business_name, legal_entity FROM clients "
-            "WHERE pandadoc_document_id = :doc"
-        ),
+        text("SELECT business_name, legal_entity FROM clients WHERE pandadoc_document_id = :doc"),
         {"doc": document_id},
     )
     client = row.one()
@@ -398,13 +392,9 @@ async def test_payload_jsonb_is_NOT_read_for_field_extraction(
     # orchestrator ever read this payload, it would extract this email
     # instead of the document's, and the assertion below would fail.
     fake_jsonb_payload = {
-        "data": {
-            "tokens": [{"name": "Client.Email", "value": "should-never-be-read@example.com"}]
-        }
+        "data": {"tokens": [{"name": "Client.Email", "value": "should-never-be-read@example.com"}]}
     }
-    event_id = await _seed_onboarding_event(
-        async_session, document_id, payload=fake_jsonb_payload
-    )
+    event_id = await _seed_onboarding_event(async_session, document_id, payload=fake_jsonb_payload)
     document = _detail_body(document_id, client_email="from-api@example.com")
     emitter = FakeEventEmitter()
 
