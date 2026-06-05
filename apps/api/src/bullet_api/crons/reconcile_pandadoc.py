@@ -172,8 +172,7 @@ async def _run() -> ReconcileResult:
     from bullet_api.db import AsyncSessionLocal
     from bullet_api.integrations.pandadoc_client import HttpPandaDocClient
     from bullet_api.integrations.slack import HttpSlackNotifier
-    from bullet_api.worker import InngestEventEmitter
-    from bullet_api.worker.client import inngest_client
+    from bullet_api.worker import InngestEventEmitter, inngest_client
 
     settings = get_settings()
     client = HttpPandaDocClient(
