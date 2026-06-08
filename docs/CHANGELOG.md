@@ -14,6 +14,12 @@ Entry types:
 
 ## [Unreleased]
 
+### 08/06/2026 - Pre-PR hardening self-review (skill + lifecycle gate)
+
+- **Added**: `.claude/skills/pre-pr-review/SKILL.md` - a user-invocable deep self-review run on a ticket's diff before it goes to review. Codifies the project's hardening lenses so they are applied consistently: shared/reused seams judged against all callers + concurrent use (not just the first caller or its protective cap), failure paths including transport-level errors (timeouts / connection resets, not only typed errors), idempotency / replay / at-least-once windows, DB-correctness, project-future awareness, and a success-AND-failure-AND-replay-AND-concurrency test matrix. Every finding is fixed (or deferred with a logged reason) and the suite re-run green before the PR.
+- **Changed**: `CLAUDE.md` "Ticket lifecycle" - added the `/pre-pr-review` gate as a required step of the code-complete ritual (renumbered the subsequent steps; the completion-comment verification now cites the review pass).
+- **Decision**: a deep self-review pass is a standard pre-PR step on every ticket, raising the bar on concurrency, failure-path, and idempotency coverage before code reaches review.
+
 ### 08/06/2026 - S1-25b: store signed PDF in R2 + `documents` on `client.created`
 
 - **Added**: `apps/api/src/bullet_api/storage/` package with `client.py` - the Cloudflare R2 (S3-compatible) storage seam, mirroring the PandaDoc / GHL client seams. `StorageClient` Protocol (`put_object(key, body, content_type) -> url`), production `R2StorageClient` (boto3 S3 client pointed at the R2 endpoint; the blocking `put_object` runs via `asyncio.to_thread` so the event loop is not stalled), and `FakeStorageClient` test double recording `puts`. `get_s3_client()` is a **`functools.lru_cache` singleton** - ONE boto3 client per process, reused across every invocation (client construction loads service models + resolves creds and owns a urllib3 pool, so per-call construction is wasteful). Verified safe for our architecture: the API is a single uvicorn process with Inngest served in-process, boto3 *clients* are thread-safe (so sharing across the `to_thread` threads is fine), and the singleton is per-process so `--workers N` / multiple instances each get exactly one (you cannot share a client across processes anyway). Empty creds -> `RuntimeError` loud-fail.
