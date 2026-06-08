@@ -13,8 +13,12 @@ The idempotency-key format and status lifecycle are the contract fixed in
 migration `0005_create_platform_actions`:
 
 - `idempotency_key = "{client_id}:{platform}:{action}:{event_id}"`, UNIQUE.
-  A retried Inngest run re-derives the same key, so the INSERT is a no-op
-  (`ON CONFLICT DO NOTHING`) and the existing row is read back to resume.
+  A retried Inngest run re-derives the same key, so the INSERT conflicts and
+  `ON CONFLICT ... DO UPDATE` (a no-op SET) returns the existing row to
+  resume from. The no-op UPDATE is used over `DO NOTHING` so RETURNING
+  always yields the surviving row in one round-trip - even when a concurrent
+  duplicate is still uncommitted, where a `DO NOTHING` + separate SELECT
+  would see no row under READ COMMITTED.
 - `status` flows pending/in_progress -> success | failed | dead_lettered.
   This recorder uses `in_progress` on begin, `success` on completion, and
   `failed` on error.
@@ -84,11 +88,15 @@ async def begin_action(
 ) -> BeginActionResult:
     """Record (or resume) a fan-out action as `in_progress`.
 
-    `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING id, status`.
-    On a fresh insert the RETURNING populates directly. On conflict (a
-    retry or a racing duplicate) RETURNING is empty, so the existing row is
-    read back by its idempotency key. Either way the caller learns the
-    surviving row id and its current status in at most two round-trips.
+    `INSERT ... ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key
+    = EXCLUDED.idempotency_key RETURNING id, status`. The no-op SET (re-sets
+    the key to itself, leaving every real column - including `status` -
+    untouched) makes RETURNING populate the surviving row on BOTH a fresh
+    insert and a conflict, in a single round-trip. On conflict the statement
+    also takes a row lock that blocks until any concurrent inserter commits,
+    so a racing duplicate reads the committed row rather than risking the
+    empty read-back a `DO NOTHING` + separate SELECT can hit under READ
+    COMMITTED.
 
     `payload` is the request body we are about to send, persisted on the
     JSONB `payload` column for auditing; pass None to leave it NULL.
@@ -102,7 +110,8 @@ async def begin_action(
             "  :client_id, :event_id, :platform, :action, :idempotency_key,"
             "  :status, cast(:payload AS jsonb), :inngest_run_id, now()"
             ") "
-            "ON CONFLICT (idempotency_key) DO NOTHING "
+            "ON CONFLICT (idempotency_key) DO UPDATE "
+            "  SET idempotency_key = EXCLUDED.idempotency_key "
             "RETURNING id, status"
         ),
         {
@@ -116,15 +125,7 @@ async def begin_action(
             "inngest_run_id": inngest_run_id,
         },
     )
-    row = inserted.one_or_none()
-    if row is None:
-        # Conflict: a row with this idempotency key already exists. Read it
-        # back to resume from whatever state the prior attempt left it in.
-        existing = await session.execute(
-            text("SELECT id, status FROM platform_actions WHERE idempotency_key = :k"),
-            {"k": idempotency_key},
-        )
-        row = existing.one()
+    row = inserted.one()
 
     return BeginActionResult(
         action_id=row.id,

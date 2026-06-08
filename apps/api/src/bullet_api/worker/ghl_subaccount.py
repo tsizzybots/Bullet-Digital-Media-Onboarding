@@ -52,7 +52,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.config import get_settings
 from bullet_api.db.session import AsyncSessionLocal
-from bullet_api.ghl.client import GhlClient, GhlClientError, GhlServerError, HttpGhlClient
+from bullet_api.ghl.client import GhlClient, GhlClientError, HttpGhlClient
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.events import CLIENT_CREATED_EVENT
 from bullet_api.worker.platform_actions import (
@@ -157,9 +157,11 @@ async def create_ghl_subaccount_core(
 
     Raises:
         ClientNotFoundError: no `clients` row for `client_id`. Rolls back.
-        GhlClientError / GhlServerError: propagated after the failed action
-            is recorded and committed, so the wrapper can decide retriable
-            vs not.
+        Exception: any failure of the GHL create-location call (GhlClientError
+            4xx, GhlServerError 5xx/429, an httpx timeout / transport error,
+            or an empty-config RuntimeError) is recorded as a `failed` action
+            and committed, then re-raised unchanged so the wrapper can decide
+            retriable vs not.
     """
     client = (
         await session.execute(
@@ -246,7 +248,15 @@ async def create_ghl_subaccount_core(
 
     try:
         location = await ghl_client.create_location(payload)
-    except (GhlClientError, GhlServerError) as exc:
+    except Exception as exc:
+        # Record ANY failure of the create-location call as `failed`, then
+        # re-raise unchanged. Catching only GhlClientError/GhlServerError let
+        # a transport-level error (an httpx timeout / connection reset, which
+        # carries no HTTP status) bypass fail_action and leave the row stuck
+        # `in_progress`; a response-lost read timeout is also the worst case
+        # of the at-least-once create window deferred to S1-26, so it must be
+        # visible. The wrapper still decides retriable-vs-not from the
+        # re-raised exception type.
         await fail_action(session, action_id=begun.action_id, last_error=str(exc))
         await session.commit()
         log.warning(

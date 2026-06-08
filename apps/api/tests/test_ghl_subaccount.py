@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import uuid
 
+import httpx
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -245,6 +246,39 @@ async def test_server_error_records_failed_and_propagates(async_session: AsyncSe
     actions = await _platform_action(async_session, client_id)
     assert actions[0].status == "failed"
     assert actions[0].retry_count == 1
+
+
+@pytest.mark.db
+async def test_transient_error_records_failed_and_propagates(async_session: AsyncSession) -> None:
+    """A transport-level error (e.g. an httpx read timeout - no HTTP status,
+    so neither `GhlClientError` nor `GhlServerError`) must still be recorded
+    as a `failed` action, never left stuck `in_progress`. A response-lost
+    read timeout is also the worst case of the at-least-once create window
+    deferred to S1-26, so it has to be visible in the audit trail."""
+    client_id = await _seed_client(async_session)
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(error=httpx.ReadTimeout("response lost"))
+
+    with pytest.raises(httpx.ReadTimeout):
+        await create_ghl_subaccount_core(
+            async_session,
+            ghl,
+            client_id=client_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    actions = await _platform_action(async_session, client_id)
+    assert len(actions) == 1
+    assert actions[0].status == "failed"
+    assert "response lost" in actions[0].last_error
+    assert actions[0].retry_count == 1
+
+    # No sub-account id written back on a failed create.
+    written = await async_session.execute(
+        text("SELECT ghl_subaccount_id FROM clients WHERE id = :id"), {"id": client_id}
+    )
+    assert written.scalar_one() is None
 
 
 @pytest.mark.db
