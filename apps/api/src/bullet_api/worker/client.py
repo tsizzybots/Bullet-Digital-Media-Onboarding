@@ -19,6 +19,7 @@ import inngest
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.client_record import create_client_record
 from bullet_api.worker.ghl_subaccount import create_ghl_subaccount
+from bullet_api.worker.signed_pdf import store_signed_pdf
 
 
 @inngest_client.create_function(
@@ -30,11 +31,17 @@ async def noop_function(ctx: inngest.Context, step: inngest.Step) -> str:
     return "noop"
 
 
-FUNCTIONS = [noop_function, create_client_record, create_ghl_subaccount]
+FUNCTIONS = [noop_function, create_client_record, create_ghl_subaccount, store_signed_pdf]
 
 # `inngest_client` is intentionally NOT re-exported here - it is sourced
 # from `bullet_api.worker._inngest` and re-exported from
 # `bullet_api.worker.__init__` so the public single home is the package
 # root, not this aggregator. Importers should write
 # `from bullet_api.worker import inngest_client` (or `_inngest` directly).
-__all__ = ["FUNCTIONS", "create_client_record", "create_ghl_subaccount", "noop_function"]
+__all__ = [
+    "FUNCTIONS",
+    "create_client_record",
+    "create_ghl_subaccount",
+    "noop_function",
+    "store_signed_pdf",
+]

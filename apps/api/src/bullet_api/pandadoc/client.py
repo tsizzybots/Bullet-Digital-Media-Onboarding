@@ -54,6 +54,16 @@ class PandaDocClient(Protocol):
         """
         ...
 
+    async def download_document(self, document_id: str) -> bytes:
+        """Download the signed PDF bytes for a completed document.
+
+        Used by S1-25b (`store_signed_pdf`). Hits the PandaDoc download
+        endpoint and returns the raw PDF body. Raises PandaDocNotFound on
+        404 (document deleted between webhook and fan-out) and raises on any
+        other non-2xx so a transient 5xx/429 propagates for retry.
+        """
+        ...
+
 
 class HttpPandaDocClient:
     """Production client - GETs the PandaDoc document-detail endpoint.
@@ -98,6 +108,24 @@ class HttpPandaDocClient:
         response.raise_for_status()
         return response.json()
 
+    async def download_document(self, document_id: str) -> bytes:
+        if not self._api_key:
+            raise RuntimeError(
+                "PANDADOC_API_KEY is empty; cannot download document. "
+                "Set it on the Render env group."
+            )
+        async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+            response = await client.get(
+                f"{self._base_url}/public/v1/documents/{document_id}/download",
+                headers={"Authorization": f"API-Key {self._api_key}"},
+            )
+        if response.status_code == 404:
+            raise PandaDocNotFound(document_id)
+        # Any other non-2xx (5xx, 429, an unexpected 4xx) raises so the caller
+        # records `failed` and Inngest retries the transient cases.
+        response.raise_for_status()
+        return response.content
+
 
 @dataclass
 class FakePandaDocClient:
@@ -105,12 +133,17 @@ class FakePandaDocClient:
     unknown ids.
 
     `documents` is keyed by id for the S1-24 projected fetch; `details` is
-    keyed by id for the S1-25a raw-body fetch. A test can populate either
-    one (or both) depending on which surface it exercises.
+    keyed by id for the S1-25a raw-body fetch; `pdfs` is keyed by id for the
+    S1-25b download. A test can populate any of them depending on which
+    surface it exercises. `download_error`, when set, is raised by
+    `download_document` regardless of `pdfs` - used to exercise transport-level
+    failures (e.g. an httpx.ReadTimeout) that are NOT `PandaDocNotFound`.
     """
 
     documents: dict[str, PandaDocDocument] = field(default_factory=dict)
     details: dict[str, dict] = field(default_factory=dict)
+    pdfs: dict[str, bytes] = field(default_factory=dict)
+    download_error: Exception | None = None
 
     async def fetch_document(self, document_id: str) -> PandaDocDocument:
         try:
@@ -121,6 +154,14 @@ class FakePandaDocClient:
     async def fetch_document_details(self, document_id: str) -> dict:
         try:
             return self.details[document_id]
+        except KeyError:
+            raise PandaDocNotFound(document_id) from None
+
+    async def download_document(self, document_id: str) -> bytes:
+        if self.download_error is not None:
+            raise self.download_error
+        try:
+            return self.pdfs[document_id]
         except KeyError:
             raise PandaDocNotFound(document_id) from None
 
