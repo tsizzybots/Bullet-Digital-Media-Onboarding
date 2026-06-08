@@ -233,6 +233,50 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- S1-25 GoHighLevel sub-account creation (direct agency API) -----
+    ghl_agency_api_key: str = Field(
+        default="",
+        description=(
+            "GoHighLevel agency API token, sent as `Authorization: Bearer <key>` on "
+            "POST /locations/. Empty in local dev / tests (the FakeGhlClient is used); "
+            "set in the Render staging / prod env groups. HttpGhlClient fails loudly "
+            "(RuntimeError) if this is empty on a real call, so an unconfigured "
+            "deployment is loud rather than silently creating nothing."
+        ),
+    )
+    ghl_company_id: str = Field(
+        default="",
+        description=(
+            "GoHighLevel agency `companyId`, a required field on the create-location "
+            "body. Identifies the agency under which the new sub-account is created. "
+            "Empty in local dev / tests; set in the Render staging / prod env groups."
+        ),
+    )
+    ghl_api_base_url: str = Field(
+        default="https://services.leadconnectorhq.com",
+        description=(
+            "Base URL for the GoHighLevel REST API (LeadConnector). Overridable per "
+            "environment but defaults to production."
+        ),
+    )
+    ghl_api_version: str = Field(
+        default="2021-07-28",
+        description=(
+            "Value sent in the GoHighLevel `Version` header, which pins the API "
+            "contract. 2021-07-28 is the version the /locations/ contract was verified "
+            "against (04/06/2026)."
+        ),
+    )
+    ghl_snapshot_id: str = Field(
+        default="",
+        description=(
+            "Optional GoHighLevel agency snapshot id cloned into each new sub-account "
+            "(workflows, funnels, custom fields). Empty (the default) omits `snapshotId` "
+            "from the create-location body so a bare sub-account is created. Set once "
+            "Bullet confirms an onboarding snapshot id."
+        ),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
