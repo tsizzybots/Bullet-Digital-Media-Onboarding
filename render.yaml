@@ -57,11 +57,15 @@ envVarGroups:
       # Shared per environment: applies to every service in this env group.
       - key: SENTRY_ENVIRONMENT
         value: "staging"
-      # PandaDoc webhook (S1-22)
-      - key: PANDADOC_WEBHOOK_SECRET
+      # PandaDoc webhook (S1-22) - per account (S1-25c: UK + International)
+      - key: PANDADOC_WEBHOOK_SECRET_UK
         sync: false
-      # S1-23 PandaDoc reconciliation cron
-      - key: PANDADOC_API_KEY
+      - key: PANDADOC_WEBHOOK_SECRET_INT
+        sync: false
+      # S1-23 reconciliation cron + S1-25c per-account API keys
+      - key: PANDADOC_API_KEY_UK
+        sync: false
+      - key: PANDADOC_API_KEY_INT
         sync: false
       - key: PANDADOC_API_BASE_URL
         value: https://api.pandadoc.com
@@ -118,11 +122,15 @@ envVarGroups:
       # services below.
       - key: SENTRY_ENVIRONMENT
         value: "production"
-      # PandaDoc webhook (S1-22)
-      - key: PANDADOC_WEBHOOK_SECRET
+      # PandaDoc webhook (S1-22) - per account (S1-25c: UK + International)
+      - key: PANDADOC_WEBHOOK_SECRET_UK
         sync: false
-      # S1-23 PandaDoc reconciliation cron
-      - key: PANDADOC_API_KEY
+      - key: PANDADOC_WEBHOOK_SECRET_INT
+        sync: false
+      # S1-23 reconciliation cron + S1-25c per-account API keys
+      - key: PANDADOC_API_KEY_UK
+        sync: false
+      - key: PANDADOC_API_KEY_INT
         sync: false
       - key: PANDADOC_API_BASE_URL
         value: https://api.pandadoc.com

@@ -41,6 +41,30 @@ def verify_pandadoc_signature(raw_body: bytes, signature: str | None, secret: st
     return hmac.compare_digest(expected, signature)
 
 
+def resolve_pandadoc_account(
+    raw_body: bytes, signature: str | None, secrets: dict[str, str]
+) -> str | None:
+    """Return the account whose shared key verifies `signature`, else None (S1-25c).
+
+    Bullet runs two PandaDoc accounts, each signing its webhooks with its own
+    shared key. `secrets` maps each configured account label to its secret; this
+    tries each in turn and returns the account whose key verifies. HMAC-SHA256
+    uniquely identifies the signing account - a signature produced with one
+    account's key cannot verify under another's - so the match is unambiguous.
+
+    Iterates in `secrets` insertion order (UK first, per `PANDADOC_ACCOUNTS`).
+    Fails closed: returns None when `signature` is missing/empty or when no
+    configured secret verifies (an empty `secrets` map therefore rejects every
+    request, matching the original single-empty-secret behaviour).
+    """
+    if not signature:
+        return None
+    for account, secret in secrets.items():
+        if verify_pandadoc_signature(raw_body, signature, secret):
+            return account
+    return None
+
+
 @dataclass(frozen=True)
 class SignedDocument:
     """A single PandaDoc document that reached the completed state."""

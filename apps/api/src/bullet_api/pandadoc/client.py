@@ -9,11 +9,12 @@ preloaded documents and assert against them without an API call.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 import httpx
 
 from bullet_api.config import get_settings
+from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, api_key_for
 
 # PandaDoc's REST base. The document-detail endpoint is
 # GET {base}/public/v1/documents/{id}/details and auth is the header
@@ -166,6 +167,17 @@ class FakePandaDocClient:
             raise PandaDocNotFound(document_id) from None
 
 
-def get_pandadoc_client() -> PandaDocClient:
-    """FastAPI dependency. Tests override this with a FakePandaDocClient."""
-    return HttpPandaDocClient(api_key=get_settings().pandadoc_api_key)
+def get_pandadoc_client(account: Literal["uk", "int"] = PANDADOC_ACCOUNT_UK) -> PandaDocClient:
+    """FastAPI dependency / factory for a PandaDoc client bound to one account.
+
+    When used as a FastAPI dependency (the S1-24 replay endpoint), `account` is
+    read from the ``?account=`` query param (default ``uk``) and FastAPI
+    validates it against the allowed values, returning 422 for anything else.
+    The returned client uses that account's API key (S1-25c). Tests override
+    this dependency with a FakePandaDocClient.
+    """
+    settings = get_settings()
+    return HttpPandaDocClient(
+        api_key=api_key_for(account, settings),
+        base_url=settings.pandadoc_api_base_url,
+    )

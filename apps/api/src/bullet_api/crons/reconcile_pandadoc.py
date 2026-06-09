@@ -57,6 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.integrations.pandadoc_client import PandaDocClient, PandaDocDocument
 from bullet_api.integrations.slack import SlackNotifier, format_reconciliation_alert
+from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK
 from bullet_api.worker import PANDADOC_SIGNED_EVENT, EventEmitter
 
 log = logging.getLogger(__name__)
@@ -103,6 +104,7 @@ async def reconcile_pandadoc(
     slack: SlackNotifier,
     lookback_days: int,
     now: datetime,
+    account: str = PANDADOC_ACCOUNT_UK,
 ) -> ReconcileResult:
     """Reconcile completed PandaDoc documents against ``onboarding_events``.
 
@@ -111,6 +113,11 @@ async def reconcile_pandadoc(
     and posts a Slack alert. Commits once at the end (after all emits/alerts),
     mirroring the webhook. ``now`` is injected so callers/tests control the
     look-back watermark deterministically.
+
+    ``account`` is the PandaDoc account ``pandadoc_client`` lists from (S1-25c);
+    it is stamped on ``onboarding_events.pandadoc_account`` and carried on the
+    emitted ``pandadoc.signed`` event so the healed signing fans out with the
+    matching account's API key. ``_run`` calls this once per configured account.
     """
     completed_from = now - timedelta(days=lookback_days)
     documents = await pandadoc_client.list_completed_documents(completed_from)
@@ -120,8 +127,8 @@ async def reconcile_pandadoc(
         result = await session.execute(
             text(
                 "INSERT INTO onboarding_events "
-                "  (event_type, external_id, payload, verified_at) "
-                "VALUES (:et, :eid, cast(:p AS jsonb), now()) "
+                "  (event_type, external_id, payload, pandadoc_account, verified_at) "
+                "VALUES (:et, :eid, cast(:p AS jsonb), :acct, now()) "
                 "ON CONFLICT (event_type, external_id) DO NOTHING "
                 "RETURNING id"
             ),
@@ -132,6 +139,7 @@ async def reconcile_pandadoc(
                 "et": PANDADOC_SIGNED_EVENT,
                 "eid": doc.document_id,
                 "p": json.dumps(_synthetic_payload(doc)),
+                "acct": account,
             },
         )
         new_id = result.scalar()
@@ -141,9 +149,13 @@ async def reconcile_pandadoc(
             continue
         await emitter.send(
             PANDADOC_SIGNED_EVENT,
-            {"document_id": doc.document_id, "onboarding_event_id": str(new_id)},
+            {
+                "document_id": doc.document_id,
+                "onboarding_event_id": str(new_id),
+                "account": account,
+            },
         )
-        await slack.post(format_reconciliation_alert(doc))
+        await slack.post(f"[{account.upper()}] {format_reconciliation_alert(doc)}")
         created += 1
 
     # Commit AFTER the emit(s)/alert(s) succeed, like the webhook: a failure
@@ -163,7 +175,22 @@ async def reconcile_pandadoc(
 
 
 async def _run() -> ReconcileResult:
-    """Wire production dependencies from settings and run one pass."""
+    """Wire production dependencies from settings and run one pass PER ACCOUNT.
+
+    S1-25c: Bullet runs two PandaDoc accounts (UK + International), each with
+    its own API key. We reconcile each configured account in turn (skipping any
+    whose key is empty), building a list-client per account so the right
+    account-scoped key is used, and accumulate the totals. A single shared
+    session + look-back window covers all accounts; per-account stamping keeps
+    each healed row + event tagged with the account it came from.
+
+    Each per-account `reconcile_pandadoc` call commits at its end, so the
+    accounts are NOT all-or-nothing: if the second account raises, the first's
+    healed rows stay committed and only the failed account is re-processed on
+    the next nightly run (idempotent via the unique constraint). That is the
+    desired behaviour for a healing cron - a transient INT failure must not
+    roll back already-healed UK signings.
+    """
     # Production-only wiring imported on the entry path, so the testable
     # `reconcile_pandadoc` core's module-level imports stay limited to its direct
     # collaborators (the Protocols, the event constant) rather than the concrete
@@ -172,40 +199,51 @@ async def _run() -> ReconcileResult:
     from bullet_api.db import AsyncSessionLocal
     from bullet_api.integrations.pandadoc_client import HttpPandaDocClient
     from bullet_api.integrations.slack import HttpSlackNotifier
+    from bullet_api.pandadoc.accounts import api_accounts
     from bullet_api.worker import InngestEventEmitter, inngest_client
 
     settings = get_settings()
-    client = HttpPandaDocClient(
-        api_key=settings.pandadoc_api_key,
-        base_url=settings.pandadoc_api_base_url,
-    )
     emitter = InngestEventEmitter(inngest_client)
     slack = HttpSlackNotifier(settings.slack_webhook_url)
+    now = datetime.now(UTC)
 
+    checked = 0
+    created = 0
     async with AsyncSessionLocal() as session:
-        return await reconcile_pandadoc(
-            session,
-            pandadoc_client=client,
-            emitter=emitter,
-            slack=slack,
-            lookback_days=settings.reconciliation_lookback_days,
-            now=datetime.now(UTC),
-        )
+        for creds in api_accounts(settings):
+            client = HttpPandaDocClient(
+                api_key=creds.api_key,
+                base_url=settings.pandadoc_api_base_url,
+            )
+            result = await reconcile_pandadoc(
+                session,
+                pandadoc_client=client,
+                emitter=emitter,
+                slack=slack,
+                lookback_days=settings.reconciliation_lookback_days,
+                now=now,
+                account=creds.account,
+            )
+            checked += result.checked
+            created += result.created
+    return ReconcileResult(checked=checked, created=created)
 
 
 def main() -> None:
     """CLI entry point for the Render cron service.
 
-    Disabled-by-default: when ``PANDADOC_API_KEY`` is empty the job logs and
-    exits 0 without calling PandaDoc, so an unconfigured deployment is a safe
-    no-op rather than a crash.
+    Disabled-by-default: when NO PandaDoc account has an API key the job logs
+    and exits 0 without calling PandaDoc, so an unconfigured deployment is a
+    safe no-op rather than a crash. (S1-25c: checks every configured account,
+    not just a single key.)
     """
     from bullet_api.config import get_settings
     from bullet_api.logging_config import configure_logging
+    from bullet_api.pandadoc.accounts import api_accounts
 
     configure_logging()
-    if not get_settings().pandadoc_api_key:
-        log.warning("PANDADOC_API_KEY is empty; reconciliation disabled, exiting 0.")
+    if not api_accounts(get_settings()):
+        log.warning("No PandaDoc API key configured; reconciliation disabled, exiting 0.")
         return
     result = asyncio.run(_run())
     log.info(

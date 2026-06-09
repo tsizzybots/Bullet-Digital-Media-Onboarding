@@ -18,6 +18,11 @@ from bullet_api.worker._inngest import inngest_client
 
 # Used as BOTH the onboarding_events.event_type and the Inngest event name
 # so the persisted audit record and the fan-out trigger stay in lockstep.
+# Data payload: {document_id, onboarding_event_id, account}. `account` (S1-25c)
+# is the PandaDoc account the signing came from ("uk" | "int"); the
+# orchestrator uses it to fetch the document with the matching API key. Events
+# emitted before S1-25c (or by a producer that omits it) default to "uk" at the
+# consumer.
 PANDADOC_SIGNED_EVENT = "pandadoc.signed"
 
 # Emitted by the S1-25a `create_client_record` orchestrator once a clients
@@ -25,7 +30,10 @@ PANDADOC_SIGNED_EVENT = "pandadoc.signed"
 # sub-account creation, Asana project, Stripe subscription, Xero contact,
 # signed-PDF storage in R2, ...) keys off this event rather than
 # `pandadoc.signed` directly, so `client_id` is guaranteed to exist in the
-# payload they receive.
+# payload they receive. Data payload: {client_id, onboarding_event_id,
+# document_id, email, account}. `account` (S1-25c) is propagated from
+# `pandadoc.signed` so the signed-PDF worker downloads with the matching
+# PandaDoc API key.
 CLIENT_CREATED_EVENT = "client.created"
 
 

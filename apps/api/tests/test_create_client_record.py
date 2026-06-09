@@ -185,6 +185,30 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
     assert data["document_id"] == document_id
     assert data["onboarding_event_id"] == str(event_id)
     assert data["email"] == "signer@example.com"
+    # account defaults to uk when not supplied (back-compat for pre-S1-25c events).
+    assert data["account"] == "uk"
+
+
+@pytest.mark.db
+async def test_account_is_propagated_to_client_created(async_session: AsyncSession) -> None:
+    """S1-25c: the PandaDoc account passed in is carried on the emitted
+    client.created event so the signed-PDF worker downloads with the matching
+    account's API key."""
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    emitter = FakeEventEmitter()
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id),
+        emitter=emitter,
+        account="int",
+    )
+
+    _name, data = emitter.sent[0]
+    assert data["account"] == "int"
 
 
 @pytest.mark.db

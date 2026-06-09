@@ -161,3 +161,98 @@ async def test_reconcile_no_documents_is_a_noop(async_session: AsyncSession) -> 
     assert result.created == 0
     assert emitter.sent == []
     assert slack.posted == []
+
+
+@pytest.mark.db
+async def test_reconcile_stamps_account_on_row_event_and_alert(
+    async_session: AsyncSession,
+) -> None:
+    """S1-25c: a healed signing is stamped with the account it was listed from
+    (here INT) on the onboarding_events row, the emitted pandadoc.signed event,
+    and the Slack alert - so the fan-out downloads with the matching key."""
+    missing = f"doc_{uuid.uuid4().hex[:12]}"
+    fake_pandadoc = FakePandaDocClient(docs=[_doc(missing)])
+    emitter = FakeEventEmitter()
+    slack = FakeSlackNotifier()
+
+    result = await reconcile_pandadoc(
+        async_session,
+        pandadoc_client=fake_pandadoc,
+        emitter=emitter,
+        slack=slack,
+        lookback_days=7,
+        now=NOW,
+        account="int",
+    )
+
+    assert result.created == 1
+
+    row = await async_session.execute(
+        text(
+            "SELECT pandadoc_account FROM onboarding_events "
+            "WHERE event_type = :et AND external_id = :eid"
+        ),
+        {"et": PANDADOC_SIGNED_EVENT, "eid": missing},
+    )
+    assert row.scalar_one() == "int"
+
+    _name, data = emitter.sent[0]
+    assert data["account"] == "int"
+    assert slack.posted[0].startswith("[INT] ")
+
+
+async def test_run_reconciles_each_configured_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S1-25c: `_run` loops every configured account, calling the core once per
+    account and accumulating the totals. No DB / network: the production deps
+    `_run` imports are stubbed, and the core is replaced by a recorder."""
+    import types
+
+    import bullet_api.config as cfg
+    import bullet_api.crons.reconcile_pandadoc as mod
+    import bullet_api.db as db
+    import bullet_api.integrations.pandadoc_client as pc
+    import bullet_api.integrations.slack as sl
+    import bullet_api.pandadoc.accounts as acct
+    import bullet_api.worker as wk
+    from bullet_api.pandadoc.accounts import PandaDocCreds
+
+    called_accounts: list[str] = []
+
+    async def _fake_core(session, *, pandadoc_client, emitter, slack, lookback_days, now, account):
+        called_accounts.append(account)
+        return mod.ReconcileResult(checked=2, created=1)
+
+    monkeypatch.setattr(mod, "reconcile_pandadoc", _fake_core)
+    monkeypatch.setattr(
+        acct,
+        "api_accounts",
+        lambda _s: [PandaDocCreds("uk", "UKKEY", ""), PandaDocCreds("int", "INTKEY", "")],
+    )
+    monkeypatch.setattr(
+        cfg,
+        "get_settings",
+        lambda: types.SimpleNamespace(
+            pandadoc_api_base_url="https://api.pandadoc.com",
+            slack_webhook_url="",
+            reconciliation_lookback_days=7,
+        ),
+    )
+    monkeypatch.setattr(pc, "HttpPandaDocClient", lambda **_kw: object())
+    monkeypatch.setattr(sl, "HttpSlackNotifier", lambda _url: object())
+    monkeypatch.setattr(wk, "InngestEventEmitter", lambda _c: object())
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+    monkeypatch.setattr(db, "AsyncSessionLocal", lambda: _FakeSession())
+
+    result = await mod._run()
+
+    # One core call per configured account, UK first; totals accumulated.
+    assert called_accounts == ["uk", "int"]
+    assert result.checked == 4
+    assert result.created == 2
