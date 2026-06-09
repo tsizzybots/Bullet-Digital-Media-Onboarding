@@ -172,3 +172,66 @@ async def test_fake_client_details_preloaded_and_raises_on_unknown() -> None:
 
     with pytest.raises(PandaDocNotFound):
         await client.fetch_document_details("doc_unknown")
+
+
+# --------------------------------------------------------------------------- #
+# S1-25b: download_document (signed PDF bytes)
+# --------------------------------------------------------------------------- #
+
+
+async def test_download_document_returns_pdf_bytes_on_200() -> None:
+    doc_id = "doc_abc123"
+    pdf = b"%PDF-1.7\nsigned\n%%EOF"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/public/v1/documents/{doc_id}/download"
+        assert request.headers["Authorization"] == "API-Key test-key"
+        return httpx.Response(200, content=pdf)
+
+    client = HttpPandaDocClient(api_key="test-key", transport=httpx.MockTransport(handler))
+
+    assert await client.download_document(doc_id) == pdf
+
+
+async def test_download_document_raises_not_found_on_404() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001
+        return httpx.Response(404, json={"detail": "Not found"})
+
+    client = HttpPandaDocClient(api_key="test-key", transport=httpx.MockTransport(handler))
+
+    with pytest.raises(PandaDocNotFound):
+        await client.download_document("doc_missing")
+
+
+async def test_download_document_propagates_500_for_retry() -> None:
+    """A transient 5xx must surface as `httpx.HTTPStatusError` so the worker
+    records `failed` and Inngest retries (NOT translated to NonRetriable)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001
+        return httpx.Response(502, text="bad gateway")
+
+    client = HttpPandaDocClient(api_key="test-key", transport=httpx.MockTransport(handler))
+
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        await client.download_document("doc_abc")
+    assert exc.value.response.status_code == 502
+
+
+async def test_download_document_raises_runtime_error_on_empty_key() -> None:
+    client = HttpPandaDocClient(api_key="")
+    with pytest.raises(RuntimeError, match="PANDADOC_API_KEY is empty"):
+        await client.download_document("doc_abc")
+
+
+async def test_fake_client_download_preloaded_error_and_unknown() -> None:
+    pdf = b"%PDF-1.7"
+    client = FakePandaDocClient(pdfs={"doc_known": pdf})
+    assert await client.download_document("doc_known") == pdf
+
+    with pytest.raises(PandaDocNotFound):
+        await client.download_document("doc_unknown")
+
+    # download_error is raised regardless of pdfs (transport-error simulation).
+    erroring = FakePandaDocClient(pdfs={"doc_known": pdf}, download_error=httpx.ReadTimeout("boom"))
+    with pytest.raises(httpx.ReadTimeout):
+        await erroring.download_document("doc_known")

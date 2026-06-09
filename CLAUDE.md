@@ -2,6 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Active state (cross-session continuity)
+
+Claude maintains a single active-state file inside the project's auto-memory directory so a new chat picks up exactly where the last one left off. The file is indexed as the first entry in `MEMORY.md` and tracks: the currently-in-flight ticket, its sub-tasks (done vs not done), recently-completed tickets in the current sprint, open follow-ups discovered during the work but not yet ticketed, and cross-session references (Flow card ids, branches, PR locations, plan files).
+
+**Read it first.** At the start of every non-trivial session, after auto-loading `MEMORY.md`, read the entry titled "Active state" before doing anything else. Use it to recover context instead of asking the user "where were we?".
+
+**Keep it accurate.** Update the file (overwrite, do not accrete) whenever any of the following happen:
+
+- A ticket changes column on the Flow board (e.g. In Progress → To Review).
+- A sub-task on the current ticket is completed or a new one is identified.
+- A blocker or follow-up is discovered.
+- A scope, architecture, or product decision is made that affects the active work (these still get logged to `docs/CHANGELOG.md` per the changelog rules below; the active-state file is the short, scannable summary).
+- The current ticket lands (merged + deployed) — move its entry from "Currently in flight" to "Recently completed (current sprint, for context)" and promote the next-up ticket to "Currently in flight".
+
+Do not let the file go stale. If the in-flight ticket entry says "code-complete, awaiting human review" but the PR has been merged, the file is wrong and must be updated before any further work.
+
+**Scope.** Keep entries short and link-heavy: ticket id + column, branch name, PR location, one-line status, a brief sub-task checklist. The full prose lives in `docs/CHANGELOG.md`; this file is the index that lets a fresh session find the right CHANGELOG section / Flow card / plan file in one read.
+
 ## Project Overview
 
 This is a **project planning and documentation workspace** for the IzzyAgents & Bullet Digital Media AI engagement. Bullet Digital Media is a gym/fitness marketing agency (~91-100 active clients, ~8-12 team members) that IzzyAgents is building AI solutions for.
@@ -68,6 +86,50 @@ Key constraints:
 - Internal-facing tool; single-tenant (Bullet team only)
 - Every fan-out action is idempotent, retryable, and individually auditable - partial failures must be visible in the dashboard, never silent
 - Every job writes its outcome (success/failure, external ID, retry count) back to Postgres - nothing is inferred from live platform state at view-time
+
+## Ticket lifecycle and documentation rituals
+
+Every ticket follows the same documentation touchpoints. Skipping any of these breaks cross-session continuity, code review, or the audit trail. The list below is exhaustive — if a step has no obvious change to record, write a one-liner explaining that (the absence-of-change is itself useful signal).
+
+### When STARTING work on a ticket
+
+1. **Flow card → "In Progress"** via `mcp__flow__cards_move`. Top of the column so it's the most-recently-touched card.
+2. **Drop a "starting" comment** on the card via `mcp__flow__cards_add_note` describing: scope as you understand it, any open questions before you write code, dependencies on other tickets, and any pre-existing context you are pulling in (Loom transcripts, past meetings, related PRs).
+3. **Update `project_active_state.md`** (in the auto-memory dir): set this ticket as the "Currently in flight" entry; capture the initial sub-task checklist with everything marked TODO.
+4. **Author a plan** when the work is non-trivial. Plan lives at `~/.claude/plans/<slug>.md` (Claude Code's plan-mode default location); reference it from the active-state file.
+
+### DURING active work
+
+5. **Update `project_active_state.md`** whenever a sub-task closes, a new sub-task is identified, a blocker is discovered, or a scope/architecture decision is made. Overwrite, do not accrete.
+6. **Log decisions and discoveries to `docs/CHANGELOG.md`** the moment they happen, not retrospectively (see the Changelog Discipline section below for the rules). The active-state file is the short index; CHANGELOG is the full prose.
+7. **Add comments on the Flow card** when a meaningful course correction lands (architecture pivot, scope change accepted by the owner, blocker resolution). Keep these short — they exist so a future reviewer scrolling the card sees the major moments without diving into git.
+
+### When CODE-COMPLETE (ready for review)
+
+8. **Local verification before push.** Run the full local equivalents of CI: `uv run pytest apps/api -q`, `uv run ruff check apps/api`, `uv run ruff format --check apps/api`, `make typecheck`. The first three are the must-pass gates; `make lint` overall is currently red on a pre-existing dashboard issue (see CHANGELOG entry on 02/06/2026 for context) so check the Python half only.
+9. **Run the `/pre-pr-review` hardening gate — REQUIRED, do not skip.** This is a deep, adversarial self-review of the diff (see `.claude/skills/pre-pr-review/SKILL.md`). It applies the project's hardening lenses: shared/reused seams judged against ALL callers + concurrent use (not just the first caller or its protective cap), failure paths INCLUDING transport-level errors (timeouts/resets, not only typed errors), idempotency / replay / at-least-once windows, and a success-AND-failure-AND-replay test matrix. **Every finding is FIXED (or consciously deferred with a logged reason + owning ticket) and the full suite re-run green before proceeding.** The bar: a diff that has already been stress-tested for the failure and concurrency cases, not just the happy path.
+10. **Append the per-ticket entry to `docs/CHANGELOG.md`** under `[Unreleased]` with date heading `### DD/MM/YYYY - <ticket>: <short title>`. Bullets tagged Added / Changed / Removed / Decision / Discovery / Fixed / Verified, matching the format every prior ticket uses (read the latest 2-3 entries before writing to keep the voice consistent).
+11. **Push the branch** as `feat/<ticket-id>-<slug>` (or `fix/...`, `docs/...`, etc.). Open a PR against `main` using the project's PR template (Summary / StrikeFlow card / Test plan / Checklist sections).
+12. **Move the Flow card to "To Review"** via `mcp__flow__cards_move`.
+13. **Drop a completion comment on the Flow card** via `mcp__flow__cards_add_note`. Standard sections: what was built (bullets), verification (test counts + local commands run + the `/pre-pr-review` pass), known follow-ups not in this PR's scope (so a reviewer or future-self can spot the parking lot).
+14. **Update `project_active_state.md`**: ticket entry status becomes "code-complete, awaiting human review", note any outstanding actions still required (e.g. "append CI-green Verified bullet after green").
+
+### After CI lands GREEN
+
+15. **Append a `**Verified**: CI run <run-id> on the PR's HEAD commit (<sha>) is 5/5 GREEN ...` bullet** to the same CHANGELOG entry, listing each job that passed. Pattern set by the CI-green entry on 04/06/2026 (CHANGELOG line ~52).
+16. **Commit the changelog update** as a small `docs: log CI 5/5 green for <ticket-id>` commit on the same branch and push. CI runs once more; once it's green again, the PR is ready for merge.
+17. **Update `project_active_state.md`** to clear the "after CI lands green" outstanding action.
+
+### When the PR is MERGED + branch is deleted
+
+18. **In `project_active_state.md`**, move the ticket entry from "Currently in flight" into "Recently completed (current sprint, for context)" at the top of that list. Promote whichever ticket is next-up into "Currently in flight" (its initial sub-task checklist + plan slot stay empty until work actually starts).
+19. **Any newly-discovered follow-ups** that were not tracked under "Open follow-ups discovered" should be added there now, with a one-line rationale + a proposed ticket id (e.g. "S1-25c").
+
+### Universal rules
+
+- **Never ask permission to update the changelog, the Flow card, or `project_active_state.md`.** Logging is unconditional and automatic; these three sources of truth must reflect reality at all times.
+- **The active-state file is the index; CHANGELOG is the prose; Flow is the human-visible status.** When the three disagree, the active-state file is the most likely to be wrong (it can drift if a step is skipped) — fix it first, then update whichever others lag.
+- **External-system writes are reversible-low-blast-radius.** Flow card moves, card comments, changelog appends, and memory-file overwrites do not require explicit user confirmation; they are part of the operating contract.
 
 ## Changelog Discipline
 

@@ -33,6 +33,23 @@ CURRENT_STEP_VALUES: tuple[str, ...] = (
     CURRENT_STEP_LIVE,
 )
 
+# `document_kind` enum on `documents`. Source: 0006_create_remaining_tables.py
+# `DOCUMENT_KIND_VALUES`. Written by the fan-outs that persist artefacts:
+# S1-25b stores the signed PDF as `pandadoc_signed_pdf`; S1-27/S1-28 store
+# `transcript_text`; the research scraper stores `scraped_page`; the kick-off
+# email generator stores `kickoff_followup_email_body`.
+DOCUMENT_KIND_TRANSCRIPT_TEXT = "transcript_text"
+DOCUMENT_KIND_SCRAPED_PAGE = "scraped_page"
+DOCUMENT_KIND_KICKOFF_FOLLOWUP_EMAIL_BODY = "kickoff_followup_email_body"
+DOCUMENT_KIND_PANDADOC_SIGNED_PDF = "pandadoc_signed_pdf"
+
+DOCUMENT_KIND_VALUES: tuple[str, ...] = (
+    DOCUMENT_KIND_TRANSCRIPT_TEXT,
+    DOCUMENT_KIND_SCRAPED_PAGE,
+    DOCUMENT_KIND_KICKOFF_FOLLOWUP_EMAIL_BODY,
+    DOCUMENT_KIND_PANDADOC_SIGNED_PDF,
+)
+
 
 __all__ = [
     "CURRENT_STEP_AGREEMENT",
@@ -43,4 +60,9 @@ __all__ = [
     "CURRENT_STEP_SALES_CALL",
     "CURRENT_STEP_SIGNED",
     "CURRENT_STEP_VALUES",
+    "DOCUMENT_KIND_KICKOFF_FOLLOWUP_EMAIL_BODY",
+    "DOCUMENT_KIND_PANDADOC_SIGNED_PDF",
+    "DOCUMENT_KIND_SCRAPED_PAGE",
+    "DOCUMENT_KIND_TRANSCRIPT_TEXT",
+    "DOCUMENT_KIND_VALUES",
 ]

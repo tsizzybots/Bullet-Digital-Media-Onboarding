@@ -277,6 +277,49 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- S1-25b Cloudflare R2 object storage (S3-compatible) -----
+    r2_account_id: str = Field(
+        default="",
+        description=(
+            "Cloudflare R2 account id. Used to build the S3 endpoint "
+            "(https://<account_id>.r2.cloudflarestorage.com). Empty in local dev / tests "
+            "(the FakeStorageClient is used); set in the Render staging / prod env groups."
+        ),
+    )
+    r2_access_key_id: str = Field(
+        default="",
+        description=(
+            "R2 S3 access key id. Empty in local dev / tests; R2StorageClient fails loudly "
+            "(RuntimeError) on a real call when empty, so a mis-configured deployment is "
+            "loud rather than silently storing nothing."
+        ),
+    )
+    r2_secret_access_key: str = Field(
+        default="",
+        description=(
+            "R2 S3 secret access key. Empty in local dev / tests; set in the Render env groups."
+        ),
+    )
+    r2_bucket_name: str = Field(
+        default="",
+        description=(
+            "R2 bucket the signed PDFs (and later transcripts / scraped pages) are written "
+            "to. Empty in local dev / tests; set in the Render staging / prod env groups."
+        ),
+    )
+
+    @property
+    def r2_endpoint_url(self) -> str:
+        """The R2 S3-compatible endpoint, derived from the account id.
+
+        Empty when `r2_account_id` is unset (local dev / tests), which keeps the
+        derived value falsy so `R2StorageClient` fails loudly rather than building
+        a malformed endpoint.
+        """
+        if not self.r2_account_id:
+            return ""
+        return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
