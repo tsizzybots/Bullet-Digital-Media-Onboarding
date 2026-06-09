@@ -23,6 +23,19 @@ Correctness rules:
   success), the function records the action as `success` against the
   existing id and returns without calling GHL - never double-create a
   location.
+- **Returning-client check (S1-26).** Before provisioning, the function
+  looks for an existing sub-account two ways and reuses it instead of
+  creating a duplicate: (1) a prior `clients` row with the same email
+  (citext) that already holds a `ghl_subaccount_id` - the new row is linked
+  via `parent_client_id` to the original root and the id is reused; (2) no
+  DB sibling, so a live GHL lookup-by-email runs on EVERY create attempt
+  before the POST - this catches a client that exists in GHL but not our DB
+  AND closes S1-25's at-least-once duplicate-create window (a retry after a
+  lost create response finds the orphaned location rather than creating a
+  second one). Either reuse is recorded as a `success` action carrying a
+  `response.skipped_existing` + `response.reason` marker (no new enum value;
+  see plan). A per-email concurrency cap serialises same-email processing so
+  two different rows sharing an email cannot both create.
 - **Commit the `in_progress` row BEFORE the GHL call**, then commit the
   terminal (`success`/`failed`) state after. A crash mid-call therefore
   leaves a visible `in_progress` row in the dashboard rather than a silent
@@ -67,6 +80,14 @@ log = logging.getLogger(__name__)
 GHL_PLATFORM = "ghl"
 GHL_CREATE_SUBACCOUNT_ACTION = "create_subaccount"
 
+# S1-26 returning-client reuse reasons, recorded on the `success` action's
+# `response.reason` marker. There is no `skipped_existing` value in the
+# `platform_action_status` enum (and we deliberately do not add one - see the
+# S1-26 plan); a reuse is a terminal success against the reused id, marked by
+# `response.skipped_existing` + `response.reason` for auditing.
+GHL_SKIP_REASON_DB_SIBLING = "db_sibling"
+GHL_SKIP_REASON_GHL_LOOKUP = "ghl_lookup"
+
 
 class ClientNotFoundError(LookupError):
     """The `client.created` event references a `clients` row that does not exist.
@@ -88,13 +109,17 @@ class CreateSubaccountResult:
 
     `ghl_subaccount_id` is the surviving sub-account id. `created` is True
     only when a fresh GHL location was provisioned on this run. `skipped`
-    is True when the client already had a sub-account (or the action had
-    already succeeded) and no GHL call was made.
+    is True when no fresh location was created - either the client already
+    had a sub-account, the action had already succeeded, or S1-26's
+    returning-client check reused an existing sub-account (DB sibling or
+    live GHL lookup). `parent_client_id` is set only when a DB sibling was
+    found and this row was linked to the original client's root id.
     """
 
     ghl_subaccount_id: str | None
     created: bool
     skipped: bool
+    parent_client_id: uuid.UUID | None = None
 
 
 def _build_location_payload(
@@ -148,20 +173,22 @@ async def create_ghl_subaccount_core(
     snapshot_id: str = "",
     inngest_run_id: str | None = None,
 ) -> CreateSubaccountResult:
-    """Create (or resume / skip) the GHL sub-account for one client.
+    """Create (or resume / reuse / skip) the GHL sub-account for one client.
 
-    Steps: load the client, short-circuit if already provisioned, record
-    an `in_progress` action + COMMIT, call GHL, then on success record
+    Steps: load the client; short-circuit if already provisioned; reuse a
+    DB sibling's sub-account if this is a returning client (link
+    `parent_client_id`); else record an `in_progress` action + COMMIT, look
+    GHL up by email, reuse if found, else POST create; on success record
     `success` + write `ghl_subaccount_id` back + COMMIT, or on error record
     `failed` + COMMIT and re-raise.
 
     Raises:
         ClientNotFoundError: no `clients` row for `client_id`. Rolls back.
-        Exception: any failure of the GHL create-location call (GhlClientError
-            4xx, GhlServerError 5xx/429, an httpx timeout / transport error,
-            or an empty-config RuntimeError) is recorded as a `failed` action
-            and committed, then re-raised unchanged so the wrapper can decide
-            retriable vs not.
+        Exception: any failure of the GHL lookup OR create-location call
+            (GhlClientError 4xx, GhlServerError 5xx/429, an httpx timeout /
+            transport error, or an empty-config RuntimeError) is recorded as
+            a `failed` action and committed, then re-raised unchanged so the
+            wrapper can decide retriable vs not.
     """
     client = (
         await session.execute(
@@ -213,6 +240,82 @@ async def create_ghl_subaccount_core(
             ghl_subaccount_id=client.ghl_subaccount_id, created=False, skipped=True
         )
 
+    # S1-26 returning-client check (1/2): local DB sibling. If a PRIOR
+    # clients row with the same email already holds a ghl_subaccount_id,
+    # this is a returning client (e.g. signing for a second gym/site). Link
+    # this row to the original ROOT (`COALESCE(parent_client_id, id)`, which
+    # keeps a flat two-level tree rather than chains) and reuse the existing
+    # sub-account id - never provision a second location for the same client.
+    # email is citext, so the match is case-insensitive. Earliest row wins so
+    # the root is stable across multiple returning signings.
+    sibling = (
+        await session.execute(
+            text(
+                "SELECT id, COALESCE(parent_client_id, id) AS root_id, ghl_subaccount_id "
+                "FROM clients "
+                "WHERE email = :email AND id <> :client_id "
+                "      AND ghl_subaccount_id IS NOT NULL "
+                "ORDER BY created_at ASC "
+                "LIMIT 1"
+            ),
+            {"email": client.email, "client_id": client_id},
+        )
+    ).one_or_none()
+    if sibling is not None:
+        begun = await begin_action(
+            session,
+            client_id=client_id,
+            event_id=onboarding_event_id,
+            platform=GHL_PLATFORM,
+            action=GHL_CREATE_SUBACCOUNT_ACTION,
+            idempotency_key=idempotency_key,
+            payload=None,
+            inngest_run_id=inngest_run_id,
+        )
+        if not begun.already_succeeded:
+            await complete_action(
+                session,
+                action_id=begun.action_id,
+                external_id=sibling.ghl_subaccount_id,
+                response={
+                    "skipped_existing": True,
+                    "reason": GHL_SKIP_REASON_DB_SIBLING,
+                    "ghl_subaccount_id": sibling.ghl_subaccount_id,
+                    "parent_client_id": str(sibling.root_id),
+                    "sibling_client_id": str(sibling.id),
+                },
+            )
+            # Link the new row to the original root and reuse the sub-account
+            # id. Guard with `ghl_subaccount_id IS NULL` so a concurrent
+            # writer is never clobbered.
+            await session.execute(
+                text(
+                    "UPDATE clients "
+                    "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
+                    "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+                ),
+                {
+                    "root_id": sibling.root_id,
+                    "ghl_id": sibling.ghl_subaccount_id,
+                    "client_id": client_id,
+                },
+            )
+        await session.commit()
+        log.info(
+            "S1-26 GHL sub-account reused (returning client, DB sibling)",
+            extra={
+                "client_id": str(client_id),
+                "ghl_subaccount_id": sibling.ghl_subaccount_id,
+                "parent_client_id": str(sibling.root_id),
+            },
+        )
+        return CreateSubaccountResult(
+            ghl_subaccount_id=sibling.ghl_subaccount_id,
+            created=False,
+            skipped=True,
+            parent_client_id=sibling.root_id,
+        )
+
     payload = _build_location_payload(
         company_id=company_id,
         snapshot_id=snapshot_id,
@@ -234,28 +337,26 @@ async def create_ghl_subaccount_core(
         payload=payload,
         inngest_run_id=inngest_run_id,
     )
-    # COMMIT the in_progress row before the external call so a crash
-    # mid-POST leaves a visible row rather than a silent gap.
+    # COMMIT the in_progress row before the external calls so a crash
+    # mid-lookup / mid-POST leaves a visible row rather than a silent gap.
     await session.commit()
 
     # A replay whose action already succeeded short-circuits without a
-    # second GHL POST. (The already-provisioned check above normally
+    # second GHL call. (The already-provisioned check above normally
     # catches this first; this guards the torn-state edge.)
     if begun.already_succeeded:
         return CreateSubaccountResult(
             ghl_subaccount_id=client.ghl_subaccount_id, created=False, skipped=True
         )
 
-    try:
-        location = await ghl_client.create_location(payload)
-    except Exception as exc:
-        # Record ANY failure of the create-location call as `failed`, then
-        # re-raise unchanged. Catching only GhlClientError/GhlServerError let
-        # a transport-level error (an httpx timeout / connection reset, which
-        # carries no HTTP status) bypass fail_action and leave the row stuck
-        # `in_progress`; a response-lost read timeout is also the worst case
-        # of the at-least-once create window deferred to S1-26, so it must be
-        # visible. The wrapper still decides retriable-vs-not from the
+    async def _record_failure(exc: Exception) -> None:
+        # Record ANY failure of the lookup OR create call as `failed`, then
+        # the caller re-raises unchanged. Catching only GhlClientError/
+        # GhlServerError would let a transport-level error (an httpx timeout /
+        # connection reset, which carries no HTTP status) bypass fail_action
+        # and leave the row stuck `in_progress`; a response-lost read timeout
+        # is also the worst case of the at-least-once create window, so it
+        # must be visible. The wrapper still decides retriable-vs-not from the
         # re-raised exception type.
         await fail_action(session, action_id=begun.action_id, last_error=str(exc))
         await session.commit()
@@ -267,6 +368,52 @@ async def create_ghl_subaccount_core(
                 "error": str(exc),
             },
         )
+
+    # S1-26 returning-client check (2/2): no DB sibling, so look GHL up
+    # directly by email BEFORE POSTing. This catches a client that exists in
+    # GHL but not in our DB, and - critically - closes S1-25's at-least-once
+    # duplicate-create window: a retry after a lost create response finds the
+    # orphaned location here instead of creating a second one. The lookup
+    # runs on EVERY create attempt (rider a).
+    try:
+        existing = await ghl_client.find_location_by_email(client.email, company_id=company_id)
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
+
+    if existing is not None:
+        await complete_action(
+            session,
+            action_id=begun.action_id,
+            external_id=existing.id,
+            response={
+                "skipped_existing": True,
+                "reason": GHL_SKIP_REASON_GHL_LOOKUP,
+                "ghl_subaccount_id": existing.id,
+            },
+        )
+        await session.execute(
+            text(
+                "UPDATE clients SET ghl_subaccount_id = :ghl_id "
+                "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+            ),
+            {"ghl_id": existing.id, "client_id": client_id},
+        )
+        await session.commit()
+        log.info(
+            "S1-26 GHL sub-account reused (returning client, GHL lookup)",
+            extra={
+                "client_id": str(client_id),
+                "ghl_subaccount_id": existing.id,
+                "action_id": str(begun.action_id),
+            },
+        )
+        return CreateSubaccountResult(ghl_subaccount_id=existing.id, created=False, skipped=True)
+
+    try:
+        location = await ghl_client.create_location(payload)
+    except Exception as exc:
+        await _record_failure(exc)
         raise
 
     await complete_action(
@@ -309,6 +456,15 @@ async def create_ghl_subaccount_core(
         # so two concurrent `client.created` deliveries cannot both POST a
         # location before either commits its `ghl_subaccount_id`.
         inngest.Concurrency(key="event.data.client_id", limit=1, scope="fn"),
+        # Per-email cap (S1-26): serialise processing for the same email so
+        # two DIFFERENT client rows that share an email (two near-simultaneous
+        # returning signings) cannot both pass the returning-client check and
+        # create duplicate locations - the second waits, then finds the first
+        # as a committed DB sibling. Residual: the key is a raw string while
+        # `clients.email` is citext, so different casings ("X@y.com" vs
+        # "x@Y.COM") won't serialise here - the citext DB sibling SELECT and
+        # the GHL lookup are the correctness backstop for that narrow case.
+        inngest.Concurrency(key="event.data.email", limit=1, scope="fn"),
     ],
 )
 async def create_ghl_subaccount(ctx: inngest.Context, step: inngest.Step) -> dict:
@@ -358,12 +514,17 @@ async def create_ghl_subaccount(ctx: inngest.Context, step: inngest.Step) -> dic
         "ghl_subaccount_id": result.ghl_subaccount_id,
         "created": result.created,
         "skipped": result.skipped,
+        "parent_client_id": (
+            str(result.parent_client_id) if result.parent_client_id is not None else None
+        ),
     }
 
 
 __all__ = [
     "GHL_CREATE_SUBACCOUNT_ACTION",
     "GHL_PLATFORM",
+    "GHL_SKIP_REASON_DB_SIBLING",
+    "GHL_SKIP_REASON_GHL_LOOKUP",
     "ClientNotFoundError",
     "CreateSubaccountResult",
     "create_ghl_subaccount",

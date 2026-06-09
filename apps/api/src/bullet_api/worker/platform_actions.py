@@ -146,13 +146,17 @@ async def complete_action(
     `completed_at` is stamped now. `external_id` is the resource id the
     external platform returned (e.g. the GHL sub-account id), surfaced in
     the dashboard and copied onto the relevant `clients.*` column by the
-    caller.
+    caller. `last_error` is cleared: an action that previously `failed`
+    (e.g. a create whose response was lost, recovered on a later retry by
+    S1-26's lookup-and-reuse) must not keep a stale error on the now-success
+    row, or the dashboard shows a green action carrying an error string.
     """
     await session.execute(
         text(
             "UPDATE platform_actions "
             "SET status = :status, external_id = :external_id, "
-            "    response = cast(:response AS jsonb), completed_at = now() "
+            "    response = cast(:response AS jsonb), completed_at = now(), "
+            "    last_error = NULL "
             "WHERE id = :action_id"
         ),
         {

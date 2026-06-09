@@ -89,6 +89,23 @@ class GhlClient(Protocol):
         """
         ...
 
+    async def find_location_by_email(self, email: str, *, company_id: str) -> GhlLocation | None:
+        """Look up an existing sub-account (location) for `email` under the agency.
+
+        Used by S1-26's returning-client check to avoid creating a duplicate
+        sub-account: if a location already exists for the signed-document
+        email, the caller reuses its id instead of POSTing a new one. This
+        also closes S1-25's at-least-once duplicate-create window - a retry
+        after a lost create response finds the orphaned location here rather
+        than provisioning a second one.
+
+        Returns the matching location (first hit) or None when no location
+        exists for the email. "No match" is a normal answer, NOT an error.
+        Raises GhlClientError on 4xx and GhlServerError on 5xx/429, same
+        split as `create_location`.
+        """
+        ...
+
 
 class HttpGhlClient:
     """Production client - POSTs the GHL create-location endpoint.
@@ -143,19 +160,67 @@ class HttpGhlClient:
             raise GhlServerError(response.status_code, response.text)
         raise GhlClientError(response.status_code, response.text)
 
+    async def find_location_by_email(self, email: str, *, company_id: str) -> GhlLocation | None:
+        if not self._api_key:
+            raise RuntimeError(
+                "GHL_AGENCY_API_KEY is empty; cannot look up sub-account. "
+                "Set it on the Render env group."
+            )
+        # CONFIRM PRE-PROD: GHL agency location search shape. Best-guess is
+        # GET /locations/search?companyId=&email=&limit=1 returning
+        # {"locations": [...]}. No live GHL access yet, so the exact path,
+        # query params, and response envelope are confirmed against the real
+        # API before rollout - same deferred posture as `create_location`.
+        async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+            response = await client.get(
+                f"{self._base_url}/locations/search",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Version": self._version,
+                },
+                params={"companyId": company_id, "email": email, "limit": 1},
+            )
+        if 200 <= response.status_code < 300:
+            body = response.json()
+            locations = body.get("locations") or []
+            if not locations:
+                return None
+            hit = locations[0]
+            return GhlLocation(
+                id=str(hit["id"]),
+                name=hit.get("name", ""),
+                company_id=str(hit.get("companyId", "")),
+                raw=hit,
+            )
+        # A 404 on the search endpoint means "no such resource", which we
+        # treat as "no existing location" rather than a hard error.
+        if response.status_code == 404:
+            return None
+        if response.status_code == 429 or response.status_code >= 500:
+            raise GhlServerError(response.status_code, response.text)
+        raise GhlClientError(response.status_code, response.text)
+
 
 @dataclass
 class FakeGhlClient:
     """Test double.
 
-    Returns `location` when set, or raises `error` when set (set exactly
-    one). Records every payload it was called with on `calls` so tests can
-    assert on the request body (e.g. that `snapshotId` is present/absent).
+    `create_location` returns `location` when set, or raises `error` when
+    set (set exactly one). Records every create payload on `calls` so tests
+    can assert on the request body (e.g. that `snapshotId` is present/absent).
+
+    `find_location_by_email` returns `lookup_result` (default None = "no
+    existing location", the common case so existing create-path tests
+    proceed to create unchanged), or raises `lookup_error` when set. Records
+    every lookup on `lookup_calls` as `(email, company_id)`.
     """
 
     location: GhlLocation | None = None
     error: Exception | None = None
     calls: list[dict] = field(default_factory=list)
+    lookup_result: GhlLocation | None = None
+    lookup_error: Exception | None = None
+    lookup_calls: list[tuple[str, str]] = field(default_factory=list)
 
     async def create_location(self, payload: dict) -> GhlLocation:
         self.calls.append(payload)
@@ -164,6 +229,12 @@ class FakeGhlClient:
         if self.location is None:
             raise AssertionError("FakeGhlClient has neither location nor error configured")
         return self.location
+
+    async def find_location_by_email(self, email: str, *, company_id: str) -> GhlLocation | None:
+        self.lookup_calls.append((email, company_id))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return self.lookup_result
 
 
 def get_ghl_client() -> GhlClient:

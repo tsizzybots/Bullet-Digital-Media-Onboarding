@@ -91,3 +91,82 @@ async def test_429_and_5xx_raise_server_error(status_code: int) -> None:
     with pytest.raises(GhlServerError) as exc:
         await client.create_location({"name": "Gym", "companyId": "c"})
     assert exc.value.status_code == status_code
+
+
+# --------------------------------------------------------------------------- #
+# find_location_by_email (S1-26 returning-client lookup)
+# --------------------------------------------------------------------------- #
+
+
+async def test_find_location_by_email_returns_first_hit() -> None:
+    transport = _transport(
+        200,
+        {"locations": [{"id": "loc_x", "name": "Returning Gym", "companyId": "comp_1"}]},
+    )
+    client = HttpGhlClient(api_key="agency-key", transport=transport)
+
+    location = await client.find_location_by_email("signer@example.com", company_id="comp_1")
+
+    assert isinstance(location, GhlLocation)
+    assert location.id == "loc_x"
+    assert location.name == "Returning Gym"
+    assert location.company_id == "comp_1"
+
+
+async def test_find_location_by_email_sends_expected_url_and_params() -> None:
+    transport = _transport(200, {"locations": []})
+    client = HttpGhlClient(api_key="agency-key", transport=transport)
+
+    await client.find_location_by_email("signer@example.com", company_id="comp_1")
+
+    request: httpx.Request = transport.captured["request"]  # type: ignore[attr-defined]
+    assert request.method == "GET"
+    assert request.url.path == "/locations/search"
+    assert request.url.params["companyId"] == "comp_1"
+    assert request.url.params["email"] == "signer@example.com"
+    assert request.headers["Authorization"] == "Bearer agency-key"
+    assert request.headers["Version"] == GHL_API_VERSION
+
+
+async def test_find_location_by_email_empty_list_returns_none() -> None:
+    transport = _transport(200, {"locations": []})
+    client = HttpGhlClient(api_key="agency-key", transport=transport)
+    assert await client.find_location_by_email("nobody@example.com", company_id="c") is None
+
+
+async def test_find_location_by_email_missing_key_returns_none() -> None:
+    # Defensive: a 2xx body without a `locations` key is treated as no match.
+    transport = _transport(200, {})
+    client = HttpGhlClient(api_key="agency-key", transport=transport)
+    assert await client.find_location_by_email("nobody@example.com", company_id="c") is None
+
+
+async def test_find_location_by_email_404_returns_none() -> None:
+    transport = _transport(404, "not found")
+    client = HttpGhlClient(api_key="agency-key", transport=transport)
+    assert await client.find_location_by_email("nobody@example.com", company_id="c") is None
+
+
+async def test_find_location_by_email_empty_api_key_raises_runtime_error() -> None:
+    client = HttpGhlClient(api_key="")
+    with pytest.raises(RuntimeError) as exc:
+        await client.find_location_by_email("a@b.com", company_id="c")
+    assert "GHL_AGENCY_API_KEY" in str(exc.value)
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 422])
+async def test_find_location_by_email_4xx_raises_client_error(status_code: int) -> None:
+    transport = _transport(status_code, "bad request")
+    client = HttpGhlClient(api_key="agency-key", transport=transport)
+    with pytest.raises(GhlClientError) as exc:
+        await client.find_location_by_email("a@b.com", company_id="c")
+    assert exc.value.status_code == status_code
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 502, 503])
+async def test_find_location_by_email_429_and_5xx_raise_server_error(status_code: int) -> None:
+    transport = _transport(status_code, "upstream error")
+    client = HttpGhlClient(api_key="agency-key", transport=transport)
+    with pytest.raises(GhlServerError) as exc:
+        await client.find_location_by_email("a@b.com", company_id="c")
+    assert exc.value.status_code == status_code
