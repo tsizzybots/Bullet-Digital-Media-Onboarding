@@ -14,6 +14,7 @@ from typing import Protocol
 import httpx
 
 from bullet_api.config import get_settings
+from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, PandaDocAccount, api_key_for
 
 # PandaDoc's REST base. The document-detail endpoint is
 # GET {base}/public/v1/documents/{id}/details and auth is the header
@@ -96,7 +97,8 @@ class HttpPandaDocClient:
         if not self._api_key:
             # Fail loudly rather than silently 404, mirroring ResendEmailClient.
             raise RuntimeError(
-                "PANDADOC_API_KEY is empty; cannot fetch document. Set it on the Render env group."
+                "PandaDoc API key is empty; cannot fetch document. "
+                "Set PANDADOC_API_KEY_UK / PANDADOC_API_KEY_INT on the Render env group."
             )
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.get(
@@ -111,8 +113,8 @@ class HttpPandaDocClient:
     async def download_document(self, document_id: str) -> bytes:
         if not self._api_key:
             raise RuntimeError(
-                "PANDADOC_API_KEY is empty; cannot download document. "
-                "Set it on the Render env group."
+                "PandaDoc API key is empty; cannot download document. "
+                "Set PANDADOC_API_KEY_UK / PANDADOC_API_KEY_INT on the Render env group."
             )
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.get(
@@ -166,6 +168,17 @@ class FakePandaDocClient:
             raise PandaDocNotFound(document_id) from None
 
 
-def get_pandadoc_client() -> PandaDocClient:
-    """FastAPI dependency. Tests override this with a FakePandaDocClient."""
-    return HttpPandaDocClient(api_key=get_settings().pandadoc_api_key)
+def get_pandadoc_client(account: PandaDocAccount = PANDADOC_ACCOUNT_UK) -> PandaDocClient:
+    """FastAPI dependency / factory for a PandaDoc client bound to one account.
+
+    When used as a FastAPI dependency (the S1-24 replay endpoint), `account` is
+    read from the ``?account=`` query param (default ``uk``) and FastAPI
+    validates it against the allowed values, returning 422 for anything else.
+    The returned client uses that account's API key (S1-25c). Tests override
+    this dependency with a FakePandaDocClient.
+    """
+    settings = get_settings()
+    return HttpPandaDocClient(
+        api_key=api_key_for(account, settings),
+        base_url=settings.pandadoc_api_base_url,
+    )

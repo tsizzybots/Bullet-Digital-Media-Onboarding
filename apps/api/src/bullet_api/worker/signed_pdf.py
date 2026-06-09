@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bullet_api.config import get_settings
 from bullet_api.db.enums import DOCUMENT_KIND_PANDADOC_SIGNED_PDF
 from bullet_api.db.session import AsyncSessionLocal
+from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, api_key_for
 from bullet_api.pandadoc.client import HttpPandaDocClient, PandaDocClient, PandaDocNotFound
 from bullet_api.storage.client import StorageClient, get_storage_client
 from bullet_api.worker._inngest import inngest_client
@@ -265,10 +266,13 @@ async def store_signed_pdf(ctx: inngest.Context, step: inngest.Step) -> dict:
     document_id = str(ctx.event.data["document_id"])
     raw_event_id = ctx.event.data.get("onboarding_event_id")
     onboarding_event_id = uuid.UUID(raw_event_id) if raw_event_id else None
+    # PandaDoc account this signing came from (S1-25c), propagated on
+    # client.created. Default UK for events emitted before S1-25c.
+    account = ctx.event.data.get("account", PANDADOC_ACCOUNT_UK)
 
     settings = get_settings()
     pandadoc_client = HttpPandaDocClient(
-        api_key=settings.pandadoc_api_key,
+        api_key=api_key_for(account, settings),
         base_url=settings.pandadoc_api_base_url,
     )
     storage = get_storage_client()
@@ -287,7 +291,7 @@ async def store_signed_pdf(ctx: inngest.Context, step: inngest.Step) -> dict:
         except (ClientNotFoundError, PandaDocNotFound, EmptyPdfError) as exc:
             raise inngest.NonRetriableError(str(exc)) from exc
         except RuntimeError as exc:
-            # Empty PANDADOC_API_KEY or unconfigured R2 - a misconfigured
+            # Empty PandaDoc API key or unconfigured R2 - a misconfigured
             # deploy that cannot self-heal on retry.
             raise inngest.NonRetriableError(str(exc)) from exc
 
@@ -297,6 +301,7 @@ async def store_signed_pdf(ctx: inngest.Context, step: inngest.Step) -> dict:
         "r2_key": result.r2_key,
         "stored": result.stored,
         "skipped": result.skipped,
+        "account": account,
     }
 
 

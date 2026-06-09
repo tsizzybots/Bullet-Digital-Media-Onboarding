@@ -34,12 +34,13 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.auth import CurrentUser, require_role
 from bullet_api.db import get_session
 from bullet_api.pandadoc import PandaDocClient, PandaDocNotFound, get_pandadoc_client
+from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, PandaDocAccount
 from bullet_api.webhooks.pandadoc import persist_and_emit_signed_documents
 from bullet_api.webhooks.pandadoc_core import extract_signed_documents
 from bullet_api.worker import EventEmitter, get_event_emitter
@@ -58,8 +59,16 @@ async def replay_pandadoc_document(
     db: Annotated[AsyncSession, Depends(get_session)],
     client: Annotated[PandaDocClient, Depends(get_pandadoc_client)],
     emitter: Annotated[EventEmitter, Depends(get_event_emitter)],
+    account: Annotated[PandaDocAccount, Query()] = PANDADOC_ACCOUNT_UK,
 ) -> dict:
     """Re-drive the signing fan-out for an already-completed PandaDoc document.
+
+    `account` (S1-25c, query param, default `uk`) selects which PandaDoc
+    account to fetch from - the injected `client` is bound to that account's
+    API key (see `get_pandadoc_client`), and the account is stamped on the
+    `onboarding_events` row + carried on the emitted `pandadoc.signed` event so
+    the fan-out uses the matching key. FastAPI validates `account` (422 for any
+    value other than `uk`/`int`).
 
     Returns the same envelope as the webhook:
     `{"status": "accepted"|"duplicate"|"ignored", "events": N}`.
@@ -84,4 +93,4 @@ async def replay_pandadoc_document(
         # Found but not signed/completed -> ack and ignore, like the webhook.
         return {"status": "ignored", "events": 0}
 
-    return await persist_and_emit_signed_documents(documents, db, emitter)
+    return await persist_and_emit_signed_documents(documents, db, emitter, account=account)

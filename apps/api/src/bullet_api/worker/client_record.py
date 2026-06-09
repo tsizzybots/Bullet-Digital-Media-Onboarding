@@ -57,7 +57,7 @@ Correctness rules:
   `inngest.NonRetriableError` so Inngest dead-letters immediately - the
   document body cannot self-heal on retry.
 - A PandaDoc 404 (document deleted between webhook and orchestrator) and
-  an empty `PANDADOC_API_KEY` are likewise wrapped as NonRetriable.
+  an empty PandaDoc API key are likewise wrapped as NonRetriable.
   Other PandaDoc errors (5xx, 429, timeout) propagate naturally so
   Inngest retries them.
 - An orphan `onboarding_events.id` (audit row not visible) raises
@@ -92,6 +92,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bullet_api.config import get_settings
 from bullet_api.db.enums import CURRENT_STEP_SIGNED
 from bullet_api.db.session import AsyncSessionLocal
+from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, api_key_for
 from bullet_api.pandadoc.client import HttpPandaDocClient, PandaDocClient, PandaDocNotFound
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.clients_payload import (
@@ -165,7 +166,7 @@ async def fetch_document_for_orchestrator(
     """Fetch the PandaDoc document body, translating NonRetriable causes.
 
     PandaDocNotFound (404 - document deleted) and RuntimeError (empty
-    PANDADOC_API_KEY - mis-configured deploy) both indicate failures
+    PandaDoc API key - mis-configured deploy) both indicate failures
     that retry will not fix; wrap them in `inngest.NonRetriableError` so
     Inngest dead-letters the run immediately rather than burning the
     default retry budget. Other errors (httpx 5xx, 429, timeout)
@@ -189,6 +190,7 @@ async def create_client_record_core(
     document_id: str,
     document: dict,
     emitter: EventEmitter,
+    account: str = PANDADOC_ACCOUNT_UK,
 ) -> CreateClientResult:
     """Run the S1-25a orchestrator step against an explicit session +
     already-fetched document body + emitter.
@@ -297,6 +299,9 @@ async def create_client_record_core(
             "onboarding_event_id": str(onboarding_event_id),
             "document_id": document_id,
             "email": fields.email,
+            # Propagate the PandaDoc account (S1-25c) so the signed-PDF worker
+            # downloads with the matching account's API key.
+            "account": account,
         },
     )
 
@@ -373,10 +378,14 @@ async def create_client_record(ctx: inngest.Context, step: inngest.Step) -> dict
     """
     onboarding_event_id = uuid.UUID(ctx.event.data["onboarding_event_id"])
     document_id = str(ctx.event.data["document_id"])
+    # PandaDoc account this signing came from (S1-25c). Default to UK for events
+    # produced before S1-25c (or any producer that omits it), so in-flight
+    # `pandadoc.signed` events keep working through the deploy.
+    account = ctx.event.data.get("account", PANDADOC_ACCOUNT_UK)
 
     settings = get_settings()
     pandadoc_client = HttpPandaDocClient(
-        api_key=settings.pandadoc_api_key,
+        api_key=api_key_for(account, settings),
         base_url=settings.pandadoc_api_base_url,
     )
 
@@ -392,6 +401,7 @@ async def create_client_record(ctx: inngest.Context, step: inngest.Step) -> dict
                 document_id=document_id,
                 document=document,
                 emitter=InngestEventEmitter(inngest_client),
+                account=account,
             )
         except PandaDocPayloadError as exc:
             # Structural data error - retry will not produce the missing
@@ -407,6 +417,7 @@ async def create_client_record(ctx: inngest.Context, step: inngest.Step) -> dict
         "client_id": str(result.client_id),
         "created": result.created,
         "document_id": document_id,
+        "account": account,
     }
 
 

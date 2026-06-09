@@ -1,15 +1,16 @@
 """Inspect a real PandaDoc document's shape to pin S1-25a field names.
 
-Fetches `GET /public/v1/documents/{id}/details` against the API key in
-`.env` and prints field names + types only (no values). Used once to
-verify Bullet's UK template token/field names; re-run against the INT key
-to confirm the shapes match. Auto-picks the most recent completed doc if
-no id is passed.
+Fetches `GET /public/v1/documents/{id}/details` against a per-account API key
+in `.env` and prints field names + types only (no values). Used to verify
+Bullet's template token/field names; pass `--account int` to inspect the
+International account (S1-25c). Auto-picks the most recent completed doc if no
+id is passed.
 
 Run from the repo root:
 
     uv run python apps/api/scripts/inspect_pandadoc_document.py
     uv run python apps/api/scripts/inspect_pandadoc_document.py <doc-id>
+    uv run python apps/api/scripts/inspect_pandadoc_document.py --account=int
     uv run python apps/api/scripts/inspect_pandadoc_document.py --with-raw
 """
 
@@ -26,6 +27,7 @@ import httpx
 
 from bullet_api.config import get_settings
 from bullet_api.integrations.pandadoc_client import HttpPandaDocClient
+from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, PANDADOC_ACCOUNTS, api_key_for
 
 
 def _mask(value: Any) -> Any:
@@ -86,21 +88,31 @@ async def _pick_recent(api_key: str, base_url: str) -> str | None:
 async def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     write_raw = "--with-raw" in sys.argv[1:]
+    # S1-25c: pick the account whose template to inspect (default uk). Pass
+    # `--account int` to inspect the International account's documents.
+    account = PANDADOC_ACCOUNT_UK
+    for flag in sys.argv[1:]:
+        if flag.startswith("--account="):
+            account = flag.split("=", 1)[1]
+    if account not in PANDADOC_ACCOUNTS:
+        print(f"--account must be one of {PANDADOC_ACCOUNTS}; got {account!r}.", file=sys.stderr)
+        return 1
 
     settings = get_settings()
-    if not settings.pandadoc_api_key:
-        print("PANDADOC_API_KEY is empty; cannot inspect.", file=sys.stderr)
+    api_key = api_key_for(account, settings)
+    if not api_key:
+        print(f"PANDADOC_API_KEY_{account.upper()} is empty; cannot inspect.", file=sys.stderr)
         return 1
 
     document_id = args[0] if args else None
     if document_id is None:
-        document_id = await _pick_recent(settings.pandadoc_api_key, settings.pandadoc_api_base_url)
+        document_id = await _pick_recent(api_key, settings.pandadoc_api_base_url)
         if document_id is None:
             print("No completed documents found in the last year.", file=sys.stderr)
             return 1
         print(f"Auto-picked most-recent completed document id: {document_id}\n")
 
-    body = await _fetch(settings.pandadoc_api_key, settings.pandadoc_api_base_url, document_id)
+    body = await _fetch(api_key, settings.pandadoc_api_base_url, document_id)
 
     print("=== SHAPE SUMMARY (safe to share) ===")
     print(json.dumps(_summary(body), indent=2, sort_keys=True))

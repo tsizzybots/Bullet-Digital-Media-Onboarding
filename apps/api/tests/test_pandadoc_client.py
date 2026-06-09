@@ -158,7 +158,7 @@ async def test_fetch_document_details_raises_runtime_error_on_empty_key() -> Non
     dead-letters immediately."""
     client = HttpPandaDocClient(api_key="")
 
-    with pytest.raises(RuntimeError, match="PANDADOC_API_KEY is empty"):
+    with pytest.raises(RuntimeError, match="API key is empty"):
         await client.fetch_document_details("doc_abc")
 
 
@@ -219,7 +219,7 @@ async def test_download_document_propagates_500_for_retry() -> None:
 
 async def test_download_document_raises_runtime_error_on_empty_key() -> None:
     client = HttpPandaDocClient(api_key="")
-    with pytest.raises(RuntimeError, match="PANDADOC_API_KEY is empty"):
+    with pytest.raises(RuntimeError, match="API key is empty"):
         await client.download_document("doc_abc")
 
 

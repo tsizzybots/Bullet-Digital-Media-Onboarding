@@ -14,6 +14,7 @@ from bullet_api.webhooks.pandadoc_core import (
     PANDADOC_COMPLETED_STATUS,
     SignedDocument,
     extract_signed_documents,
+    resolve_pandadoc_account,
     verify_pandadoc_signature,
 )
 
@@ -160,3 +161,44 @@ def test_malformed_inputs_never_raise_and_return_empty() -> None:
     ]
     for payload in malformed:
         assert extract_signed_documents(payload) == []
+
+
+# --------------------------------------------------------------------------- #
+# resolve_pandadoc_account (S1-25c try-both-secrets routing)
+# --------------------------------------------------------------------------- #
+
+_ACCOUNT_SECRETS = {"uk": "uk-shared-key", "int": "int-shared-key"}
+
+
+def test_resolve_account_returns_account_whose_key_verifies() -> None:
+    body = b'[{"event": "document_state_changed"}]'
+    uk_sig = _sign(body, _ACCOUNT_SECRETS["uk"])
+    int_sig = _sign(body, _ACCOUNT_SECRETS["int"])
+    assert resolve_pandadoc_account(body, uk_sig, _ACCOUNT_SECRETS) == "uk"
+    assert resolve_pandadoc_account(body, int_sig, _ACCOUNT_SECRETS) == "int"
+
+
+def test_resolve_account_none_when_no_key_matches() -> None:
+    body = b'[{"event": "x"}]'
+    foreign_sig = _sign(body, "some-other-accounts-key")
+    assert resolve_pandadoc_account(body, foreign_sig, _ACCOUNT_SECRETS) is None
+
+
+def test_resolve_account_fails_closed_on_missing_signature_or_empty_secrets() -> None:
+    body = b'[{"event": "x"}]'
+    # No signature -> None regardless of configured secrets.
+    assert resolve_pandadoc_account(body, None, _ACCOUNT_SECRETS) is None
+    assert resolve_pandadoc_account(body, "", _ACCOUNT_SECRETS) is None
+    # No accounts configured -> every request rejected (None), even a sig that
+    # would match some key.
+    assert resolve_pandadoc_account(body, _sign(body, "uk-shared-key"), {}) is None
+
+
+def test_resolve_account_ignores_an_empty_secret_value() -> None:
+    # An account present in the map but with an empty secret must never match
+    # (verify_pandadoc_signature fails closed on an empty secret).
+    body = b'[{"event": "x"}]'
+    secrets = {"uk": "", "int": "int-shared-key"}
+    assert resolve_pandadoc_account(body, _sign(body, "int-shared-key"), secrets) == "int"
+    # A signature computed with an empty key does not sneak in as "uk".
+    assert resolve_pandadoc_account(body, _sign(body, ""), secrets) is None

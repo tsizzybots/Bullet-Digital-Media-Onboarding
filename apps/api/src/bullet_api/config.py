@@ -177,36 +177,50 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ----- S1-22 PandaDoc webhook -----
-    pandadoc_webhook_secret: str = Field(
+    # ----- S1-22 / S1-25c PandaDoc webhook (dual-account: UK + International) -----
+    # Bullet runs two independent PandaDoc accounts, each signing its webhooks
+    # with its OWN shared key. The webhook receiver tries each configured secret
+    # and routes by whichever verifies (see bullet_api.pandadoc.accounts). Empty
+    # in local dev / tests; set per account in the Render env groups. The handler
+    # fails closed (401) when neither secret verifies.
+    pandadoc_webhook_secret_uk: str = Field(
         default="",
         description=(
-            "Shared key for verifying PandaDoc webhook HMAC-SHA256 signatures "
-            "(POST /webhooks/pandadoc). Empty in local dev / tests; set in the "
-            "Render staging / prod env groups. The webhook handler fails closed "
-            "(rejects every request with 401) when this is empty, so a "
-            "mis-configured deployment is loud rather than silently insecure."
+            "Shared key for verifying UK-account PandaDoc webhook HMAC-SHA256 "
+            "signatures. Empty in local dev / tests; set in the Render env groups."
+        ),
+    )
+    pandadoc_webhook_secret_int: str = Field(
+        default="",
+        description=(
+            "Shared key for verifying International-account PandaDoc webhook "
+            "HMAC-SHA256 signatures. Empty in local dev / tests; set in the Render "
+            "env groups."
         ),
     )
 
-    # ----- S1-24 PandaDoc API (manual replay) -----
-    pandadoc_api_key: str = Field(
+    # ----- S1-24 / S1-25c PandaDoc API (per-account: replay + reconcile + workers) -----
+    pandadoc_api_key_uk: str = Field(
         default="",
         description=(
-            "PandaDoc REST API key (header `Authorization: API-Key <key>`) used "
-            "by the manual replay endpoint (POST /admin/pandadoc/replay/{id}) and "
-            "the nightly reconciliation cron (bullet_api.crons.reconcile_pandadoc) "
-            "to fetch / list documents. Empty in local dev / tests (the "
-            "FakePandaDocClient is used); set in the Render staging / prod env "
-            "groups. HttpPandaDocClient fails loudly (RuntimeError) if this is "
-            "empty on a real call; the reconciliation cron logs 'disabled' and "
-            "exits 0 when empty, so an unconfigured deployment is a safe no-op."
+            "UK-account PandaDoc REST API key (header `Authorization: API-Key "
+            "<key>`) used to fetch / download / list UK documents (replay endpoint, "
+            "reconciliation cron, client-record + signed-PDF workers). Empty in "
+            "local dev / tests (the FakePandaDocClient is used); set in the Render "
+            "env groups. HttpPandaDocClient fails loudly (RuntimeError) if empty on "
+            "a real call; the reconciliation cron skips an account whose key is "
+            "empty, so an unconfigured account is a safe no-op."
+        ),
+    )
+    pandadoc_api_key_int: str = Field(
+        default="",
+        description=(
+            "International-account PandaDoc REST API key. Same usage + empty-key "
+            "semantics as `pandadoc_api_key_uk`, for the International account."
         ),
     )
 
-    # ----- S1-23 PandaDoc reconciliation cron -----
-    # NOTE: pandadoc_api_key is shared with the S1-24 replay endpoint above and
-    # so is not redeclared here (a second field would silently shadow the first).
+    # ----- S1-23/S1-24 PandaDoc API base URL + reconciliation cron -----
     pandadoc_api_base_url: str = Field(
         default="https://api.pandadoc.com",
         description=(

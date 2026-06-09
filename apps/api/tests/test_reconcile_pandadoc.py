@@ -161,3 +161,171 @@ async def test_reconcile_no_documents_is_a_noop(async_session: AsyncSession) -> 
     assert result.created == 0
     assert emitter.sent == []
     assert slack.posted == []
+
+
+@pytest.mark.db
+async def test_reconcile_stamps_account_on_row_event_and_alert(
+    async_session: AsyncSession,
+) -> None:
+    """S1-25c: a healed signing is stamped with the account it was listed from
+    (here INT) on the onboarding_events row, the emitted pandadoc.signed event,
+    and the Slack alert - so the fan-out downloads with the matching key."""
+    missing = f"doc_{uuid.uuid4().hex[:12]}"
+    fake_pandadoc = FakePandaDocClient(docs=[_doc(missing)])
+    emitter = FakeEventEmitter()
+    slack = FakeSlackNotifier()
+
+    result = await reconcile_pandadoc(
+        async_session,
+        pandadoc_client=fake_pandadoc,
+        emitter=emitter,
+        slack=slack,
+        lookback_days=7,
+        now=NOW,
+        account="int",
+    )
+
+    assert result.created == 1
+
+    row = await async_session.execute(
+        text(
+            "SELECT pandadoc_account FROM onboarding_events "
+            "WHERE event_type = :et AND external_id = :eid"
+        ),
+        {"et": PANDADOC_SIGNED_EVENT, "eid": missing},
+    )
+    assert row.scalar_one() == "int"
+
+    _name, data = emitter.sent[0]
+    assert data["account"] == "int"
+    assert slack.posted[0].startswith("[INT] ")
+
+
+async def test_run_reconciles_each_configured_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S1-25c: `_run` loops every configured account, calling the core once per
+    account and accumulating the totals. No DB / network: the production deps
+    `_run` imports are stubbed, and the core is replaced by a recorder.
+
+    Intentionally coupled to `_run`'s import wiring (it stubs each dep `_run`
+    imports); the behavioural contract that matters - per-account isolation on
+    failure - is covered separately by
+    `test_run_isolates_accounts_a_later_failure_does_not_undo_an_earlier_one`,
+    so this stays a thin wiring/accumulation check."""
+    import types
+
+    import bullet_api.config as cfg
+    import bullet_api.crons.reconcile_pandadoc as mod
+    import bullet_api.db as db
+    import bullet_api.integrations.pandadoc_client as pc
+    import bullet_api.integrations.slack as sl
+    import bullet_api.pandadoc.accounts as acct
+    import bullet_api.worker as wk
+    from bullet_api.pandadoc.accounts import PandaDocCreds
+
+    called_accounts: list[str] = []
+
+    async def _fake_core(session, *, pandadoc_client, emitter, slack, lookback_days, now, account):
+        called_accounts.append(account)
+        return mod.ReconcileResult(checked=2, created=1)
+
+    monkeypatch.setattr(mod, "reconcile_pandadoc", _fake_core)
+    monkeypatch.setattr(
+        acct,
+        "api_accounts",
+        lambda _s: [PandaDocCreds("uk", "UKKEY", ""), PandaDocCreds("int", "INTKEY", "")],
+    )
+    monkeypatch.setattr(
+        cfg,
+        "get_settings",
+        lambda: types.SimpleNamespace(
+            pandadoc_api_base_url="https://api.pandadoc.com",
+            slack_webhook_url="",
+            reconciliation_lookback_days=7,
+        ),
+    )
+    monkeypatch.setattr(pc, "HttpPandaDocClient", lambda **_kw: object())
+    monkeypatch.setattr(sl, "HttpSlackNotifier", lambda _url: object())
+    monkeypatch.setattr(wk, "InngestEventEmitter", lambda _c: object())
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+    monkeypatch.setattr(db, "AsyncSessionLocal", lambda: _FakeSession())
+
+    result = await mod._run()
+
+    # One core call per configured account, UK first; totals accumulated.
+    assert called_accounts == ["uk", "int"]
+    assert result.checked == 4
+    assert result.created == 2
+
+
+async def test_run_isolates_accounts_a_later_failure_does_not_undo_an_earlier_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S1-25c isolation: `_run` is NOT all-or-nothing across accounts. Each
+    per-account `reconcile_pandadoc` commits at its end (see the core tests), so
+    when a later account (here int) raises, the earlier account (uk) has already
+    run to completion and its commit stands; the failure propagates out of
+    `_run` so only the failed account is re-processed on the next nightly pass,
+    rather than the whole pass rolling back."""
+    import types
+
+    import bullet_api.config as cfg
+    import bullet_api.crons.reconcile_pandadoc as mod
+    import bullet_api.db as db
+    import bullet_api.integrations.pandadoc_client as pc
+    import bullet_api.integrations.slack as sl
+    import bullet_api.pandadoc.accounts as acct
+    import bullet_api.worker as wk
+    from bullet_api.pandadoc.accounts import PandaDocCreds
+
+    completed: list[str] = []
+
+    async def _flaky_core(session, *, pandadoc_client, emitter, slack, lookback_days, now, account):
+        if account == "int":
+            # A transient INT failure (e.g. the list call / a Slack post) raising
+            # AFTER UK has already committed.
+            raise RuntimeError("int list failed")
+        completed.append(account)
+        return mod.ReconcileResult(checked=1, created=1)
+
+    monkeypatch.setattr(mod, "reconcile_pandadoc", _flaky_core)
+    monkeypatch.setattr(
+        acct,
+        "api_accounts",
+        lambda _s: [PandaDocCreds("uk", "UKKEY", ""), PandaDocCreds("int", "INTKEY", "")],
+    )
+    monkeypatch.setattr(
+        cfg,
+        "get_settings",
+        lambda: types.SimpleNamespace(
+            pandadoc_api_base_url="https://api.pandadoc.com",
+            slack_webhook_url="",
+            reconciliation_lookback_days=7,
+        ),
+    )
+    monkeypatch.setattr(pc, "HttpPandaDocClient", lambda **_kw: object())
+    monkeypatch.setattr(sl, "HttpSlackNotifier", lambda _url: object())
+    monkeypatch.setattr(wk, "InngestEventEmitter", lambda _c: object())
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *_a: object) -> bool:
+            # Do not suppress: the int failure must propagate out of `_run`.
+            return False
+
+    monkeypatch.setattr(db, "AsyncSessionLocal", lambda: _FakeSession())
+
+    with pytest.raises(RuntimeError, match="int list failed"):
+        await mod._run()
+
+    # UK ran to completion (its core committed) BEFORE int raised; the int
+    # failure was neither swallowed nor allowed to undo UK's pass.
+    assert completed == ["uk"]
