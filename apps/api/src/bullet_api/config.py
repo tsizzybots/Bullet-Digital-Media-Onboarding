@@ -220,7 +220,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ----- S1-23 PandaDoc reconciliation cron -----
+    # ----- S1-23/S1-24 PandaDoc API base URL + reconciliation cron -----
     pandadoc_api_base_url: str = Field(
         default="https://api.pandadoc.com",
         description=(

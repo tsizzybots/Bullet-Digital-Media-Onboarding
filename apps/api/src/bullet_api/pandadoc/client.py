@@ -9,12 +9,12 @@ preloaded documents and assert against them without an API call.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Protocol
 
 import httpx
 
 from bullet_api.config import get_settings
-from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, api_key_for
+from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, PandaDocAccount, api_key_for
 
 # PandaDoc's REST base. The document-detail endpoint is
 # GET {base}/public/v1/documents/{id}/details and auth is the header
@@ -97,7 +97,8 @@ class HttpPandaDocClient:
         if not self._api_key:
             # Fail loudly rather than silently 404, mirroring ResendEmailClient.
             raise RuntimeError(
-                "PANDADOC_API_KEY is empty; cannot fetch document. Set it on the Render env group."
+                "PandaDoc API key is empty; cannot fetch document. "
+                "Set PANDADOC_API_KEY_UK / PANDADOC_API_KEY_INT on the Render env group."
             )
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.get(
@@ -112,8 +113,8 @@ class HttpPandaDocClient:
     async def download_document(self, document_id: str) -> bytes:
         if not self._api_key:
             raise RuntimeError(
-                "PANDADOC_API_KEY is empty; cannot download document. "
-                "Set it on the Render env group."
+                "PandaDoc API key is empty; cannot download document. "
+                "Set PANDADOC_API_KEY_UK / PANDADOC_API_KEY_INT on the Render env group."
             )
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.get(
@@ -167,7 +168,7 @@ class FakePandaDocClient:
             raise PandaDocNotFound(document_id) from None
 
 
-def get_pandadoc_client(account: Literal["uk", "int"] = PANDADOC_ACCOUNT_UK) -> PandaDocClient:
+def get_pandadoc_client(account: PandaDocAccount = PANDADOC_ACCOUNT_UK) -> PandaDocClient:
     """FastAPI dependency / factory for a PandaDoc client bound to one account.
 
     When used as a FastAPI dependency (the S1-24 replay endpoint), `account` is

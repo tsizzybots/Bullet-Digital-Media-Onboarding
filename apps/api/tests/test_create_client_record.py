@@ -534,7 +534,7 @@ async def test_fetch_document_for_orchestrator_translates_404_to_non_retriable()
 
 
 async def test_fetch_document_for_orchestrator_translates_runtime_error_to_non_retriable() -> None:
-    """`HttpPandaDocClient` raises RuntimeError when PANDADOC_API_KEY is
+    """`HttpPandaDocClient` raises RuntimeError when the PandaDoc API key is
     empty (mis-configured deploy). Must NonRetriable - the deploy
     can't self-heal by retrying."""
     import inngest
@@ -544,11 +544,11 @@ async def test_fetch_document_for_orchestrator_translates_runtime_error_to_non_r
             raise NotImplementedError
 
         async def fetch_document_details(self, document_id: str) -> dict:  # noqa: ARG002
-            raise RuntimeError("PANDADOC_API_KEY is empty; cannot fetch document.")
+            raise RuntimeError("PandaDoc API key is empty; cannot fetch document.")
 
     with pytest.raises(inngest.NonRetriableError) as exc:
         await fetch_document_for_orchestrator(_EmptyKeyClient(), "any-doc")
-    assert "PANDADOC_API_KEY" in str(exc.value)
+    assert "API key is empty" in str(exc.value)
     assert isinstance(exc.value.__cause__, RuntimeError)
 
 

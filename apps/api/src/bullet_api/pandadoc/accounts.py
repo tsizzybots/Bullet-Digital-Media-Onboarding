@@ -23,6 +23,7 @@ lookups lets local dev run with a single key.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from bullet_api.config import Settings
 
@@ -31,6 +32,14 @@ PANDADOC_ACCOUNT_INT = "int"
 
 # Stable order: UK first. Used by the webhook (try-both) and the reconcile loop.
 PANDADOC_ACCOUNTS: tuple[str, ...] = (PANDADOC_ACCOUNT_UK, PANDADOC_ACCOUNT_INT)
+
+# The account-label union, in one place. Used at the public boundaries that
+# validate an operator/caller-supplied account (the replay endpoint's query
+# param, the client factory) so FastAPI/type-checking pin the allowed values
+# without each call site re-spelling the literal. Internal functions keep
+# `account: str` because they receive untrusted runtime event data and rely on
+# `_creds_for` raising ValueError on an unknown label.
+PandaDocAccount = Literal["uk", "int"]
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,7 @@ __all__ = [
     "PANDADOC_ACCOUNTS",
     "PANDADOC_ACCOUNT_INT",
     "PANDADOC_ACCOUNT_UK",
+    "PandaDocAccount",
     "PandaDocCreds",
     "api_accounts",
     "api_key_for",

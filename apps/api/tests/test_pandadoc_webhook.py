@@ -14,6 +14,7 @@ import hmac
 import json
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 import pytest_asyncio
@@ -289,3 +290,96 @@ async def test_non_completed_event_ignored(
     assert response.json() == {"status": "ignored", "events": 0}
     assert await _count_events(async_session, doc_id) == 0
     assert fake.sent == []
+
+
+# --------------------------------------------------------------------------- #
+# S1-25c: only-one-account-configured routing at the endpoint
+#
+# The pure selector (webhook_secrets) is unit-tested in test_pandadoc_accounts.py;
+# these assert the END-TO-END behaviour through the receiver when a deployment
+# has configured a single account (e.g. _UK set, _INT still blank): the other
+# account's signature must fail closed (401), never silently route.
+# --------------------------------------------------------------------------- #
+
+
+@asynccontextmanager
+async def _webhook_client_with_secrets(
+    async_session: AsyncSession, secrets: dict[str, str]
+) -> AsyncIterator[tuple[AsyncClient, FakeEventEmitter]]:
+    """Like the `webhook_client` fixture but with a caller-supplied secrets map,
+    so a test can model an only-UK or only-INT deployment."""
+
+    async def _session_override() -> AsyncIterator[AsyncSession]:
+        yield async_session
+
+    fake_emitter = FakeEventEmitter()
+    app.dependency_overrides[get_session] = _session_override
+    app.dependency_overrides[get_pandadoc_webhook_secrets] = lambda: secrets
+    app.dependency_overrides[get_event_emitter] = lambda: fake_emitter
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac, fake_emitter
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def _post_signed(client: AsyncClient, raw: bytes, secret: str) -> tuple[int, dict]:
+    response = await client.post(
+        "/webhooks/pandadoc",
+        params={"signature": _sign(raw, secret)},
+        content=raw,
+        headers={"content-type": "application/json"},
+    )
+    return response.status_code, response.json()
+
+
+@pytest.mark.db
+async def test_only_uk_configured_rejects_int_signature(
+    async_session: AsyncSession,
+) -> None:
+    """Deployment with ONLY the UK secret set: an INT-signed delivery cannot
+    verify against any configured key, so it is rejected 401 with no row / no
+    emit (fail closed), not silently routed to UK."""
+    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    raw = json.dumps(_completed_payload(doc_id)).encode()
+
+    async with _webhook_client_with_secrets(async_session, {"uk": UK_SECRET}) as (client, fake):
+        code, _body = await _post_signed(client, raw, INT_SECRET)
+        assert code == 401
+        assert await _count_events(async_session, doc_id) == 0
+        assert fake.sent == []
+
+
+@pytest.mark.db
+async def test_only_uk_configured_accepts_uk_signature(
+    async_session: AsyncSession,
+) -> None:
+    """The configured (UK) account still works end to end when it is the only
+    one set."""
+    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    raw = json.dumps(_completed_payload(doc_id)).encode()
+
+    async with _webhook_client_with_secrets(async_session, {"uk": UK_SECRET}) as (client, fake):
+        code, body = await _post_signed(client, raw, UK_SECRET)
+        assert code == 200
+        assert body == {"status": "accepted", "events": 1}
+        assert await _count_events(async_session, doc_id) == 1
+        assert len(fake.sent) == 1
+
+
+@pytest.mark.db
+async def test_only_int_configured_rejects_uk_signature(
+    async_session: AsyncSession,
+) -> None:
+    """Inverse: a deployment with ONLY the INT secret set rejects a UK-signed
+    delivery 401 - the routing is symmetric and never falls back to a
+    not-configured account."""
+    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    raw = json.dumps(_completed_payload(doc_id)).encode()
+
+    async with _webhook_client_with_secrets(async_session, {"int": INT_SECRET}) as (client, fake):
+        code, _body = await _post_signed(client, raw, UK_SECRET)
+        assert code == 401
+        assert await _count_events(async_session, doc_id) == 0
+        assert fake.sent == []

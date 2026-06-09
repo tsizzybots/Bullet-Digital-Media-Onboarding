@@ -291,7 +291,7 @@ async def store_signed_pdf(ctx: inngest.Context, step: inngest.Step) -> dict:
         except (ClientNotFoundError, PandaDocNotFound, EmptyPdfError) as exc:
             raise inngest.NonRetriableError(str(exc)) from exc
         except RuntimeError as exc:
-            # Empty PANDADOC_API_KEY or unconfigured R2 - a misconfigured
+            # Empty PandaDoc API key or unconfigured R2 - a misconfigured
             # deploy that cannot self-heal on retry.
             raise inngest.NonRetriableError(str(exc)) from exc
 

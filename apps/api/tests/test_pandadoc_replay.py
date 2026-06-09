@@ -290,6 +290,52 @@ async def test_replay_is_idempotent(
 
 
 @pytest.mark.db
+async def test_replay_same_document_different_account_does_not_duplicate(
+    async_session: AsyncSession,
+    replay_client: tuple[AsyncClient, FakeEventEmitter, FakePandaDocClient],
+) -> None:
+    """S1-25c idempotency: the account is descriptive metadata, NOT part of the
+    (event_type, external_id) identity. Replaying the same document first as uk
+    then as int must still persist exactly one row (the second is a duplicate),
+    the row keeps the first writer's account, and only one event is emitted - a
+    wrong-?account replay can never duplicate an already-healed signing."""
+    client, fake_emitter, fake_pandadoc = replay_client
+    _, token = await _seed_user_with_session(async_session, role="founder")
+    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    fake_pandadoc.documents[doc_id] = _completed(doc_id)
+
+    first = await client.post(
+        f"/admin/pandadoc/replay/{doc_id}",
+        params={"account": "uk"},
+        cookies={"session": token},
+    )
+    assert first.status_code == 200
+    assert first.json() == {"status": "accepted", "events": 1}
+
+    # Same document id, DIFFERENT account: account is not part of the conflict
+    # key, so this collides with the first row -> duplicate, no second emit.
+    second = await client.post(
+        f"/admin/pandadoc/replay/{doc_id}",
+        params={"account": "int"},
+        cookies={"session": token},
+    )
+    assert second.status_code == 200
+    assert second.json() == {"status": "duplicate", "events": 0}
+
+    assert await _count_events(async_session, doc_id) == 1
+    # The single surviving row keeps the FIRST writer's account (uk), not int.
+    stamped = await async_session.execute(
+        text(
+            "SELECT pandadoc_account FROM onboarding_events "
+            "WHERE event_type = 'pandadoc.signed' AND external_id = :doc_id"
+        ),
+        {"doc_id": doc_id},
+    )
+    assert stamped.scalar_one() == "uk"
+    assert len(fake_emitter.sent) == 1
+
+
+@pytest.mark.db
 async def test_replay_found_but_unsigned_is_ignored(
     async_session: AsyncSession,
     replay_client: tuple[AsyncClient, FakeEventEmitter, FakePandaDocClient],

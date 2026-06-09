@@ -32,7 +32,7 @@ TS client.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bullet_api.auth import CurrentUser, require_role
 from bullet_api.db import get_session
 from bullet_api.pandadoc import PandaDocClient, PandaDocNotFound, get_pandadoc_client
-from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK
+from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, PandaDocAccount
 from bullet_api.webhooks.pandadoc import persist_and_emit_signed_documents
 from bullet_api.webhooks.pandadoc_core import extract_signed_documents
 from bullet_api.worker import EventEmitter, get_event_emitter
@@ -59,7 +59,7 @@ async def replay_pandadoc_document(
     db: Annotated[AsyncSession, Depends(get_session)],
     client: Annotated[PandaDocClient, Depends(get_pandadoc_client)],
     emitter: Annotated[EventEmitter, Depends(get_event_emitter)],
-    account: Annotated[Literal["uk", "int"], Query()] = PANDADOC_ACCOUNT_UK,
+    account: Annotated[PandaDocAccount, Query()] = PANDADOC_ACCOUNT_UK,
 ) -> dict:
     """Re-drive the signing fan-out for an already-completed PandaDoc document.
 

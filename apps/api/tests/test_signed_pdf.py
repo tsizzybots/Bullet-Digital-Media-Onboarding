@@ -348,3 +348,74 @@ def test_store_signed_pdf_declares_concurrency_caps() -> None:
 def test_store_signed_pdf_triggers_on_client_created() -> None:
     cfg = store_signed_pdf.get_config("").main
     assert cfg.triggers[0].event == CLIENT_CREATED_EVENT
+
+
+# --------------------------------------------------------------------------- #
+# S1-25c: the wrapper threads the event's PandaDoc account into the API key
+# --------------------------------------------------------------------------- #
+
+
+async def _wrapper_pandadoc_client(monkeypatch: pytest.MonkeyPatch, event_data: dict):
+    """Run the `store_signed_pdf` Inngest wrapper with the download / upload / DB
+    stubbed out, and return the `HttpPandaDocClient` it built so the test can
+    assert which account's API key was selected.
+
+    `._handler` is the raw async function behind the
+    `@inngest_client.create_function` decorator; calling it directly exercises
+    the wrapper's `account -> api_key_for -> HttpPandaDocClient` wiring (the
+    only part not already covered by `store_signed_pdf_core` tests) without the
+    full Inngest execution machinery.
+    """
+    from types import SimpleNamespace
+
+    import bullet_api.worker.signed_pdf as signed_pdf_module
+    from bullet_api.config import Settings
+
+    settings = Settings(pandadoc_api_key_uk="UKKEY", pandadoc_api_key_int="INTKEY")
+    monkeypatch.setattr(signed_pdf_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(signed_pdf_module, "get_storage_client", lambda: object())
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(signed_pdf_module, "AsyncSessionLocal", lambda: _FakeSession())
+
+    captured: dict = {}
+
+    async def _fake_core(session, pandadoc_client, storage, **kwargs):  # noqa: ANN001, ANN202
+        captured["client"] = pandadoc_client
+        return SimpleNamespace(r2_key="r2/key", stored=True, skipped=False)
+
+    monkeypatch.setattr(signed_pdf_module, "store_signed_pdf_core", _fake_core)
+
+    ctx = SimpleNamespace(
+        event=SimpleNamespace(
+            data={"client_id": str(uuid.uuid4()), "document_id": "doc_x", **event_data}
+        ),
+        run_id="run_test",
+    )
+    await store_signed_pdf._handler(ctx, None)
+    return captured["client"]
+
+
+async def test_store_signed_pdf_int_event_selects_int_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event carrying account=int builds the PandaDoc client with the INT API
+    key, so the signed PDF is downloaded from the International account - the bug
+    this routing fixes was the UK key 404ing an INT document."""
+    client = await _wrapper_pandadoc_client(monkeypatch, {"account": "int"})
+    assert client._api_key == "INTKEY"
+
+
+async def test_store_signed_pdf_missing_account_defaults_to_uk_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-flight event emitted before S1-25c (no account) defaults to the UK
+    key, so the fan-out keeps working through the deploy cutover."""
+    client = await _wrapper_pandadoc_client(monkeypatch, {})
+    assert client._api_key == "UKKEY"

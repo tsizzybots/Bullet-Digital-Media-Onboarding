@@ -57,7 +57,7 @@ Correctness rules:
   `inngest.NonRetriableError` so Inngest dead-letters immediately - the
   document body cannot self-heal on retry.
 - A PandaDoc 404 (document deleted between webhook and orchestrator) and
-  an empty `PANDADOC_API_KEY` are likewise wrapped as NonRetriable.
+  an empty PandaDoc API key are likewise wrapped as NonRetriable.
   Other PandaDoc errors (5xx, 429, timeout) propagate naturally so
   Inngest retries them.
 - An orphan `onboarding_events.id` (audit row not visible) raises
@@ -166,7 +166,7 @@ async def fetch_document_for_orchestrator(
     """Fetch the PandaDoc document body, translating NonRetriable causes.
 
     PandaDocNotFound (404 - document deleted) and RuntimeError (empty
-    PANDADOC_API_KEY - mis-configured deploy) both indicate failures
+    PandaDoc API key - mis-configured deploy) both indicate failures
     that retry will not fix; wrap them in `inngest.NonRetriableError` so
     Inngest dead-letters the run immediately rather than burning the
     default retry budget. Other errors (httpx 5xx, 429, timeout)

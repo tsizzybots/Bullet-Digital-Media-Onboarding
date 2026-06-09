@@ -141,8 +141,8 @@ class HttpPandaDocClient:
             # Fail loudly rather than silently return nothing, mirroring
             # HttpPandaDocClient.fetch_document in bullet_api.pandadoc.client.
             raise RuntimeError(
-                "PANDADOC_API_KEY is empty; cannot list completed documents. "
-                "Set it on the Render env group."
+                "PandaDoc API key is empty; cannot list completed documents. "
+                "Set PANDADOC_API_KEY_UK / PANDADOC_API_KEY_INT on the Render env group."
             )
 
         documents: list[PandaDocDocument] = []

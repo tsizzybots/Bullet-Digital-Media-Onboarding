@@ -39,7 +39,7 @@ list-documents client) rather than ``bullet_api.pandadoc.client`` (the S1-24
 single-document client); folding the two into one PandaDoc package is a
 tracked follow-up once both cards land.
 
-Run locally (needs DATABASE_URL; PANDADOC_API_KEY empty -> disabled no-op):
+Run locally (needs DATABASE_URL; no PandaDoc account key configured -> disabled no-op):
 
     uv run python -m bullet_api.crons.reconcile_pandadoc
 """

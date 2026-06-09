@@ -252,8 +252,8 @@ services:
   # external_id) unique constraint, so a run with nothing new is a no-op.
   # NOTE: Render cron schedules are UTC-only with no DST support. "0 2 * * *" is
   # 02:00 UTC = 03:00 UK during BST and 02:00 UK during GMT; a daily safety-net
-  # reconcile tolerates this ±1h drift. When PANDADOC_API_KEY is unset the job
-  # logs "disabled" and exits 0.
+  # reconcile tolerates this ±1h drift. When no PandaDoc account has an API key
+  # the job logs "disabled" and exits 0.
   - type: cron
     name: bullet-cron-staging
     runtime: python
