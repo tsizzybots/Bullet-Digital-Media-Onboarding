@@ -14,6 +14,8 @@ precision.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, EmailStr
 
 
@@ -69,3 +71,31 @@ class ResendConfirmationRequest(BaseModel):
     """
 
     email: EmailStr
+
+
+class ClientListItem(BaseModel):
+    """One row of the dashboard `/clients` list view (S1-31).
+
+    `id` is stringified (opaque identifier, same as `MeResponse`).
+    `step_entered_at` is the time the client entered `current_step`; the
+    dashboard derives the displayed time-in-step from it client-side so the
+    duration ticks without a refetch. `last_action_*` describe the client's
+    most-recently-started `platform_actions` row (the onboarding-health
+    signal); all three are null for a client with no recorded actions yet.
+    """
+
+    id: str
+    business_name: str | None
+    contact_name: str | None
+    email: str
+    current_step: str
+    step_entered_at: datetime
+    last_action_status: str | None
+    last_action_platform: str | None
+    last_action: str | None
+
+
+class ClientsListResponse(BaseModel):
+    """Envelope for `GET /clients` - every client, newest step-change first."""
+
+    clients: list[ClientListItem]

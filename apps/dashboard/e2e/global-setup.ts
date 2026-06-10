@@ -59,4 +59,21 @@ export default async function globalSetup(): Promise<void> {
   }
 
   writeFileSync(FIXTURES_PATH, JSON.stringify(fixtures, null, 2), 'utf-8')
+
+  // Seed the deterministic clients the S1-31 list spec asserts on. No JSON to
+  // parse here - the script just upserts rows (idempotent) and logs to stderr.
+  try {
+    execFileSync('uv', ['run', 'python', 'scripts/seed_e2e_clients.py'], {
+      cwd: API_DIR,
+      env: process.env,
+      encoding: 'utf-8',
+    })
+  } catch (error) {
+    throw new Error(
+      `E2E client seed failed. Ensure DATABASE_URL is set and the DB is ` +
+        `migrated (make db-upgrade). Underlying error: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+    )
+  }
 }

@@ -149,6 +149,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/clients": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Clients
+         * @description List every client for the dashboard board. 401 without a live session.
+         */
+        get: operations["list_clients_clients_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -226,6 +246,48 @@ export interface components {
             email: string;
             /** Status */
             status: string;
+        };
+        /**
+         * ClientListItem
+         * @description One row of the dashboard `/clients` list view (S1-31).
+         *
+         *     `id` is stringified (opaque identifier, same as `MeResponse`).
+         *     `step_entered_at` is the time the client entered `current_step`; the
+         *     dashboard derives the displayed time-in-step from it client-side so the
+         *     duration ticks without a refetch. `last_action_*` describe the client's
+         *     most-recently-started `platform_actions` row (the onboarding-health
+         *     signal); all three are null for a client with no recorded actions yet.
+         */
+        ClientListItem: {
+            /** Business Name */
+            business_name: string | null;
+            /** Contact Name */
+            contact_name: string | null;
+            /** Current Step */
+            current_step: string;
+            /** Email */
+            email: string;
+            /** Id */
+            id: string;
+            /** Last Action */
+            last_action: string | null;
+            /** Last Action Platform */
+            last_action_platform: string | null;
+            /** Last Action Status */
+            last_action_status: string | null;
+            /**
+             * Step Entered At
+             * Format: date-time
+             */
+            step_entered_at: string;
+        };
+        /**
+         * ClientsListResponse
+         * @description Envelope for `GET /clients` - every client, newest step-change first.
+         */
+        ClientsListResponse: {
+            /** Clients */
+            clients: components["schemas"]["ClientListItem"][];
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -530,6 +592,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_clients_clients_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientsListResponse"];
                 };
             };
             /** @description Validation Error */
