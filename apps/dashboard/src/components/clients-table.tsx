@@ -96,11 +96,17 @@ function ClientRowView({ client }: { client: ClientRow }) {
       <td className="px-4 py-3">
         <Link
           href={`/clients/${client.id}`}
-          className="font-medium text-foreground underline-offset-4 hover:underline"
+          title={primary}
+          className="block max-w-[240px] truncate font-medium text-foreground underline-offset-4 hover:underline"
         >
           {primary}
         </Link>
-        <div className="text-xs text-muted-foreground">{client.email}</div>
+        <div
+          className="max-w-[240px] truncate text-xs text-muted-foreground"
+          title={client.email}
+        >
+          {client.email}
+        </div>
       </td>
       <td className="px-4 py-3">
         <Badge variant="neutral">{stepLabel(client.current_step)}</Badge>
