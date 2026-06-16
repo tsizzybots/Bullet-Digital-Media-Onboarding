@@ -27,7 +27,11 @@ export function ClientsTable() {
   const { data, isPending, isError } = useQuery({
     queryKey: ['clients'],
     queryFn: async () => {
-      const { data, error } = await api.GET('/clients')
+      // Fail fast on a slow/stuck request rather than holding it open under
+      // polling load (pairs with the DB-side statement_timeout).
+      const { data, error } = await api.GET('/clients', {
+        signal: AbortSignal.timeout(8_000),
+      })
       if (error || !data) throw new Error('clients request failed')
       return data
     },
@@ -75,6 +79,7 @@ function TableFrame({ children }: { children: ReactNode }) {
             {COLUMNS.map((col) => (
               <th
                 key={col}
+                scope="col"
                 className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide"
               >
                 {col}
@@ -120,7 +125,7 @@ function ClientRowView({ client }: { client: ClientRow }) {
             <Badge variant={actionStatusVariant(client.last_action_status)}>
               {humanizeToken(client.last_action_status)}
             </Badge>
-            {client.last_action && (
+            {client.last_action_platform && (
               <span className="text-xs text-muted-foreground">
                 {humanizeToken(client.last_action_platform)} ·{' '}
                 {humanizeToken(client.last_action)}

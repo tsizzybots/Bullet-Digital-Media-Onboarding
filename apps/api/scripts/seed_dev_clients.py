@@ -32,18 +32,13 @@ from datetime import UTC, datetime, timedelta
 
 from argon2 import PasswordHasher
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from bullet_api.config import get_async_database_url, get_settings
+from bullet_api.db import AsyncSessionLocal, engine
+from bullet_api.seed_safety import assert_local_seed_db, dev_seed_password
 
 # A confirmed founder so you can log straight into the dashboard in dev.
 DEV_EMAIL = "dev@bulletdigitalmedia.com"
-DEV_PASSWORD = "DevPassw0rd!seed"
 
 
 @dataclass(frozen=True)
@@ -206,18 +201,13 @@ async def _upsert_action(
 
 async def seed_dev_clients() -> int:
     hasher = PasswordHasher()
-    password_hash = hasher.hash(DEV_PASSWORD)
+    password_hash = hasher.hash(dev_seed_password())
     now = datetime.now(UTC)
 
-    engine = create_async_engine(
-        get_async_database_url(),
-        poolclass=NullPool,
-        future=True,
-        connect_args={"ssl": get_settings().database_ssl_mode},
-    )
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    # Shared AsyncSessionLocal/engine so SSL + timeout config stays in one
+    # place; disposed at the end since this is a one-shot script process.
     try:
-        async with session_factory() as session:
+        async with AsyncSessionLocal() as session:
             await _upsert_dev_user(session, password_hash)
             for spec in CLIENTS:
                 client_id = await _upsert_client(session, spec, now)
@@ -231,12 +221,13 @@ async def seed_dev_clients() -> int:
 
 
 def main() -> None:
+    assert_local_seed_db()
     count = asyncio.run(seed_dev_clients())
     print(
         f"Seeded {count} sample clients + dev user.\n"
         f"  Log in at the dashboard with:\n"
         f"    email:    {DEV_EMAIL}\n"
-        f"    password: {DEV_PASSWORD}\n"
+        f"    password: {dev_seed_password()}\n"
         f"  Then open /clients.",
         file=sys.stderr,
     )

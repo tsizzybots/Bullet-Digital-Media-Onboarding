@@ -9,11 +9,14 @@ as `/me`) - the dashboard is single-tenant.
 
 One statement, no N+1: a `LEFT JOIN LATERAL` picks each client's latest
 `platform_actions` row. `LEFT` so a client with zero actions still appears
-(null `last_action_*`). The lateral orders by `started_at DESC NULLS LAST`
-because `platform_actions` has no `created_at` - `started_at` is the only
-monotonic anchor (an action stamps it when it begins; a never-started row
-sorts last). No migration is needed: `clients.step_entered_at` and
-`platform_actions.status` already exist.
+(null `last_action_*`). The lateral orders by `started_at DESC NULLS LAST,
+pa.id DESC` because `platform_actions` has no `created_at` - `started_at` is
+the only monotonic anchor (an action stamps it when it begins; a never-started
+row sorts last), and `pa.id` breaks ties so a same-`now()` fan-out batch (or
+all-NULL `started_at`) does not flicker the health badge between polls.
+The only new schema for this view is the supporting index on
+`clients(step_entered_at DESC, id)` (migration 0009); the columns themselves
+(`clients.step_entered_at`, `platform_actions.status`) already exist.
 """
 
 from __future__ import annotations
@@ -50,7 +53,7 @@ _LIST_CLIENTS_SQL = text(
         SELECT pa.status, pa.platform, pa.action
         FROM platform_actions pa
         WHERE pa.client_id = c.id
-        ORDER BY pa.started_at DESC NULLS LAST
+        ORDER BY pa.started_at DESC NULLS LAST, pa.id DESC
         LIMIT 1
     ) la ON true
     ORDER BY c.step_entered_at DESC, c.id

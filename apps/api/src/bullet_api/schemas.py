@@ -78,8 +78,8 @@ class ClientListItem(BaseModel):
 
     `id` is stringified (opaque identifier, same as `MeResponse`).
     `step_entered_at` is the time the client entered `current_step`; the
-    dashboard derives the displayed time-in-step from it client-side so the
-    duration ticks without a refetch. `last_action_*` describe the client's
+    dashboard derives the displayed time-in-step from it client-side (recomputed
+    on each poll). `last_action_*` describe the client's
     most-recently-started `platform_actions` row (the onboarding-health
     signal); all three are null for a client with no recorded actions yet.
     """

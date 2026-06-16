@@ -21,7 +21,7 @@
         "type": "object"
       },
       "ClientListItem": {
-        "description": "One row of the dashboard `/clients` list view (S1-31).\n\n`id` is stringified (opaque identifier, same as `MeResponse`).\n`step_entered_at` is the time the client entered `current_step`; the\ndashboard derives the displayed time-in-step from it client-side so the\nduration ticks without a refetch. `last_action_*` describe the client's\nmost-recently-started `platform_actions` row (the onboarding-health\nsignal); all three are null for a client with no recorded actions yet.",
+        "description": "One row of the dashboard `/clients` list view (S1-31).\n\n`id` is stringified (opaque identifier, same as `MeResponse`).\n`step_entered_at` is the time the client entered `current_step`; the\ndashboard derives the displayed time-in-step from it client-side (recomputed\non each poll). `last_action_*` describe the client's\nmost-recently-started `platform_actions` row (the onboarding-health\nsignal); all three are null for a client with no recorded actions yet.",
         "properties": {
           "business_name": {
             "anyOf": [

@@ -16,26 +16,15 @@ import asyncio
 import sys
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import NullPool
 
-from bullet_api.config import get_async_database_url, get_settings
+from bullet_api.db import AsyncSessionLocal, engine
+from bullet_api.db.enums import CURRENT_STEP_VALUES
+from bullet_api.seed_safety import assert_local_seed_db
 
 
 async def upsert_one(*, doc_id: str, business_name: str, email: str, current_step: str) -> None:
-    engine = create_async_engine(
-        get_async_database_url(),
-        poolclass=NullPool,
-        future=True,
-        connect_args={"ssl": get_settings().database_ssl_mode},
-    )
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
-        async with session_factory() as session:
+        async with AsyncSessionLocal() as session:
             await session.execute(
                 text(
                     "INSERT INTO clients "
@@ -63,9 +52,13 @@ def main() -> None:
     parser.add_argument("--doc-id", required=True)
     parser.add_argument("--business", required=True)
     parser.add_argument("--email", required=True)
-    parser.add_argument("--step", required=True)
+    # Validate against the enum here so a typo aborts with a clear message
+    # instead of a Postgres 22P02 that global-setup.ts mislabels as a
+    # DATABASE_URL / migrations problem.
+    parser.add_argument("--step", required=True, choices=CURRENT_STEP_VALUES)
     args = parser.parse_args()
 
+    assert_local_seed_db()
     asyncio.run(
         upsert_one(
             doc_id=args.doc_id,

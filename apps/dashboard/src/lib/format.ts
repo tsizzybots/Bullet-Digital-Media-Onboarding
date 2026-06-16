@@ -22,8 +22,9 @@ export function stepLabel(step: string): string {
 
 /**
  * Compact "time in step" from an ISO timestamp, relative to now: `just now`,
- * `12m`, `3h`, `5d`. Computed in the browser so it ticks between polls without
- * a refetch. Guards against clock skew (future timestamps -> `just now`).
+ * `12m`, `3h`, `5d`. Recomputed on each render (i.e. each poll) from
+ * `step_entered_at` - it does not self-tick between polls. Guards against clock
+ * skew (future timestamps -> `just now`).
  */
 export function formatTimeInStep(iso: string, now: Date = new Date()): string {
   const then = new Date(iso).getTime()

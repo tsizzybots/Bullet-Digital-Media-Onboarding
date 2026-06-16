@@ -33,6 +33,13 @@ test('clients list renders seeded clients and polls in a new one', async ({
   await expect(page.getByText('E2E Bravo Fitness')).toBeVisible()
   await expect(page.getByText('E2E Charlie Studio')).toBeVisible()
 
+  // Charlie carries a dead_lettered last action; assert the format.ts
+  // status->variant mapping renders it as the danger (red) badge. This is the
+  // stopgap live coverage of lib/format.ts until a JS unit runner lands (S1-36).
+  const deadBadge = page.getByText('Dead lettered', { exact: true })
+  await expect(deadBadge).toBeVisible()
+  await expect(deadBadge).toHaveClass(/red/)
+
   // Insert a fourth client server-side (no page reload).
   execFileSync(
     'uv',
