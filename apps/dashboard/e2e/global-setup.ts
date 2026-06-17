@@ -76,4 +76,21 @@ export default async function globalSetup(): Promise<void> {
         }`,
     )
   }
+
+  // Seed one unlinked sales-call transcript for the S1-27a manual-attach spec.
+  // Self-resetting (forces back to unlinked on conflict) so re-runs are clean.
+  try {
+    execFileSync('uv', ['run', 'python', 'scripts/seed_e2e_transcripts.py'], {
+      cwd: API_DIR,
+      env: process.env,
+      encoding: 'utf-8',
+    })
+  } catch (error) {
+    throw new Error(
+      `E2E transcript seed failed. Ensure DATABASE_URL is set and the DB is ` +
+        `migrated (make db-upgrade). Underlying error: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+    )
+  }
 }

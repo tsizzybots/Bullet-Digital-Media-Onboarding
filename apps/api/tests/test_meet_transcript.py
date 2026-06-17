@@ -34,10 +34,11 @@ from bullet_api.google.meet_client import (
     TranscriptEntry,
 )
 from bullet_api.storage.client import FakeStorageClient
-from bullet_api.worker import TRANSCRIPT_LINKED_EVENT, FakeEventEmitter
+from bullet_api.worker import MEET_TRANSCRIPT_READY_EVENT, TRANSCRIPT_LINKED_EVENT, FakeEventEmitter
 from bullet_api.worker.meet_transcript import (
     EmptyTranscriptError,
     build_transcript_key,
+    capture_meet_transcript,
     capture_meet_transcript_core,
 )
 
@@ -369,6 +370,16 @@ async def test_multi_invitee_links_only_the_client_attendee(async_session: Async
     }
     assert rows[0].client_id == client_id
     assert [n for n, _ in emitter.sent] == [TRANSCRIPT_LINKED_EVENT]
+
+
+def test_capture_worker_inngest_config() -> None:
+    """The Inngest wrapper triggers on google_meet.transcript_ready and declares
+    the global + per-transcript concurrency caps. No DB needed - pure config."""
+    cfg = capture_meet_transcript.get_config("http://localhost:8000/api/inngest").main
+    assert [t.event for t in cfg.triggers] == [MEET_TRANSCRIPT_READY_EVENT]
+    caps = {(c.key, c.limit) for c in cfg.concurrency}
+    assert (None, 5) in caps  # global cap bounds parallel Google/R2 work
+    assert ("event.data.transcript_name", 1) in caps  # one run per transcript
 
 
 @pytest.mark.db
