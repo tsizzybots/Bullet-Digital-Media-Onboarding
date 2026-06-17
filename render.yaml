@@ -227,6 +227,16 @@ services:
       - fromGroup: bullet-staging-env
       - key: NEXT_PUBLIC_API_URL
         value: https://bullet-api-staging.onrender.com
+      # Inngest UI base for the detail page's run deep-links (S1-32). Paste
+      # the Inngest Cloud env URL (e.g. https://app.inngest.com/env/<env>);
+      # the dashboard appends /runs/<id> for app.inngest.com bases (the
+      # /run?runID= shape is dev-server-only). Unset or empty -> production
+      # builds FAIL CLOSED: the UI shows the raw run id instead of a link
+      # (never an operator-localhost URL). Set before staging acceptance.
+      # Staging-only for now: no prod dashboard service exists yet; mirror
+      # this slot when it is instantiated.
+      - key: NEXT_PUBLIC_INNGEST_URL
+        sync: false
       # Sentry (S1-20)
       # Per-service DSN for the browser bundle: points at the
       # `bullet-dashboard-staging` Sentry project. Pasted into the Render

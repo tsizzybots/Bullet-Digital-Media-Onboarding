@@ -50,7 +50,14 @@ export function ClientsTable() {
   }
 
   if (isPending || !data) {
-    return <TableFrame>{<SkeletonRows />}</TableFrame>
+    // Live region lives OUTSIDE the table: a tr with role="status" would
+    // break the required rowgroup>row ARIA structure (axe flags it).
+    return (
+      <div role="status" aria-label="Loading clients">
+        <TableFrame>{<SkeletonRows />}</TableFrame>
+        <span className="sr-only">Loading clients...</span>
+      </div>
+    )
   }
 
   if (data.clients.length === 0) {
@@ -144,7 +151,7 @@ function SkeletonRows() {
   return (
     <>
       {[0, 1, 2].map((row) => (
-        <tr key={row} className="border-t border-border">
+        <tr key={row} aria-hidden className="border-t border-border">
           {COLUMNS.map((col) => (
             <td key={col} className="px-4 py-3">
               <div className="h-4 w-24 animate-pulse rounded bg-muted" />

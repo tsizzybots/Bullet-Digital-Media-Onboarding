@@ -68,6 +68,10 @@ export default defineConfig({
       timeout: 120_000,
       env: {
         NEXT_PUBLIC_API_URL: 'http://localhost:8000',
+        // Pinned so the client-detail spec's exact Inngest-href assertion is
+        // self-contained - a developer's .env.local value (or a reused dev
+        // server with a different one) must not change what the spec sees.
+        NEXT_PUBLIC_INNGEST_URL: 'http://localhost:8288',
       },
     },
   ],

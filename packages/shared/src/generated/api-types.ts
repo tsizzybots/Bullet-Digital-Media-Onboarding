@@ -169,6 +169,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/clients/{client_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Client Detail
+         * @description Detail-page payload for one client. 404 for unknown OR malformed ids
+         *     (a non-UUID path segment is just an id we will never have - not a server
+         *     error and not worth a distinct status), 401 without a live session.
+         */
+        get: operations["get_client_detail_clients__client_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -248,6 +270,76 @@ export interface components {
             status: string;
         };
         /**
+         * ClientDetailResponse
+         * @description `GET /clients/{id}` - the Sprint 1 detail page payload (S1-32).
+         *
+         *     One payload feeds the whole page (one 5s poll): metadata, step,
+         *     the latest sales-call summary batch from `client_knowledge` (empty list
+         *     until S1-27/29/30 produce one - the dashboard's "no summary yet" state),
+         *     the platform ids the deep-link grid is built from (null = not connected,
+         *     rendered as a placeholder chip), and the recent action history.
+         */
+        ClientDetailResponse: {
+            /** Actions */
+            actions: components["schemas"]["PlatformActionItem"][];
+            /** Asana Finance Task Id */
+            asana_finance_task_id: string | null;
+            /** Asana Project Id */
+            asana_project_id: string | null;
+            /** Business Name */
+            business_name: string | null;
+            /** Contact Name */
+            contact_name: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Current Step */
+            current_step: string;
+            /** Drive Folder Id */
+            drive_folder_id: string | null;
+            /** Email */
+            email: string;
+            /** Ghl Contact Id */
+            ghl_contact_id: string | null;
+            /** Ghl Subaccount Id */
+            ghl_subaccount_id: string | null;
+            /** Hubspot Contact Id */
+            hubspot_contact_id: string | null;
+            /** Id */
+            id: string;
+            /** Legal Entity */
+            legal_entity: string;
+            /** Meta Ad Account Id */
+            meta_ad_account_id: string | null;
+            /** Pandadoc Document Id */
+            pandadoc_document_id: string | null;
+            /** Phone */
+            phone: string | null;
+            /** Sales Summary */
+            sales_summary: components["schemas"]["KnowledgeEntry"][];
+            /** Sheet Row Id */
+            sheet_row_id: string | null;
+            /** Slack Thread Ts */
+            slack_thread_ts: string | null;
+            /**
+             * Step Entered At
+             * Format: date-time
+             */
+            step_entered_at: string;
+            /** Stripe Customer Id */
+            stripe_customer_id: string | null;
+            /** Stripe Subscription Id */
+            stripe_subscription_id: string | null;
+            /** Timely Client Id */
+            timely_client_id: string | null;
+            /** Timely Project Id */
+            timely_project_id: string | null;
+            /** Xero Contact Id */
+            xero_contact_id: string | null;
+        };
+        /**
          * ClientListItem
          * @description One row of the dashboard `/clients` list view (S1-31).
          *
@@ -302,6 +394,30 @@ export interface components {
             /** Status */
             status: string;
         };
+        /**
+         * KnowledgeEntry
+         * @description One `client_knowledge` row surfaced on the detail page (S1-32).
+         *
+         *     `key` is a PRD §7.1 top-level field name (`business_type`,
+         *     `business_goals`, `budget_range_usd`, `pain_points`, `red_flags`,
+         *     `next_steps`, `notable_quotes`) - the pinned contract S1-30 writes to.
+         *     `value` is the §7.1 JSONB shape for that key; `value_text` is the prose
+         *     rendering the dashboard can fall back to. The dashboard renders unknown
+         *     keys generically, so additions to §7.1 never break the page.
+         */
+        KnowledgeEntry: {
+            /**
+             * Captured At
+             * Format: date-time
+             */
+            captured_at: string;
+            /** Key */
+            key: string;
+            /** Value */
+            value: unknown;
+            /** Value Text */
+            value_text: string | null;
+        };
         /** LoginRequest */
         LoginRequest: {
             /**
@@ -328,6 +444,34 @@ export interface components {
             id: string;
             /** Role */
             role: string;
+        };
+        /**
+         * PlatformActionItem
+         * @description One `platform_actions` row in the detail page's action history.
+         *
+         *     `inngest_run_id` is returned raw; the dashboard builds the Inngest UI
+         *     deep-link from its own `NEXT_PUBLIC_INNGEST_URL` config (URL policy is
+         *     presentation, not API contract).
+         */
+        PlatformActionItem: {
+            /** Action */
+            action: string;
+            /** Completed At */
+            completed_at: string | null;
+            /** External Id */
+            external_id: string | null;
+            /** Inngest Run Id */
+            inngest_run_id: string | null;
+            /** Last Error */
+            last_error: string | null;
+            /** Platform */
+            platform: string;
+            /** Retry Count */
+            retry_count: number;
+            /** Started At */
+            started_at: string | null;
+            /** Status */
+            status: string;
         };
         /**
          * ResendConfirmationRequest
@@ -623,6 +767,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ClientsListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_client_detail_clients__client_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                client_id: string;
+            };
+            cookie?: {
+                session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientDetailResponse"];
                 };
             };
             /** @description Validation Error */

@@ -55,9 +55,24 @@ export function actionStatusVariant(status: string | null): BadgeVariant {
   }
 }
 
+// Tokens that are acronyms/brands, not words - title-casing "ghl" to "Ghl"
+// reads wrong on the board.
+const TOKEN_LABELS: Record<string, string> = {
+  ghl: 'GHL',
+  hubspot: 'HubSpot',
+  pandadoc: 'PandaDoc',
+  gsheets: 'Google Sheets',
+  gdocs: 'Google Docs',
+  gdrive: 'Google Drive',
+  gmail: 'Gmail',
+  gcal: 'Google Calendar',
+}
+
 /** Title-case a status / action token for display: `dead_lettered` -> `Dead lettered`. */
 export function humanizeToken(token: string | null): string {
   if (!token) return '-'
+  const known = TOKEN_LABELS[token]
+  if (known) return known
   const spaced = token.replace(/_/g, ' ')
   return spaced.charAt(0).toUpperCase() + spaced.slice(1)
 }
