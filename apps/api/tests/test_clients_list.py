@@ -111,14 +111,20 @@ async def _seed_action(
     action: str,
     status: str,
     started_at: datetime | None,
-) -> None:
+    action_id: uuid.UUID | None = None,
+) -> uuid.UUID:
+    # `action_id` is explicit when a test needs to control the `pa.id DESC`
+    # tiebreak deterministically (the column defaults to a random
+    # gen_random_uuid(), so insertion order does not imply id order).
+    action_id = action_id or uuid.uuid4()
     await db.execute(
         text(
             "INSERT INTO platform_actions "
-            "  (client_id, platform, action, idempotency_key, status, started_at) "
-            "VALUES (:client_id, :platform, :action, :key, :status, :started_at)"
+            "  (id, client_id, platform, action, idempotency_key, status, started_at) "
+            "VALUES (:id, :client_id, :platform, :action, :key, :status, :started_at)"
         ),
         {
+            "id": action_id,
             "client_id": client_id,
             "platform": platform,
             "action": action,
@@ -127,6 +133,7 @@ async def _seed_action(
             "started_at": started_at,
         },
     )
+    return action_id
 
 
 def _by_email(payload: dict, email: str) -> dict | None:
@@ -232,6 +239,102 @@ async def test_last_action_reflects_most_recently_started(
     assert row["last_action_status"] == "failed"
     assert row["last_action_platform"] == "stripe"
     assert row["last_action"] == "create_customer"
+
+
+@pytest.mark.db
+async def test_last_action_tiebreaks_on_id_when_started_at_equal(
+    async_session: AsyncSession,
+    authed_client: AsyncClient,
+) -> None:
+    # Two actions sharing an identical started_at (the same-now() fan-out case):
+    # the LATERAL must break the tie on `pa.id DESC` so the reported action is
+    # stable between polls. Postgres orders uuid by its big-endian value, which
+    # matches Python's UUID ordering, so the higher of the two sorted ids wins.
+    run = uuid.uuid4().hex[:8]
+    email = f"tie_{run}@gym.example"
+    client_id = await _seed_client(
+        async_session,
+        email=email,
+        current_step="signed",
+        step_entered_at=datetime(2026, 6, 4, 9, 0, 0, tzinfo=UTC),
+    )
+    same = datetime(2026, 6, 4, 9, 0, 0, tzinfo=UTC)
+    id_low, id_high = sorted([uuid.uuid4(), uuid.uuid4()])
+    # Lower id seeded as the "loser" - if the id tiebreak were dropped, ordering
+    # would be non-deterministic and this assertion would flap.
+    await _seed_action(
+        async_session,
+        client_id=client_id,
+        platform="ghl",
+        action="loser_action",
+        status="success",
+        started_at=same,
+        action_id=id_low,
+    )
+    await _seed_action(
+        async_session,
+        client_id=client_id,
+        platform="stripe",
+        action="winner_action",
+        status="failed",
+        started_at=same,
+        action_id=id_high,
+    )
+
+    resp = await authed_client.get("/clients")
+    assert resp.status_code == 200, resp.text
+    row = _by_email(resp.json(), email)
+    assert row is not None
+    assert row["last_action"] == "winner_action"
+    assert row["last_action_platform"] == "stripe"
+    assert row["last_action_status"] == "failed"
+
+
+@pytest.mark.db
+async def test_last_action_orders_non_null_started_at_before_null(
+    async_session: AsyncSession,
+    authed_client: AsyncClient,
+) -> None:
+    # NULLS LAST must win over the id tiebreak: a timestamped action outranks a
+    # never-started (NULL started_at) one even when the NULL row has the higher
+    # id. Guards against the all-NULL/partial-NULL flicker the ordering fixes.
+    run = uuid.uuid4().hex[:8]
+    email = f"nulls_{run}@gym.example"
+    client_id = await _seed_client(
+        async_session,
+        email=email,
+        current_step="signed",
+        step_entered_at=datetime(2026, 6, 5, 9, 0, 0, tzinfo=UTC),
+    )
+    id_low, id_high = sorted([uuid.uuid4(), uuid.uuid4()])
+    # NULL-started_at row gets the HIGHER id - so if NULLS LAST were dropped it
+    # would wrongly win on the id tiebreak.
+    await _seed_action(
+        async_session,
+        client_id=client_id,
+        platform="ghl",
+        action="never_started",
+        status="pending",
+        started_at=None,
+        action_id=id_high,
+    )
+    await _seed_action(
+        async_session,
+        client_id=client_id,
+        platform="stripe",
+        action="real_started",
+        status="failed",
+        started_at=datetime(2026, 6, 5, 9, 2, 0, tzinfo=UTC),
+        action_id=id_low,
+    )
+
+    resp = await authed_client.get("/clients")
+    assert resp.status_code == 200, resp.text
+    row = _by_email(resp.json(), email)
+    assert row is not None
+    assert row["last_action"] == "real_started"
+    assert row["last_action_platform"] == "stripe"
+    assert row["last_action_status"] == "failed"
 
 
 @pytest.mark.db
