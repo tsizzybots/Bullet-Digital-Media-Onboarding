@@ -20,6 +20,279 @@
         "title": "AdminPingResponse",
         "type": "object"
       },
+      "ClientDetailResponse": {
+        "description": "`GET /clients/{id}` - the Sprint 1 detail page payload (S1-32).\n\nOne payload feeds the whole page (one 5s poll): metadata, step,\nthe latest sales-call summary batch from `client_knowledge` (empty list\nuntil S1-27/29/30 produce one - the dashboard's \"no summary yet\" state),\nthe platform ids the deep-link grid is built from (null = not connected,\nrendered as a placeholder chip), and the recent action history.",
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/PlatformActionItem"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "asana_finance_task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asana Finance Task Id"
+          },
+          "asana_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asana Project Id"
+          },
+          "business_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Business Name"
+          },
+          "contact_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Name"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_step": {
+            "title": "Current Step",
+            "type": "string"
+          },
+          "drive_folder_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drive Folder Id"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "ghl_contact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ghl Contact Id"
+          },
+          "ghl_subaccount_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ghl Subaccount Id"
+          },
+          "hubspot_contact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hubspot Contact Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "legal_entity": {
+            "title": "Legal Entity",
+            "type": "string"
+          },
+          "meta_ad_account_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meta Ad Account Id"
+          },
+          "pandadoc_document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pandadoc Document Id"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
+          },
+          "sales_summary": {
+            "items": {
+              "$ref": "#/components/schemas/KnowledgeEntry"
+            },
+            "title": "Sales Summary",
+            "type": "array"
+          },
+          "sheet_row_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sheet Row Id"
+          },
+          "slack_thread_ts": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slack Thread Ts"
+          },
+          "step_entered_at": {
+            "format": "date-time",
+            "title": "Step Entered At",
+            "type": "string"
+          },
+          "stripe_customer_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stripe Customer Id"
+          },
+          "stripe_subscription_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stripe Subscription Id"
+          },
+          "timely_client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timely Client Id"
+          },
+          "timely_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timely Project Id"
+          },
+          "xero_contact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Xero Contact Id"
+          }
+        },
+        "required": [
+          "id",
+          "business_name",
+          "contact_name",
+          "email",
+          "phone",
+          "legal_entity",
+          "current_step",
+          "step_entered_at",
+          "created_at",
+          "sales_summary",
+          "actions",
+          "hubspot_contact_id",
+          "pandadoc_document_id",
+          "ghl_contact_id",
+          "ghl_subaccount_id",
+          "asana_project_id",
+          "asana_finance_task_id",
+          "stripe_customer_id",
+          "stripe_subscription_id",
+          "xero_contact_id",
+          "timely_client_id",
+          "timely_project_id",
+          "meta_ad_account_id",
+          "drive_folder_id",
+          "sheet_row_id",
+          "slack_thread_ts"
+        ],
+        "title": "ClientDetailResponse",
+        "type": "object"
+      },
       "ClientListItem": {
         "description": "One row of the dashboard `/clients` list view (S1-31).\n\n`id` is stringified (opaque identifier, same as `MeResponse`).\n`step_entered_at` is the time the client entered `current_step`; the\ndashboard derives the displayed time-in-step from it client-side (recomputed\non each poll). `last_action_*` describe the client's\nmost-recently-started `platform_actions` row (the onboarding-health\nsignal); all three are null for a client with no recorded actions yet.",
         "properties": {
@@ -154,6 +427,42 @@
         "title": "HealthzResponse",
         "type": "object"
       },
+      "KnowledgeEntry": {
+        "description": "One `client_knowledge` row surfaced on the detail page (S1-32).\n\n`key` is a PRD \u00a77.1 top-level field name (`business_type`,\n`business_goals`, `budget_range_usd`, `pain_points`, `red_flags`,\n`next_steps`, `notable_quotes`) - the pinned contract S1-30 writes to.\n`value` is the \u00a77.1 JSONB shape for that key; `value_text` is the prose\nrendering the dashboard can fall back to. The dashboard renders unknown\nkeys generically, so additions to \u00a77.1 never break the page.",
+        "properties": {
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "value_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Text"
+          }
+        },
+        "required": [
+          "key",
+          "value",
+          "value_text",
+          "captured_at"
+        ],
+        "title": "KnowledgeEntry",
+        "type": "object"
+      },
       "LoginRequest": {
         "properties": {
           "email": {
@@ -200,6 +509,97 @@
           "role"
         ],
         "title": "MeResponse",
+        "type": "object"
+      },
+      "PlatformActionItem": {
+        "description": "One `platform_actions` row in the detail page's action history.\n\n`inngest_run_id` is returned raw; the dashboard builds the Inngest UI\ndeep-link from its own `NEXT_PUBLIC_INNGEST_URL` config (URL policy is\npresentation, not API contract).",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "external_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Id"
+          },
+          "inngest_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inngest Run Id"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "platform": {
+            "title": "Platform",
+            "type": "string"
+          },
+          "retry_count": {
+            "title": "Retry Count",
+            "type": "integer"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "action",
+          "status",
+          "external_id",
+          "retry_count",
+          "last_error",
+          "inngest_run_id",
+          "started_at",
+          "completed_at"
+        ],
+        "title": "PlatformActionItem",
         "type": "object"
       },
       "ResendConfirmationRequest": {
@@ -610,6 +1010,65 @@
           }
         },
         "summary": "List Clients",
+        "tags": [
+          "clients"
+        ]
+      }
+    },
+    "/clients/{client_id}": {
+      "get": {
+        "description": "Detail-page payload for one client. 404 for unknown OR malformed ids\n(a non-UUID path segment is just an id we will never have - not a server\nerror and not worth a distinct status), 401 without a live session.",
+        "operationId": "get_client_detail_clients__client_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "title": "Client Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Client Detail",
         "tags": [
           "clients"
         ]

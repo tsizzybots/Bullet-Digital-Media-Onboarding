@@ -25,6 +25,7 @@ Usage (from apps/api, with DATABASE_URL set + migrations applied):
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -47,6 +48,45 @@ class ActionSpec:
     action: str
     status: str
     started_minutes_ago: int
+    inngest_run_id: str | None = None
+
+
+# PRD §7.1-shaped sales summary seeded for PeakFit Studio so the S1-32 detail
+# page is viewable populated in dev. Same shape S1-30 will write for real:
+# one client_knowledge row per top-level field, source='sales_call'.
+DEV_SUMMARY_CLIENT_SLUG = "peakfit-studio"
+DEV_SUMMARY_FIELDS: dict[str, object] = {
+    "business_type": "Boutique strength and conditioning studio",
+    "business_goals": [
+        "Grow to 250 members by year end",
+        "Launch a small-group PT tier",
+        "Fill the 06:00 and 07:00 weekday slots",
+    ],
+    "budget_range_usd": {"min": 1500, "max": 2500, "currency": "USD"},
+    "pain_points": [
+        "High no-show rate on free trials",
+        "Churn spikes after month three",
+        "Previous agency reported vanity metrics only",
+    ],
+    "red_flags": ["Considering a second site mid-campaign"],
+    "next_steps": [
+        "Send partnership agreement",
+        "Book kick-off call for next week",
+        "Collect brand assets via portal",
+    ],
+    "notable_quotes": [
+        {
+            "speaker": "Dan (owner)",
+            "quote": "We tried Meta ads ourselves and burned 2k in a month with nothing to show.",
+            "timestamp_seconds": 412,
+        },
+        {
+            "speaker": "Dan (owner)",
+            "quote": "If you can fill the 6am slots I'll be a customer for life.",
+            "timestamp_seconds": 1685,
+        },
+    ],
+}
 
 
 @dataclass(frozen=True)
@@ -92,7 +132,13 @@ CLIENTS: list[ClientSpec] = [
         current_step="signed",
         step_age=timedelta(hours=2),
         actions=[
-            ActionSpec("ghl", "create_subaccount", "success", 118),
+            ActionSpec(
+                "ghl",
+                "create_subaccount",
+                "success",
+                118,
+                inngest_run_id="01DEVSEED0RUN0GHL0PEAKFIT",
+            ),
             ActionSpec("stripe", "create_customer", "in_progress", 5),
         ],
     ),
@@ -183,10 +229,13 @@ async def _upsert_action(
     await session.execute(
         text(
             "INSERT INTO platform_actions "
-            "  (client_id, platform, action, idempotency_key, status, started_at) "
-            "VALUES (:cid, :platform, :action, :key, :status, :started_at) "
+            "  (client_id, platform, action, idempotency_key, status, "
+            "   started_at, inngest_run_id) "
+            "VALUES (:cid, :platform, :action, :key, :status, "
+            "        :started_at, :run_id) "
             "ON CONFLICT (idempotency_key) DO UPDATE SET "
-            "  status = EXCLUDED.status, started_at = EXCLUDED.started_at"
+            "  status = EXCLUDED.status, started_at = EXCLUDED.started_at, "
+            "  inngest_run_id = EXCLUDED.inngest_run_id"
         ),
         {
             "cid": client_id,
@@ -195,8 +244,40 @@ async def _upsert_action(
             "key": f"devseed:{spec.email}:{action.platform}:{action.action}",
             "status": action.status,
             "started_at": now - timedelta(minutes=action.started_minutes_ago),
+            "run_id": action.inngest_run_id,
         },
     )
+
+
+async def _replace_summary_batch(
+    session: AsyncSession, client_id: uuid.UUID, now: datetime
+) -> None:
+    """Idempotent dev summary: wipe the client's sales_call knowledge rows and
+    re-insert the fixture batch (delete+insert beats upsert here because
+    client_knowledge has no unique key, and this is a devseed-only client).
+    Concurrent runs are not supported (two interleaved runs can leave two
+    batches until the next run cleans up) - fine for a dev-only script."""
+    await session.execute(
+        text("DELETE FROM client_knowledge WHERE client_id = :cid AND source = 'sales_call'"),
+        {"cid": client_id},
+    )
+    captured_at = now - timedelta(hours=1, minutes=45)
+    for key, value in DEV_SUMMARY_FIELDS.items():
+        await session.execute(
+            text(
+                "INSERT INTO client_knowledge "
+                "  (client_id, source, key, value, value_text, captured_at) "
+                "VALUES (:cid, 'sales_call', :key, cast(:value AS jsonb), "
+                "        :value_text, :captured_at)"
+            ),
+            {
+                "cid": client_id,
+                "key": key,
+                "value": json.dumps(value),
+                "value_text": json.dumps(value) if not isinstance(value, str) else value,
+                "captured_at": captured_at,
+            },
+        )
 
 
 async def seed_dev_clients() -> int:
@@ -213,6 +294,8 @@ async def seed_dev_clients() -> int:
                 client_id = await _upsert_client(session, spec, now)
                 for action in spec.actions:
                     await _upsert_action(session, client_id, spec, action, now)
+                if spec.slug == DEV_SUMMARY_CLIENT_SLUG:
+                    await _replace_summary_batch(session, client_id, now)
             await session.commit()
     finally:
         await engine.dispose()
