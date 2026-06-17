@@ -50,6 +50,15 @@ DOCUMENT_KIND_VALUES: tuple[str, ...] = (
     DOCUMENT_KIND_PANDADOC_SIGNED_PDF,
 )
 
+# `source` enum on `sales_call_transcripts`. Source:
+# 0010_create_sales_call_transcripts.py `SALES_CALL_TRANSCRIPT_SOURCE_VALUES`.
+# Google Meet is Bullet's only sales-call platform (confirmed 17/06/2026;
+# Zoom dropped). Extensible: add a value here AND in the migration's tuple if a
+# second provider is ever introduced.
+SALES_CALL_TRANSCRIPT_SOURCE_GOOGLE_MEET = "google_meet"
+
+SALES_CALL_TRANSCRIPT_SOURCE_VALUES: tuple[str, ...] = (SALES_CALL_TRANSCRIPT_SOURCE_GOOGLE_MEET,)
+
 
 __all__ = [
     "CURRENT_STEP_AGREEMENT",
@@ -65,4 +74,6 @@ __all__ = [
     "DOCUMENT_KIND_SCRAPED_PAGE",
     "DOCUMENT_KIND_TRANSCRIPT_TEXT",
     "DOCUMENT_KIND_VALUES",
+    "SALES_CALL_TRANSCRIPT_SOURCE_GOOGLE_MEET",
+    "SALES_CALL_TRANSCRIPT_SOURCE_VALUES",
 ]

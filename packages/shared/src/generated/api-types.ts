@@ -234,6 +234,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/transcripts/unlinked": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Unlinked Transcripts
+         * @description List parked transcripts with no client yet, newest capture first. 401
+         *     without a live session.
+         */
+        get: operations["list_unlinked_transcripts_transcripts_unlinked_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transcripts/{transcript_id}/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Link Transcript
+         * @description Manually attach a parked transcript to a client. 404 unknown transcript /
+         *     malformed id, 409 already linked, 400 unknown client.
+         */
+        post: operations["link_transcript_transcripts__transcript_id__link_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/version": {
         parameters: {
             query?: never;
@@ -418,6 +460,27 @@ export interface components {
             /** Value Text */
             value_text: string | null;
         };
+        /**
+         * LinkTranscriptRequest
+         * @description Body for `POST /transcripts/{id}/link` - the client to attach to.
+         */
+        LinkTranscriptRequest: {
+            /** Client Id */
+            client_id: string;
+        };
+        /**
+         * LinkTranscriptResponse
+         * @description Result of a manual attach: the linked transcript + the documents row it
+         *     created (null only in the rare case the transcript text was not yet stored).
+         */
+        LinkTranscriptResponse: {
+            /** Client Id */
+            client_id: string;
+            /** Document Id */
+            document_id: string | null;
+            /** Transcript Id */
+            transcript_id: string;
+        };
         /** LoginRequest */
         LoginRequest: {
             /**
@@ -499,6 +562,39 @@ export interface components {
         StatusResponse: {
             /** Status */
             status: string;
+        };
+        /**
+         * UnlinkedTranscriptItem
+         * @description One parked sales-call transcript awaiting a client (S1-27 manual fallback).
+         *
+         *     These are the ~10% the auto-link-by-email path misses. `participant_emails`
+         *     are the invite attendees (lowercased) the team uses to pick the right client;
+         *     `meeting_start` + `transcript_chars` help them recognise the call.
+         */
+        UnlinkedTranscriptItem: {
+            /**
+             * Captured At
+             * Format: date-time
+             */
+            captured_at: string;
+            /** Id */
+            id: string;
+            /** Meeting Start */
+            meeting_start: string | null;
+            /** Participant Emails */
+            participant_emails: string[];
+            /** Source */
+            source: string;
+            /** Transcript Chars */
+            transcript_chars: number | null;
+        };
+        /**
+         * UnlinkedTranscriptsResponse
+         * @description Envelope for `GET /transcripts/unlinked` - parked transcripts, newest first.
+         */
+        UnlinkedTranscriptsResponse: {
+            /** Transcripts */
+            transcripts: components["schemas"]["UnlinkedTranscriptItem"][];
         };
         /** ValidationError */
         ValidationError: {
@@ -851,6 +947,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_unlinked_transcripts_transcripts_unlinked_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: {
+                session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnlinkedTranscriptsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    link_transcript_transcripts__transcript_id__link_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                transcript_id: string;
+            };
+            cookie?: {
+                session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LinkTranscriptRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LinkTranscriptResponse"];
                 };
             };
             /** @description Validation Error */

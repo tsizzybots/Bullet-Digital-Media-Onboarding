@@ -90,10 +90,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.config import get_settings
-from bullet_api.db.enums import CURRENT_STEP_SIGNED
+from bullet_api.db.enums import CURRENT_STEP_SIGNED, DOCUMENT_KIND_TRANSCRIPT_TEXT
 from bullet_api.db.session import AsyncSessionLocal
 from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, api_key_for
 from bullet_api.pandadoc.client import HttpPandaDocClient, PandaDocClient, PandaDocNotFound
+from bullet_api.transcripts.linking import (
+    LINK_METHOD_EMAIL_SIGNING,
+    link_transcript_to_client,
+)
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.clients_payload import (
     PandaDocPayloadError,
@@ -102,6 +106,7 @@ from bullet_api.worker.clients_payload import (
 from bullet_api.worker.events import (
     CLIENT_CREATED_EVENT,
     PANDADOC_SIGNED_EVENT,
+    TRANSCRIPT_LINKED_EVENT,
     EventEmitter,
     InngestEventEmitter,
 )
@@ -181,6 +186,78 @@ async def fetch_document_for_orchestrator(
     except RuntimeError as exc:
         # `HttpPandaDocClient` raises RuntimeError when api_key is empty.
         raise inngest.NonRetriableError(str(exc)) from exc
+
+
+async def _link_parked_transcripts(
+    session: AsyncSession, *, client_id: uuid.UUID, email: str
+) -> None:
+    """Link every unlinked sales-call transcript whose invite attendees include
+    this client's email.
+
+    Match is byte-exact jsonb containment against the lowercased email, which is
+    why `participant_emails` is stored lowercased (jsonb cannot use the citext
+    semantics `clients.email` has). Does not commit; the post-commit emit is
+    re-derived separately from the committed rows.
+    """
+    candidates = (
+        (
+            await session.execute(
+                text(
+                    "SELECT id FROM sales_call_transcripts "
+                    "WHERE client_id IS NULL "
+                    "  AND participant_emails @> to_jsonb(cast(:email AS text)) "
+                    "ORDER BY captured_at"
+                ),
+                {"email": email.lower()},
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for transcript_id in candidates:
+        await link_transcript_to_client(
+            session,
+            transcript_id=transcript_id,
+            client_id=client_id,
+            link_method=LINK_METHOD_EMAIL_SIGNING,
+        )
+
+
+async def _emit_signing_transcript_links(
+    emitter: EventEmitter, session: AsyncSession, client_id: uuid.UUID
+) -> None:
+    """Emit `transcript.linked` for every signing-linked transcript of this
+    client that has a documents row. Re-derived from the committed state (not
+    just this pass's links) so an Inngest retry after a post-commit-pre-emit
+    crash still delivers the trigger - the same at-least-once safety the capture
+    worker has. S1-29 dedupes per transcript."""
+    rows = (
+        await session.execute(
+            text(
+                "SELECT t.id AS transcript_id, t.r2_key, t.source, d.id AS document_id "
+                "FROM sales_call_transcripts t "
+                "JOIN documents d "
+                "  ON d.client_id = t.client_id AND d.kind = :kind AND d.r2_key = t.r2_key "
+                "WHERE t.client_id = :cid AND t.link_method = :method"
+            ),
+            {
+                "cid": client_id,
+                "kind": DOCUMENT_KIND_TRANSCRIPT_TEXT,
+                "method": LINK_METHOD_EMAIL_SIGNING,
+            },
+        )
+    ).all()
+    for row in rows:
+        await emitter.send(
+            TRANSCRIPT_LINKED_EVENT,
+            {
+                "client_id": str(client_id),
+                "transcript_id": str(row.transcript_id),
+                "r2_key": row.r2_key,
+                "source": row.source,
+                "document_id": str(row.document_id),
+            },
+        )
 
 
 async def create_client_record_core(
@@ -285,6 +362,15 @@ async def create_client_record_core(
     if backfill.rowcount == 0:
         raise OnboardingEventNotFoundError(onboarding_event_id)
 
+    # S1-27 layer 2b: claim any sales-call transcripts parked for this client's
+    # email (the call precedes signing, so a transcript captured days ago waits
+    # unlinked until now). Match is on the lowercased email against the
+    # jsonb attendee array; `link_transcript_to_client`'s `WHERE client_id IS
+    # NULL` guard makes this replay-safe (a retry re-links nothing). Runs in the
+    # same transaction as the client upsert so a partial failure rolls back
+    # together; the emits happen after the commit below.
+    await _link_parked_transcripts(session, client_id=client_id, email=fields.email)
+
     # COMMIT BEFORE EMIT. After this point the client row is durable;
     # downstream consumers of `client.created` are guaranteed to find it.
     # If the emit below fails, Inngest retries the whole function; on
@@ -304,6 +390,14 @@ async def create_client_record_core(
             "account": account,
         },
     )
+
+    # Emit transcript.linked for this client's signing-linked transcripts AFTER
+    # commit. Re-derived from the committed rows (not just the rows linked on
+    # THIS pass) so an Inngest retry after a post-commit-pre-emit crash re-emits
+    # rather than silently dropping the summary trigger - matching the capture
+    # worker's re-derive-on-retry posture. S1-29 must be idempotent per
+    # transcript (it can receive a duplicate on a rare create_client_record retry).
+    await _emit_signing_transcript_links(emitter, session, client_id)
 
     log.info(
         "S1-25a client record %s",

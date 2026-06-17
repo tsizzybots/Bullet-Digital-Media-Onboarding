@@ -322,6 +322,72 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- S1-27 Google Meet sales-call transcript capture -----
+    # All empty in local dev / tests (the Fake* Google seams are used) and set
+    # in the Render staging / prod env groups once Bullet provisions the Google
+    # Cloud project + service account. The Http* clients fail loudly
+    # (RuntimeError) on a real call when credentials are empty, so a
+    # mis-configured deployment is loud rather than silently capturing nothing.
+    # IMPORTANT: filling these in requires NO code change - the build is
+    # complete against faked seams and swaps to the live clients purely on
+    # config (see CHANGELOG 17/06/2026 S1-27).
+    google_service_account_json: str = Field(
+        default="",
+        description=(
+            "Service-account key JSON (the full credential document, or its "
+            "contents) used with domain-wide delegation to read Google Meet "
+            "transcripts + Calendar events. Empty in local dev / tests; set in "
+            "the Render env groups. Empty -> the Google clients raise on a real "
+            "call (mirrors the GHL / R2 empty-key posture)."
+        ),
+    )
+    google_workspace_impersonate_subject: str = Field(
+        default="",
+        description=(
+            "Workspace user the service account impersonates via domain-wide "
+            "delegation (typically the meeting organiser or an admin mailbox) "
+            "to fetch transcripts + calendar attendees. Empty in local dev / "
+            "tests; set in the Render env groups."
+        ),
+    )
+    google_meet_api_base_url: str = Field(
+        default="https://meet.googleapis.com",
+        description=(
+            "Base URL for the Google Meet REST API (conferenceRecords / "
+            "transcripts / participants). Overridable per environment but "
+            "defaults to production."
+        ),
+    )
+    google_calendar_api_base_url: str = Field(
+        default="https://www.googleapis.com/calendar/v3",
+        description=(
+            "Base URL for the Google Calendar API, used to read the invite "
+            "attendee emails the auto-link matches on. Overridable per "
+            "environment but defaults to production."
+        ),
+    )
+    google_pubsub_push_audience: str = Field(
+        default="",
+        description=(
+            "Expected `aud` claim on the Google-signed OIDC token attached to "
+            "the Pub/Sub push that delivers Workspace Events (the transcript "
+            "webhook). Empty -> the receiver fails closed (401) because it "
+            "cannot verify the push, mirroring the PandaDoc empty-secret 401. "
+            "Set in the Render env groups to the push endpoint's configured "
+            "audience."
+        ),
+    )
+    google_pubsub_push_sa_email: str = Field(
+        default="",
+        description=(
+            "Service-account email Google signs the Pub/Sub push OIDC token "
+            "with (the push subscription's `oidcToken.serviceAccountEmail`). "
+            "The receiver requires the verified token's `email` claim to match "
+            "this. Empty -> receiver fails closed (401). Set in the Render env "
+            "groups."
+        ),
+    )
+
     @property
     def r2_endpoint_url(self) -> str:
         """The R2 S3-compatible endpoint, derived from the account id.

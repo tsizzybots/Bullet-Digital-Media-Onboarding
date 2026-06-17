@@ -36,6 +36,22 @@ PANDADOC_SIGNED_EVENT = "pandadoc.signed"
 # PandaDoc API key.
 CLIENT_CREATED_EVENT = "client.created"
 
+# Emitted by the S1-27 Google Meet webhook (`/webhooks/google-meet`) once a
+# transcript-ready Pub/Sub push is verified + persisted as an onboarding_events
+# row. The `capture_meet_transcript` worker keys off it to fetch + store the
+# transcript. Data payload: {onboarding_event_id, transcript_name,
+# conference_record_name}. The call precedes the client record, so there is no
+# client_id here - linking happens later (immediately if a client already
+# matches, else at signing time, else manually).
+MEET_TRANSCRIPT_READY_EVENT = "google_meet.transcript_ready"
+
+# Emitted whenever a parked transcript becomes attached to a client (immediate
+# email match at capture, email match at signing time, or a manual assign).
+# S1-29 (AI sales-call summary) keys off this. Data payload: {client_id,
+# transcript_id, r2_key, source, document_id}. At-least-once: the producers emit
+# after commit, so a consumer MUST be idempotent per `transcript_id`.
+TRANSCRIPT_LINKED_EVENT = "transcript.linked"
+
 
 class EventEmitter(Protocol):
     async def send(self, name: str, data: dict) -> None:

@@ -35,7 +35,8 @@ from bullet_api.schemas import (
     MeResponse,
     VersionResponse,
 )
-from bullet_api.webhooks import pandadoc_router
+from bullet_api.transcripts import transcripts_router
+from bullet_api.webhooks import google_meet_router, pandadoc_router
 from bullet_api.worker import inngest_client
 from bullet_api.worker.client import FUNCTIONS
 
@@ -77,7 +78,9 @@ app.include_router(login_router)
 app.include_router(confirmation_router)
 app.include_router(logout_router)
 app.include_router(clients_router)
+app.include_router(transcripts_router)
 app.include_router(pandadoc_router)
+app.include_router(google_meet_router)
 app.include_router(admin_router)
 
 

@@ -174,3 +174,40 @@ class ClientDetailResponse(BaseModel):
     drive_folder_id: str | None
     sheet_row_id: str | None
     slack_thread_ts: str | None
+
+
+class UnlinkedTranscriptItem(BaseModel):
+    """One parked sales-call transcript awaiting a client (S1-27 manual fallback).
+
+    These are the ~10% the auto-link-by-email path misses. `participant_emails`
+    are the invite attendees (lowercased) the team uses to pick the right client;
+    `meeting_start` + `transcript_chars` help them recognise the call.
+    """
+
+    id: str
+    source: str
+    participant_emails: list[str]
+    meeting_start: datetime | None
+    transcript_chars: int | None
+    captured_at: datetime
+
+
+class UnlinkedTranscriptsResponse(BaseModel):
+    """Envelope for `GET /transcripts/unlinked` - parked transcripts, newest first."""
+
+    transcripts: list[UnlinkedTranscriptItem]
+
+
+class LinkTranscriptRequest(BaseModel):
+    """Body for `POST /transcripts/{id}/link` - the client to attach to."""
+
+    client_id: str
+
+
+class LinkTranscriptResponse(BaseModel):
+    """Result of a manual attach: the linked transcript + the documents row it
+    created (null only in the rare case the transcript text was not yet stored)."""
+
+    transcript_id: str
+    client_id: str
+    document_id: str | None
