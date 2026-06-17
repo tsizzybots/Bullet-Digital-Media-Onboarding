@@ -44,20 +44,16 @@ from dataclasses import dataclass
 
 from argon2 import PasswordHasher
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.auth.confirmation import generate_confirmation_token
-from bullet_api.config import get_async_database_url, get_settings
+from bullet_api.db import AsyncSessionLocal, engine
+from bullet_api.seed_safety import assert_local_seed_db, dev_seed_password
 
-# Fixed, known fixture password shared by both users. Deterministic so the
-# E2E specs can read it from the emitted JSON (or hardcode it). This is a
-# test-only credential against ephemeral seed accounts on a test database.
-E2E_PASSWORD = "E2ePassw0rd!seed"
+# Fixture password shared by both users, deterministic so the E2E specs can
+# read it from the emitted JSON. Overridable via DEV_SEED_PASSWORD; the local
+# default is unreachable off localhost (the host guard in seed_safety).
+E2E_PASSWORD = dev_seed_password()
 
 # A valid `user_role` enum value (migration 0006). Founder keeps the seed
 # accounts free of any role-gated UI restrictions in the dashboard.
@@ -129,26 +125,15 @@ async def _upsert_user(
 async def seed_e2e_users() -> dict[str, object]:
     """Seed both fixture users and return the JSON-serialisable payload.
 
-    Builds its own NullPool engine so the script holds no pooled
-    connections at exit; the engine is disposed in a `finally` so a partial
-    failure still releases the connection cleanly.
+    Uses the shared `AsyncSessionLocal`/`engine` (one place for SSL + timeout
+    config) and disposes the engine in a `finally` so a partial failure still
+    releases the connection cleanly.
     """
     hasher = PasswordHasher()
     password_hash = hasher.hash(E2E_PASSWORD)
 
-    engine = create_async_engine(
-        get_async_database_url(),
-        poolclass=NullPool,
-        future=True,
-        connect_args={"ssl": get_settings().database_ssl_mode},
-    )
-    session_factory = async_sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-    )
     try:
-        async with session_factory() as session:
+        async with AsyncSessionLocal() as session:
             await _upsert_user(session, LOGIN_USER, password_hash)
             confirm_id = await _upsert_user(session, CONFIRM_USER, password_hash)
             await session.commit()
@@ -173,6 +158,7 @@ async def seed_e2e_users() -> dict[str, object]:
 
 def main() -> None:
     """CLI entry point. Prints exactly one JSON line to stdout."""
+    assert_local_seed_db()
     print("Seeding Playwright E2E fixture users...", file=sys.stderr)
     payload = asyncio.run(seed_e2e_users())
     # stdout: the single machine-readable line the harness parses.

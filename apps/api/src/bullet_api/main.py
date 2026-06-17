@@ -25,6 +25,7 @@ from bullet_api.auth import (
     logout_router,
     require_founder,
 )
+from bullet_api.clients import clients_router
 from bullet_api.config import get_settings
 from bullet_api.logging_config import configure_logging
 from bullet_api.observability.sentry import init_sentry
@@ -75,6 +76,7 @@ inngest.fast_api.serve(app, inngest_client, FUNCTIONS)
 app.include_router(login_router)
 app.include_router(confirmation_router)
 app.include_router(logout_router)
+app.include_router(clients_router)
 app.include_router(pandadoc_router)
 app.include_router(admin_router)
 

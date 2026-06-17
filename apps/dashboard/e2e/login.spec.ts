@@ -20,7 +20,7 @@ test('seeded user logs in, sees /clients, logs out, stale cookie rejected', asyn
   // 2. Land on /clients with the authenticated shell rendered.
   await expect(page).toHaveURL(/\/clients$/)
   await expect(page.getByRole('button', { name: /log out/i })).toBeVisible()
-  await expect(page.getByText(/client list/i)).toBeVisible()
+  await expect(page.getByRole('heading', { name: /clients/i })).toBeVisible()
 
   // 3. Capture the session cookie BEFORE logging out (logout clears it).
   const cookies = await context.cookies()

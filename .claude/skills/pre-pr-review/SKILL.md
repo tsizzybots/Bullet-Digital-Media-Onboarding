@@ -4,8 +4,9 @@ description: |
   Deep, adversarial self-review of the current ticket's diff BEFORE it goes
   to To Review / a PR. Encodes the hardening lenses our human reviewer has
   repeatedly caught us on (concurrency races in shared helpers, transport-level
-  failure handling, idempotency, failure-path test coverage) plus project-future
-  awareness. Find issues, FIX them, re-verify, and only then raise the PR.
+  failure handling, idempotency, failure-path test coverage, rename completeness
+  in operator-facing strings, degenerate-config fail-closed tests) plus
+  project-future awareness. Find issues, FIX them, re-verify, and only then raise the PR.
 triggers:
   - pre-pr-review
   - pre pr review
@@ -24,6 +25,8 @@ user_invocable: true
 
 The bugs that slip past a green test suite are almost always the ones *outside* the modelled paths: the happy path and typed errors get covered, while concurrency races and transport-level failures do not. This gate makes those lenses a required pass before a PR goes out, so the diff reaches review already stress-tested for the failure and concurrency cases.
 
+**S1-25c lesson (PR #5):** even a green suite AND a prior pass of this gate still shipped findings to the human reviewer - because the lenses were applied to the *logic* but not to (a) the operator-facing **strings** a rename touched (three `RuntimeError` messages + docs still named the deleted `PANDADOC_API_KEY` env var, pointing an operator at a variable that no longer exists), (b) the **degenerate config** permutations (only one of N accounts configured -> must fail closed, not open), and (c) a test that was **deferred too cheaply** ("no precedent for invoking the Inngest wrapper" - the precedent was `._handler`, the logic was real account->key branching). Those three are now first-class lenses below. The rule: a rename is not done until every *string* is updated, multi-config is not done until the one-and-none permutations are tested, and a deferral is only valid when the path is genuinely redundant - never because the harness is unfamiliar.
+
 ## When to run
 
 - BEFORE `cards_move` to **To Review**.
@@ -36,7 +39,7 @@ The bugs that slip past a green test suite are almost always the ones *outside* 
 2. **Run the built-in `/code-review`** for an independent correctness pass, then layer THIS skill's project-specific lenses on top. (`/code-review high` for substantial diffs.)
 3. **Apply every lens** in the checklist below. For each, write a concrete finding as `file:line - issue - fix`. Be adversarial: actively try to break the change, don't confirm it works.
 4. **FIX every finding.** If something is genuinely out of scope, defer it explicitly: log it in `docs/CHANGELOG.md` (or the card) with the reason and the ticket that owns it - never silently skip.
-5. **Add the missing tests** the lenses surface (see the Test Matrix). A finding without a regression test is not closed.
+5. **Add the missing tests** the lenses surface (see the Test Matrix). A finding without a regression test is not closed. **The deferral bar is high:** a test may be deferred ONLY when the path is genuinely redundant with existing coverage or owned by a named later ticket - NOT because the invocation harness is unfamiliar. New conditional/branching logic in a changed unit (e.g. an account->key selection inside an Inngest wrapper) MUST be tested directly; find the invocation mechanism (`fn._handler`, `fn.get_config("").main`) rather than deferring. (S1-25c deferred exactly this and the reviewer bounced it - the precedent existed.)
 6. **Re-verify**: `cd apps/api && uv run pytest . -q` (full suite), `uv run ruff check . && uv run ruff format --check .`, `make typecheck`. All green.
 7. **Only now** move the card to To Review / open the PR.
 
@@ -66,15 +69,22 @@ The bugs that slip past a green test suite are almost always the ones *outside* 
 - Review for that reuse: clean Protocol + production impl + Fake test double; no caller-specific assumptions baked into shared code; the audit trail (`platform_actions`) stays consistent across fan-outs.
 - "Every fan-out action is idempotent, retryable, and individually auditable; partial failures must be visible in the dashboard, never silent; every job writes its outcome back to Postgres" (CLAUDE.md constraints) - verify the change upholds all of these.
 
-### 6. Test matrix (every change needs the relevant rows)
+### 6. Rename / redefinition completeness
+- When the diff **renames or removes** a config key, env var, function, constant, or column, grep the WHOLE repo for the old name and confirm EVERY occurrence is updated - not just the code references. The misses that reach review live in **strings**: `RuntimeError`/exception messages, log lines, docstrings, code comments, `render.yaml` / infra NOTE blocks, `config.py` section headers, `.env.example`. (S1-25c: the `PANDADOC_API_KEY` -> `_UK`/`_INT` rename left three live error messages naming the deleted var, so an operator following the error would set a variable that no longer exists.)
+- **Operator-facing rule:** any message a human reads on failure must name a thing that currently EXISTS and is actionable. After a rename, re-read every error/log string the diff touches and ask "if an operator does exactly what this says, does it work?"
+- A value union (e.g. `Literal["uk","int"]`) used at more than one boundary gets ONE shared alias/constant (`pandadoc/accounts.py`), not re-spelled per call site - so the next value added changes one place.
+
+### 7. Test matrix (every change needs the relevant rows)
 - **Success** - happy path with DB writes asserted (rows created, columns written back, payload persisted).
 - **Each failure mode** - INCLUDING a transport-level error (e.g. `httpx.ReadTimeout`), not only typed errors. Assert the action flips to `failed` + `last_error` + `retry_count` bump, and no orphan/partial rows.
-- **Replay / idempotency** - same event twice -> no duplicate row, no duplicate external call, no duplicate object.
-- **Concurrency / config declaration** - assert the Inngest concurrency caps and trigger event via `fn.get_config("").main`.
+- **Replay / idempotency** - same event twice -> no duplicate row, no duplicate external call, no duplicate object. When the diff adds a **new non-key column** (descriptive metadata, not part of the idempotency key), add a replay with a DIFFERENT value for that column and assert it still dedupes to one row AND keeps the first writer's value - proving the column is metadata, not identity. (S1-25c: cross-account replay of one document.)
+- **Degenerate config / fail-closed** - any change that adds multi-config (N accounts / keys / secrets / optional credentials) MUST test the one-configured and none-configured permutations and assert it **fails closed** (e.g. an INT-signed webhook is rejected 401 when only the UK secret is set), never fails open. (S1-25c gap.)
+- **Sequential fan-out loop isolation** - a loop over independent items (accounts, clients): assert a later item raising does NOT undo an earlier item's committed work, and the failure still propagates/surfaces. (S1-25c reconcile `_run`.)
+- **Concurrency / config declaration** - assert the Inngest concurrency caps and trigger event via `fn.get_config("").main`. Branching logic INSIDE a decorated Inngest wrapper is exercised directly via `fn._handler` - do not skip it as "untestable".
 - **Shared helpers** - a concurrent-duplicate scenario (two callers, same idempotency key) where applicable.
 - **Pure helpers** - malformed / None / empty / wrong-type input returns safely rather than raising.
 
-### 7. Standards & hygiene
+### 8. Standards & hygiene
 - `ruff check` + `ruff format --check` clean; `make typecheck` green.
 - Imports at module top (never deferred into function bodies). No em dashes; UK dates (DD/MM/YYYY); 24-hour times; currency correctness (GBP vs USD).
 - `docs/CHANGELOG.md` updated (Added / Changed / Decision / Discovery / Fixed) AND the active-state memory updated.

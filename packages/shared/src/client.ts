@@ -11,23 +11,57 @@
  * with `allow_credentials=True` to accept it.
  */
 
-import createClient, { type Client } from "openapi-fetch";
+import createClient, { type Client, type Middleware } from "openapi-fetch";
 
 import type { paths } from "./generated/api-types";
 
 export type ApiClient = Client<paths>;
+
+export interface ApiClientOptions {
+  /**
+   * Called when a data request returns 401 (the session expired mid-use).
+   * `/me` and `/auth/*` are excluded here - they own their own 401 handling
+   * (the dashboard's bootstrap guard and the login form), so invoking this on
+   * them would loop. The dashboard wires this to a redirect to /login.
+   */
+  onUnauthorized?: (path: string) => void;
+}
 
 /**
  * Build a typed API client pointed at `baseUrl`.
  *
  * @param baseUrl Origin of the API, e.g. `http://localhost:8000` in dev or
  *   the staging API host in deployed environments. No trailing slash.
+ * @param opts Optional hooks; `onUnauthorized` fires on a 401 from any data
+ *   endpoint (openapi-fetch middleware lives here because this package owns the
+ *   dependency).
  */
-export function createApiClient(baseUrl: string): ApiClient {
-  return createClient<paths>({
-    baseUrl,
-    credentials: "include",
-  });
+export function createApiClient(
+  baseUrl: string,
+  opts: ApiClientOptions = {},
+): ApiClient {
+  const client = createClient<paths>({ baseUrl, credentials: "include" });
+  const onUnauthorized = opts.onUnauthorized;
+  if (onUnauthorized) {
+    const middleware: Middleware = {
+      async onResponse({ request, response }) {
+        if (response.status === 401) {
+          // Strip scheme+host and any query/hash to get the pathname, without
+          // relying on the `URL` global (this package targets both node + the
+          // browser and the tsconfig lib does not declare it).
+          const path = request.url
+            .replace(/^[a-z]+:\/\/[^/]+/i, "")
+            .split(/[?#]/)[0];
+          if (path !== "/me" && !path.startsWith("/auth/")) {
+            onUnauthorized(path);
+          }
+        }
+        return response;
+      },
+    };
+    client.use(middleware);
+  }
+  return client;
 }
 
 /**

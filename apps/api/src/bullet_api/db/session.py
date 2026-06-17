@@ -19,11 +19,20 @@ from bullet_api.config import get_async_database_url, get_settings
 # asyncpg-native `ssl` connect arg, defaulting to "prefer" so the same
 # build runs unchanged against local docker Postgres (no TLS) and Neon
 # (TLS mandatory and auto-upgraded).
+# `statement_timeout` is a server-side ceiling on EVERY statement (5s). Under
+# the dashboard's polling load (every open tab x every 5-10s) a slow or stuck
+# query must fail fast rather than pile up holding pooled connections. All
+# current app statements are sub-second, so 5s is a safety ceiling, not a
+# functional limit; a genuinely long operation can raise it per-transaction
+# with `SET LOCAL statement_timeout`.
 engine = create_async_engine(
     get_async_database_url(),
     pool_pre_ping=True,
     future=True,
-    connect_args={"ssl": get_settings().database_ssl_mode},
+    connect_args={
+        "ssl": get_settings().database_ssl_mode,
+        "server_settings": {"statement_timeout": "5000"},
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(

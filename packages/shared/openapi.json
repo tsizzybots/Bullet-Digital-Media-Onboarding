@@ -20,6 +20,113 @@
         "title": "AdminPingResponse",
         "type": "object"
       },
+      "ClientListItem": {
+        "description": "One row of the dashboard `/clients` list view (S1-31).\n\n`id` is stringified (opaque identifier, same as `MeResponse`).\n`step_entered_at` is the time the client entered `current_step`; the\ndashboard derives the displayed time-in-step from it client-side (recomputed\non each poll). `last_action_*` describe the client's\nmost-recently-started `platform_actions` row (the onboarding-health\nsignal); all three are null for a client with no recorded actions yet.",
+        "properties": {
+          "business_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Business Name"
+          },
+          "contact_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contact Name"
+          },
+          "current_step": {
+            "title": "Current Step",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Action"
+          },
+          "last_action_platform": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Action Platform"
+          },
+          "last_action_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Action Status"
+          },
+          "step_entered_at": {
+            "format": "date-time",
+            "title": "Step Entered At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "business_name",
+          "contact_name",
+          "email",
+          "current_step",
+          "step_entered_at",
+          "last_action_status",
+          "last_action_platform",
+          "last_action"
+        ],
+        "title": "ClientListItem",
+        "type": "object"
+      },
+      "ClientsListResponse": {
+        "description": "Envelope for `GET /clients` - every client, newest step-change first.",
+        "properties": {
+          "clients": {
+            "items": {
+              "$ref": "#/components/schemas/ClientListItem"
+            },
+            "title": "Clients",
+            "type": "array"
+          }
+        },
+        "required": [
+          "clients"
+        ],
+        "title": "ClientsListResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -455,6 +562,56 @@
         "summary": "Resend Confirmation",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/clients": {
+      "get": {
+        "description": "List every client for the dashboard board. 401 without a live session.",
+        "operationId": "list_clients_clients_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientsListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Clients",
+        "tags": [
+          "clients"
         ]
       }
     },
