@@ -123,6 +123,15 @@ _GET_CLIENT_SQL = text(
 # the page must never mix fields from two different captures). Served by
 # ix_client_knowledge_client_id_source.
 #
+# DISTINCT ON (key) ... ORDER BY key, id DESC guarantees exactly one row per
+# key even if the latest captured_at ever ties across two batches. id is a
+# random uuid, so this is a DETERMINISTIC dedup, not a true newest-batch pick:
+# it removes the duplicate-key render and the non-deterministic "which row
+# wins" the bare `= max()` exposed, but FULL cross-batch isolation on a
+# captured_at tie needs a monotonic batch key the writer owns (tracked as an
+# S1-30 follow-up). For a contract-compliant single batch every key is already
+# unique, so this is a no-op on the normal path.
+#
 # CONTRACT (S1-30 writer side): a summary batch MUST be inserted in ONE
 # transaction with ONE shared captured_at value. The single-statement read
 # below shares one snapshot, so an atomic batch is always seen whole - but a
@@ -130,7 +139,7 @@ _GET_CLIENT_SQL = text(
 # Both seeds comply; S1-30's implementation must too.
 _GET_SUMMARY_SQL = text(
     """
-    SELECT key, value, value_text, captured_at
+    SELECT DISTINCT ON (key) key, value, value_text, captured_at
     FROM client_knowledge
     WHERE client_id = :client_id
       AND source = 'sales_call'
@@ -139,7 +148,7 @@ _GET_SUMMARY_SQL = text(
           FROM client_knowledge
           WHERE client_id = :client_id AND source = 'sales_call'
       )
-    ORDER BY key
+    ORDER BY key, id DESC
     """
 )
 

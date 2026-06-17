@@ -42,8 +42,12 @@ export function ClientDetail({ id }: { id: string }) {
   const { data, isPending, error } = useQuery({
     queryKey: ['client', id],
     queryFn: async () => {
+      // Fail fast on a slow/stuck request rather than holding it open under the
+      // 5s poll (pairs with the DB-side statement_timeout), matching the
+      // clients-list query's 8s ceiling.
       const { data, error, response } = await api.GET('/clients/{client_id}', {
         params: { path: { client_id: id } },
+        signal: AbortSignal.timeout(8_000),
       })
       if (response.status === 404) throw new Error('not_found')
       if (error || !data) throw new Error('client detail request failed')

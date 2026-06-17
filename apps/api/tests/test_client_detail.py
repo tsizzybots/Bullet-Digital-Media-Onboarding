@@ -257,6 +257,44 @@ async def test_latest_capture_batch_wins(
 
 
 @pytest.mark.db
+async def test_equal_captured_at_batches_dedupe_to_one_row_per_key(
+    async_session: AsyncSession,
+    authed_client: AsyncClient,
+) -> None:
+    """Two sales_call batches sharing the EXACT same captured_at - the tie the
+    bare `= max()` read used to expose as duplicate, non-deterministic rows.
+    DISTINCT ON (key) guarantees exactly one row per key, deterministically, so
+    the page never renders a duplicate key or flickers between two values on
+    successive polls. (Full cross-batch isolation on a tie needs a monotonic
+    batch key the writer owns - an S1-30 follow-up; this asserts the dedup
+    guarantee the read CAN make today.)"""
+    run = uuid.uuid4().hex[:8]
+    client_id = await _seed_client(async_session, email=f"tie_{run}@gym.example")
+    tie = datetime(2026, 6, 8, 9, 0, 0, tzinfo=UTC)
+    # Disjoint keys plus one shared key with conflicting values, both stamped
+    # with the identical captured_at.
+    await _seed_summary_batch(
+        async_session, client_id, tie, {"business_type": "batch A", "pain_points": ["a"]}
+    )
+    await _seed_summary_batch(
+        async_session, client_id, tie, {"business_type": "batch B", "red_flags": ["b"]}
+    )
+
+    # Deterministic across polls: two reads return identical summaries.
+    first = (await authed_client.get(f"/clients/{client_id}")).json()["sales_summary"]
+    second = (await authed_client.get(f"/clients/{client_id}")).json()["sales_summary"]
+    assert first == second
+
+    keys = [e["key"] for e in first]
+    # Exactly one row per key - the shared key never duplicates.
+    assert len(keys) == len(set(keys))
+    summary = {e["key"]: e for e in first}
+    assert set(summary) == {"business_type", "pain_points", "red_flags"}
+    # The shared key resolves to a single one of the two conflicting values.
+    assert summary["business_type"]["value"] in {"batch A", "batch B"}
+
+
+@pytest.mark.db
 async def test_no_summary_returns_empty_list(
     async_session: AsyncSession,
     authed_client: AsyncClient,
