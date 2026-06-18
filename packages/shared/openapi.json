@@ -463,6 +463,51 @@
         "title": "KnowledgeEntry",
         "type": "object"
       },
+      "LinkTranscriptRequest": {
+        "description": "Body for `POST /transcripts/{id}/link` - the client to attach to.",
+        "properties": {
+          "client_id": {
+            "title": "Client Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_id"
+        ],
+        "title": "LinkTranscriptRequest",
+        "type": "object"
+      },
+      "LinkTranscriptResponse": {
+        "description": "Result of a manual attach: the linked transcript + the documents row it\ncreated (null only in the rare case the transcript text was not yet stored).",
+        "properties": {
+          "client_id": {
+            "title": "Client Id",
+            "type": "string"
+          },
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
+          },
+          "transcript_id": {
+            "title": "Transcript Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transcript_id",
+          "client_id",
+          "document_id"
+        ],
+        "title": "LinkTranscriptResponse",
+        "type": "object"
+      },
       "LoginRequest": {
         "properties": {
           "email": {
@@ -629,6 +674,81 @@
           "status"
         ],
         "title": "StatusResponse",
+        "type": "object"
+      },
+      "UnlinkedTranscriptItem": {
+        "description": "One parked sales-call transcript awaiting a client (S1-27 manual fallback).\n\nThese are the ~10% the auto-link-by-email path misses. `participant_emails`\nare the invite attendees (lowercased) the team uses to pick the right client;\n`meeting_start` + `transcript_chars` help them recognise the call.",
+        "properties": {
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "meeting_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meeting Start"
+          },
+          "participant_emails": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Participant Emails",
+            "type": "array"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "transcript_chars": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcript Chars"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "participant_emails",
+          "meeting_start",
+          "transcript_chars",
+          "captured_at"
+        ],
+        "title": "UnlinkedTranscriptItem",
+        "type": "object"
+      },
+      "UnlinkedTranscriptsResponse": {
+        "description": "Envelope for `GET /transcripts/unlinked` - parked transcripts, newest first.",
+        "properties": {
+          "transcripts": {
+            "items": {
+              "$ref": "#/components/schemas/UnlinkedTranscriptItem"
+            },
+            "title": "Transcripts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "transcripts"
+        ],
+        "title": "UnlinkedTranscriptsResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -1143,6 +1263,125 @@
         "summary": "Me",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/transcripts/unlinked": {
+      "get": {
+        "description": "List parked transcripts with no client yet, newest capture first. 401\nwithout a live session.",
+        "operationId": "list_unlinked_transcripts_transcripts_unlinked_get",
+        "parameters": [
+          {
+            "in": "cookie",
+            "name": "session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnlinkedTranscriptsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Unlinked Transcripts",
+        "tags": [
+          "transcripts"
+        ]
+      }
+    },
+    "/transcripts/{transcript_id}/link": {
+      "post": {
+        "description": "Manually attach a parked transcript to a client. 404 unknown transcript /\nmalformed id, 409 already linked, 400 unknown client.",
+        "operationId": "link_transcript_transcripts__transcript_id__link_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transcript_id",
+            "required": true,
+            "schema": {
+              "title": "Transcript Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkTranscriptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkTranscriptResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Link Transcript",
+        "tags": [
+          "transcripts"
         ]
       }
     },

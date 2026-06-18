@@ -8,7 +8,8 @@ seam in `bullet_api.email`.
 
 Public surface (importable as `from bullet_api.worker import ...`):
 
-- Event constants: `PANDADOC_SIGNED_EVENT`, `CLIENT_CREATED_EVENT`
+- Event constants: `PANDADOC_SIGNED_EVENT`, `CLIENT_CREATED_EVENT`,
+  `MEET_TRANSCRIPT_READY_EVENT`, `TRANSCRIPT_LINKED_EVENT`
 - Emitter seam: `EventEmitter`, `InngestEventEmitter`, `FakeEventEmitter`,
   `get_event_emitter`
 - Inngest client: `inngest_client` (the shared singleton)
@@ -19,7 +20,9 @@ from __future__ import annotations
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.events import (
     CLIENT_CREATED_EVENT,
+    MEET_TRANSCRIPT_READY_EVENT,
     PANDADOC_SIGNED_EVENT,
+    TRANSCRIPT_LINKED_EVENT,
     EventEmitter,
     FakeEventEmitter,
     InngestEventEmitter,
@@ -31,7 +34,9 @@ __all__ = [
     "EventEmitter",
     "FakeEventEmitter",
     "InngestEventEmitter",
+    "MEET_TRANSCRIPT_READY_EVENT",
     "PANDADOC_SIGNED_EVENT",
+    "TRANSCRIPT_LINKED_EVENT",
     "get_event_emitter",
     "inngest_client",
 ]
