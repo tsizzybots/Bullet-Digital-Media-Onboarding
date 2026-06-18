@@ -21,6 +21,7 @@ codes against and is frozen here.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -28,6 +29,11 @@ from typing import Protocol
 import httpx
 
 GOOGLE_MEET_API_BASE_URL = "https://meet.googleapis.com"
+# Wall-clock bound on the (possibly blocking) off-loop bearer-token mint. The
+# mint runs in a worker thread via `asyncio.to_thread`; `asyncio.wait_for`
+# guarantees the event loop is never blocked beyond this even if Google's token
+# endpoint hangs.
+DEFAULT_TOKEN_TIMEOUT = 15.0
 
 
 @dataclass(frozen=True)
@@ -93,26 +99,44 @@ class HttpMeetClient:
         base_url: str = GOOGLE_MEET_API_BASE_URL,
         timeout: float = 10.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        token_timeout: float = DEFAULT_TOKEN_TIMEOUT,
     ) -> None:
         self._token_provider = token_provider
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._transport = transport
+        self._token_timeout = token_timeout
 
-    def _headers(self) -> dict[str, str]:
-        token = self._token_provider()
+    async def _bearer_token(self) -> str:
+        """Mint the bearer token OFF the event loop, bounded by a timeout.
+
+        `token_provider` may do blocking network I/O (the production
+        `google_bearer_token` mints over the network), so it runs in a worker
+        thread via `asyncio.to_thread`; `asyncio.wait_for` bounds it so a hung
+        token endpoint can never freeze the loop.
+        """
+        try:
+            token = await asyncio.wait_for(
+                asyncio.to_thread(self._token_provider), timeout=self._token_timeout
+            )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"Google bearer-token mint timed out after {self._token_timeout}s; "
+                "cannot call the Meet API."
+            ) from exc
         if not token:
             raise RuntimeError(
                 "Google bearer token is empty; cannot call the Meet API. "
                 "Set GOOGLE_SERVICE_ACCOUNT_JSON / "
                 "GOOGLE_WORKSPACE_IMPERSONATE_SUBJECT on the Render env group."
             )
-        return {"Authorization": f"Bearer {token}"}
+        return token
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
+        headers = {"Authorization": f"Bearer {await self._bearer_token()}"}
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.get(
-                f"{self._base_url}/v2/{path}", headers=self._headers(), params=params
+                f"{self._base_url}/v2/{path}", headers=headers, params=params
             )
         if response.status_code == 404:
             raise GoogleApiNotFound(path)

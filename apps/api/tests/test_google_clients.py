@@ -9,6 +9,9 @@ error-mapping branches that the Fake* doubles skip.
 
 from __future__ import annotations
 
+import threading
+import time
+
 import httpx
 import pytest
 
@@ -229,3 +232,75 @@ def test_normalise_emails_drops_organiser_self_blanks_and_dedupes() -> None:
         ]
     )
     assert out == ("a@b.com",)
+
+
+# --------------------------------------------------------------------------- #
+# Bearer-token mint hygiene (S1-27 hardening, PR #8 review)
+#
+# The production `google_bearer_token` does a BLOCKING network token mint. These
+# tests lock the two fixes: the mint must run OFF the event loop (so a slow mint
+# cannot stall every other concurrent request/worker), and it must be bounded by
+# a timeout (so a hung Google token endpoint cannot freeze the loop forever).
+# --------------------------------------------------------------------------- #
+
+
+async def test_meet_token_minted_off_the_event_loop() -> None:
+    """The token_provider runs in a worker thread (via asyncio.to_thread), not on
+    the event-loop thread, so a blocking mint never stalls the loop."""
+    loop_thread = threading.get_ident()
+    mint_thread: dict[str, int] = {}
+
+    def token_provider() -> str:
+        mint_thread["id"] = threading.get_ident()
+        return TOKEN
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == f"Bearer {TOKEN}"
+        return httpx.Response(200, json={"name": "conferenceRecords/abc"})
+
+    client = HttpMeetClient(
+        token_provider=token_provider,
+        base_url="https://meet.example.com",
+        transport=httpx.MockTransport(handler),
+    )
+    record = await client.get_conference_record("conferenceRecords/abc")
+
+    assert record.name == "conferenceRecords/abc"
+    assert mint_thread["id"] != loop_thread  # minted off the event-loop thread
+
+
+async def test_meet_token_mint_times_out_raises_runtimeerror() -> None:
+    """A token mint that hangs past `token_timeout` raises a RuntimeError instead
+    of blocking the loop indefinitely."""
+
+    def slow_token() -> str:
+        time.sleep(0.5)
+        return TOKEN
+
+    client = HttpMeetClient(
+        token_provider=slow_token,
+        base_url="https://meet.example.com",
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})),
+        token_timeout=0.05,
+    )
+    with pytest.raises(RuntimeError, match="timed out"):
+        await client.get_conference_record("conferenceRecords/abc")
+
+
+async def test_calendar_token_mint_times_out_raises_runtimeerror() -> None:
+    """Same timeout guard on the Calendar client's token mint."""
+
+    def slow_token() -> str:
+        time.sleep(0.5)
+        return TOKEN
+
+    client = HttpCalendarClient(
+        token_provider=slow_token,
+        base_url="https://cal.example.com",
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"items": []})),
+        token_timeout=0.05,
+    )
+    with pytest.raises(RuntimeError, match="timed out"):
+        await client.find_event_by_meeting_code(
+            meeting_code="abc-defg-hij", time_min=None, time_max=None
+        )

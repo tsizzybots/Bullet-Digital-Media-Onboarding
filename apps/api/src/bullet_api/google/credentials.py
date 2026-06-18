@@ -15,6 +15,7 @@ use the Fake clients), so `google-auth` is never exercised under test.
 from __future__ import annotations
 
 import json
+import threading
 
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
@@ -28,6 +29,16 @@ GOOGLE_SCOPES: tuple[str, ...] = (
     "https://www.googleapis.com/auth/meetings.space.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
 )
+
+# Process-cached delegated credentials. Built once and reused so `google-auth`'s
+# own token cache survives between calls: previously a brand-new Credentials was
+# constructed on every HTTP request (4-6+ per transcript capture), so the SA JSON
+# was re-parsed and a fresh token minted each time, defeating the cache. The lock
+# guards the one-time build AND serialises refreshes, so concurrent worker
+# threads coalesce onto a single in-flight token mint instead of each minting
+# their own.
+_credentials_lock = threading.Lock()
+_cached_credentials: service_account.Credentials | None = None
 
 
 def _service_account_credentials() -> service_account.Credentials:
@@ -56,16 +67,33 @@ def _service_account_credentials() -> service_account.Credentials:
     )
 
 
-def google_bearer_token() -> str:
-    """Return a fresh OAuth bearer token for the delegated subject.
+def _delegated_credentials() -> service_account.Credentials:
+    """Return the process-cached delegated credentials, building them once."""
+    global _cached_credentials
+    if _cached_credentials is None:
+        with _credentials_lock:
+            if _cached_credentials is None:
+                _cached_credentials = _service_account_credentials()
+    return _cached_credentials
 
-    `google-auth` handles the JWT-bearer grant + token caching internally; we
-    refresh on demand and hand the token string to the Http clients as the
-    `Authorization: Bearer <token>` header value.
+
+def google_bearer_token() -> str:
+    """Return a valid OAuth bearer token for the delegated subject.
+
+    SYNCHRONOUS and may perform a blocking network token mint (`google-auth`'s
+    JWT-bearer grant), so callers running on the asyncio event loop MUST offload
+    it - the Http* clients invoke this via `asyncio.to_thread` bounded by
+    `asyncio.wait_for` so a hung Google token endpoint can never freeze the loop.
+
+    Refreshes only when the cached token is missing/expired; `google-auth` tracks
+    expiry on the cached credentials, and the lock coalesces concurrent refreshes
+    onto a single network round-trip.
     """
-    creds = _service_account_credentials()
-    creds.refresh(Request())
-    return creds.token
+    creds = _delegated_credentials()
+    with _credentials_lock:
+        if not creds.valid:
+            creds.refresh(Request())
+        return creds.token
 
 
 __all__ = ["GOOGLE_SCOPES", "google_bearer_token"]

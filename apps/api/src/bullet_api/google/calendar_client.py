@@ -17,6 +17,7 @@ the returned `CalendarEvent` contract is what the worker codes against.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -24,6 +25,10 @@ from typing import Protocol
 import httpx
 
 GOOGLE_CALENDAR_API_BASE_URL = "https://www.googleapis.com/calendar/v3"
+# Wall-clock bound on the off-loop bearer-token mint (see HttpMeetClient): the
+# mint runs in a worker thread via `asyncio.to_thread` + `asyncio.wait_for` so a
+# hung Google token endpoint can never freeze the event loop.
+DEFAULT_TOKEN_TIMEOUT = 15.0
 
 
 @dataclass(frozen=True)
@@ -78,22 +83,39 @@ class HttpCalendarClient:
         base_url: str = GOOGLE_CALENDAR_API_BASE_URL,
         timeout: float = 10.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        token_timeout: float = DEFAULT_TOKEN_TIMEOUT,
     ) -> None:
         self._token_provider = token_provider
         self._calendar_id = calendar_id
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._transport = transport
+        self._token_timeout = token_timeout
 
-    def _headers(self) -> dict[str, str]:
-        token = self._token_provider()
+    async def _bearer_token(self) -> str:
+        """Mint the bearer token OFF the event loop, bounded by a timeout.
+
+        `token_provider` may do blocking network I/O (the production
+        `google_bearer_token` mints over the network), so it runs in a worker
+        thread via `asyncio.to_thread`; `asyncio.wait_for` bounds it so a hung
+        token endpoint can never freeze the loop.
+        """
+        try:
+            token = await asyncio.wait_for(
+                asyncio.to_thread(self._token_provider), timeout=self._token_timeout
+            )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"Google bearer-token mint timed out after {self._token_timeout}s; "
+                "cannot call the Calendar API."
+            ) from exc
         if not token:
             raise RuntimeError(
                 "Google bearer token is empty; cannot call the Calendar API. "
                 "Set GOOGLE_SERVICE_ACCOUNT_JSON / "
                 "GOOGLE_WORKSPACE_IMPERSONATE_SUBJECT on the Render env group."
             )
-        return {"Authorization": f"Bearer {token}"}
+        return token
 
     async def find_event_by_meeting_code(
         self, *, meeting_code: str, time_min: str | None, time_max: str | None
@@ -105,10 +127,11 @@ class HttpCalendarClient:
             params["timeMin"] = time_min
         if time_max:
             params["timeMax"] = time_max
+        headers = {"Authorization": f"Bearer {await self._bearer_token()}"}
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.get(
                 f"{self._base_url}/calendars/{self._calendar_id}/events",
-                headers=self._headers(),
+                headers=headers,
                 params=params,
             )
         response.raise_for_status()
