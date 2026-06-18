@@ -32,11 +32,28 @@ from functools import lru_cache
 from typing import Any, Protocol
 
 import boto3
+from botocore.exceptions import ClientError
 
 from bullet_api.config import get_settings
 
 # R2's region is always "auto" (Cloudflare does not use AWS regions).
 R2_REGION = "auto"
+
+# S3/R2 error codes that mean "the object isn't there" (vs a transient 5xx).
+_NOT_FOUND_CODES = frozenset({"NoSuchKey", "NotFound", "404"})
+
+
+class ObjectNotFound(LookupError):
+    """The requested R2 object does not exist (404 / NoSuchKey).
+
+    A structural, non-self-healing condition (the key is gone or was never
+    written), distinct from a transient transport error. Readers translate it
+    to a NonRetriable failure rather than retrying a missing key forever.
+    """
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(f"R2 object not found: {key}")
 
 
 @lru_cache(maxsize=1)
@@ -74,6 +91,15 @@ class StorageClient(Protocol):
         """
         ...
 
+    async def get_object(self, key: str) -> bytes:
+        """Fetch the raw bytes stored at `key`.
+
+        Raises `ObjectNotFound` when the key does not exist (a non-retriable
+        condition). Transient transport / 5xx errors propagate so the caller
+        can retry. Read-only - safe to call concurrently.
+        """
+        ...
+
 
 class R2StorageClient:
     """Production storage client - puts objects into the R2 bucket via boto3.
@@ -102,17 +128,39 @@ class R2StorageClient:
         )
         return f"{self._endpoint_url}/{self._bucket}/{key}"
 
+    async def get_object(self, key: str) -> bytes:
+        if not self._bucket:
+            raise RuntimeError(
+                "R2_BUCKET_NAME is empty; cannot read object. Set it on the Render env group."
+            )
+        client = get_s3_client()
+        try:
+            response = await asyncio.to_thread(client.get_object, Bucket=self._bucket, Key=key)
+        except ClientError as exc:
+            # A missing key is structural (404 / NoSuchKey) -> typed, non-retriable.
+            # Any other ClientError (5xx, throttling) propagates so the caller retries.
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in _NOT_FOUND_CODES:
+                raise ObjectNotFound(key) from exc
+            raise
+        # boto3 returns a streaming body; read() runs in the worker thread too.
+        return await asyncio.to_thread(response["Body"].read)
+
 
 @dataclass
 class FakeStorageClient:
     """Test double. Records every upload on `puts` and returns a fake URL.
 
-    `error` (when set) is raised instead of recording, so tests can
-    exercise the upload-failure path without boto3.
+    `error` (when set) is raised by `put_object`; `get_error` (when set) is
+    raised by `get_object` - so tests can exercise the upload- and
+    transport-level read-failure paths without boto3. `gets` seeds objects a
+    test wants `get_object` to return; an unknown key raises `ObjectNotFound`.
     """
 
     puts: list[tuple[str, bytes, str]] = field(default_factory=list)
+    gets: dict[str, bytes] = field(default_factory=dict)
     error: Exception | None = None
+    get_error: Exception | None = None
     base_url: str = "https://fake-r2.local/bucket"
 
     async def put_object(self, key: str, body: bytes, content_type: str) -> str:
@@ -120,6 +168,14 @@ class FakeStorageClient:
             raise self.error
         self.puts.append((key, body, content_type))
         return f"{self.base_url}/{key}"
+
+    async def get_object(self, key: str) -> bytes:
+        if self.get_error is not None:
+            raise self.get_error
+        try:
+            return self.gets[key]
+        except KeyError:
+            raise ObjectNotFound(key) from None
 
 
 def get_storage_client() -> StorageClient:
