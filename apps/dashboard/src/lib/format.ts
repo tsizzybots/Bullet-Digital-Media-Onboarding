@@ -76,3 +76,34 @@ export function humanizeToken(token: string | null): string {
   const spaced = token.replace(/_/g, ' ')
   return spaced.charAt(0).toUpperCase() + spaced.slice(1)
 }
+
+/**
+ * Format an ISO timestamp as `10 Jun 2026, 14:00` (en-GB, 24-hour). Used for
+ * the sales-call meeting time on the unlinked-transcripts list (S1-27a).
+ * Returns `Unknown` for null / unparseable input (a transcript may have no
+ * captured meeting time).
+ */
+export function formatDateTime(iso: string | null): string {
+  if (!iso) return 'Unknown'
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return 'Unknown'
+  return new Intl.DateTimeFormat('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
+}
+
+/**
+ * Compact transcript size: `840 chars`, `12.3k chars`. `null` -> `-` (the
+ * transcript text was not captured yet). Helps the team recognise a call on
+ * the unlinked list (S1-27a).
+ */
+export function formatCharCount(chars: number | null): string {
+  if (chars == null || !Number.isFinite(chars)) return '-'
+  if (chars < 1000) return `${chars} chars`
+  return `${(chars / 1000).toFixed(1)}k chars`
+}
