@@ -1,6 +1,7 @@
 'use client'
 
 import type { components } from '@bullet/shared'
+import * as Sentry from '@sentry/nextjs'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import type { ReactNode } from 'react'
@@ -25,8 +26,9 @@ class AttachError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    options?: ErrorOptions,
   ) {
-    super(message)
+    super(message, options)
   }
 }
 
@@ -149,6 +151,11 @@ function TranscriptRowView({
 }) {
   const queryClient = useQueryClient()
   const [clientId, setClientId] = useState<string | null>(null)
+  // Resolve the picked id against the *current* client list. If the 10s poll
+  // drops the picked client, this becomes null, so the Attach button gates off
+  // rather than firing a doomed 400 with a stale id. Single source of truth for
+  // "is a real, still-present client selected".
+  const selectedClient = clients.find((client) => client.id === clientId) ?? null
 
   const attach = useMutation({
     mutationFn: async (selectedClientId: string) => {
@@ -161,12 +168,15 @@ function TranscriptRowView({
           // stuck on "Attaching...".
           signal: AbortSignal.timeout(8_000),
         })
-      } catch {
-        // Transport-level failure (timeout / reset / abort): openapi-fetch
-        // re-throws the raw fetch error rather than returning `{ error }`.
-        // Normalise it so the row shows the friendly message, not a raw browser
-        // string. status 0 -> the generic "Attach failed" copy.
-        throw new AttachError(0, attachErrorMessage(0))
+      } catch (err) {
+        // Transport-level failure (timeout / reset / abort) OR a genuine JS bug
+        // in the request path: openapi-fetch re-throws the raw fetch error
+        // rather than returning `{ error }`. Capture it to Sentry (this is the
+        // app's only mutation - without this, a real transport failure or bug is
+        // invisible) and preserve it as `cause` before normalising to the
+        // friendly, status-0 "Attach failed" copy the row renders.
+        Sentry.captureException(err)
+        throw new AttachError(0, attachErrorMessage(0), { cause: err })
       }
       if (result.error) {
         throw new AttachError(
@@ -227,15 +237,15 @@ function TranscriptRowView({
             />
           </div>
           <Button
-            onClick={() => clientId && attach.mutate(clientId)}
-            disabled={!clientId || attach.isPending}
+            onClick={() => selectedClient && attach.mutate(selectedClient.id)}
+            disabled={!selectedClient || attach.isPending}
           >
             {attach.isPending ? 'Attaching...' : 'Attach'}
           </Button>
         </div>
         {attach.isError && (
           <p className="mt-1.5 text-xs text-red-300" role="alert">
-            {(attach.error as Error).message}
+            {attach.error.message}
           </p>
         )}
       </td>
