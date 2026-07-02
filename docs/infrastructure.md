@@ -91,7 +91,7 @@ These are the services that don't exist in Bullet's current stack. Each needs a 
 
 ### A7. Anthropic (Claude API)
 
-- **What it is**: The AI provider behind every model call - sales call summaries, kick-off email drafting, research agent, semantic search embeddings.
+- **What it is**: The AI provider behind our text-generation model calls - sales call summaries, kick-off email drafting, research agent. (Note: Anthropic has no embeddings API; the knowledge-profile **embeddings** for semantic search use OpenAI `text-embedding-3-small` - see A8.)
 - **Why we need it**: Phase 1's AI features run on Claude. Specifically `claude-opus-4-7` for one-shot prompts and the Claude Agent SDK for the Sprint 4 research agent.
 - **Sprint**: 1 blocker (Sprint 1 - sales call summaries).
 - **Sign-up**: https://console.anthropic.com -> "Sign up".
@@ -100,11 +100,11 @@ These are the services that don't exist in Bullet's current stack. Each needs a 
 - **Action from Bullet**: Anthropic requires a payment method on file before any tokens can be consumed. Add a credit card to the workspace before Sprint 1 starts.
 - **Sharing access**: Anthropic Console -> Settings -> Members -> invite `team@izzyagents.ai` as **Admin**. Alternatively, if you'd prefer to keep the workspace single-user, generate an API key with the **Service Account** label and share via the secure-key channel.
 
-### A8. OpenAI (Whisper transcription fallback)
+### A8. OpenAI (embeddings + Whisper transcription fallback)
 
-- **What it is**: OpenAI's audio-transcription API. Used only when Zoom or Google Meet's native transcript is unavailable (rare but happens).
-- **Why we need it**: Belt-and-braces for sales-call and kick-off transcripts. We don't want a single missing transcript to block the AI summary.
-- **Sprint**: 1.
+- **What it is**: (1) OpenAI's **embeddings** API (`text-embedding-3-small`, 1536-dim) - turns each client-knowledge field into a vector for semantic search (Anthropic has no embeddings API, so embeddings run on OpenAI). (2) OpenAI's audio-transcription API (Whisper), used only when Zoom or Google Meet's native transcript is unavailable (rare but happens).
+- **Why we need it**: Embeddings power the knowledge-profile search (S1-30 onward); Whisper is belt-and-braces so a single missing transcript does not block the AI summary.
+- **Sprint**: 1 (embeddings land with S1-30).
 - **Sign-up**: https://platform.openai.com -> "Sign up".
 - **Plan**: **Pay-as-you-go**. Whisper is approximately $0.006 USD/minute. With Native transcripts as the primary path, expect $5-30 USD/month max. We've configured a soft cap of $50 USD/month with an alert at 80%.
 - **Setup we do**: Generate one API key (we use the same one for prod and staging since usage is tiny), set the cost cap.

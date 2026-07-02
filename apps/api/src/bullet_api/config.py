@@ -409,6 +409,26 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- S1-30 OpenAI embeddings (client_knowledge vectors) -----
+    openai_api_key: str = Field(
+        default="",
+        description=(
+            "OpenAI API key for the client_knowledge embeddings (S1-30). Anthropic "
+            "has no embeddings API, so embeddings use OpenAI. Empty in local dev / "
+            "tests (the FakeEmbeddingClient is used); set in the Render staging / "
+            "prod env groups. HttpOpenAIEmbeddingClient fails loudly "
+            "(EmbeddingConfigError) if empty on a real call. Filling this in needs "
+            "NO code change - the worker swaps Fake -> Http purely on config."
+        ),
+    )
+    openai_embedding_model: str = Field(
+        default="text-embedding-3-small",
+        description=(
+            "OpenAI embedding model for client_knowledge. Native dimension 1536 "
+            "matches the vector(1536) column. Overridable per environment."
+        ),
+    )
+
     @property
     def r2_endpoint_url(self) -> str:
         """The R2 S3-compatible endpoint, derived from the account id.
