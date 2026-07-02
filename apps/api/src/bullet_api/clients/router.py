@@ -128,9 +128,14 @@ _GET_CLIENT_SQL = text(
 # random uuid, so this is a DETERMINISTIC dedup, not a true newest-batch pick:
 # it removes the duplicate-key render and the non-deterministic "which row
 # wins" the bare `= max()` exposed, but FULL cross-batch isolation on a
-# captured_at tie needs a monotonic batch key the writer owns (tracked as an
-# S1-30 follow-up). For a contract-compliant single batch every key is already
-# unique, so this is a no-op on the normal path.
+# captured_at tie would need a monotonic batch key the writer owns.
+# RESOLVED (S1-30, 02/07/2026): a monotonic batch key was judged unnecessary and
+# NOT added. Two DISTINCT batches for one client tying on captured_at requires
+# two different summaries (a corrected re-link) or two transcripts landing in the
+# SAME microsecond - and S1-30's platform_actions idempotency (keyed on
+# transcript_id + summary hash) already prevents same-summary duplication. At
+# Bullet's human-paced sales-call volume a microsecond tie is unreachable, so
+# this DISTINCT ON dedup stays a belt-and-braces no-op on the normal path.
 #
 # CONTRACT (S1-30 writer side): a summary batch MUST be inserted in ONE
 # transaction with ONE shared captured_at value. The single-statement read

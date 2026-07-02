@@ -56,6 +56,7 @@ from bullet_api.worker.platform_actions import (
     build_idempotency_key,
     complete_action,
     fail_action,
+    reclaim_stale_action,
 )
 from bullet_api.worker.summary_client import (
     SummaryClient,
@@ -227,8 +228,25 @@ async def summarise_sales_call_core(
                 },
             )
             raise ConcurrentSummaryInProgress(transcript_id)
+        # Stale: ATOMICALLY claim it (compare-and-swap on started_at) so two
+        # overlapping runs cannot both pass the age check and both re-run the LLM
+        # call. The loser gets False and backs off.
+        claimed = await reclaim_stale_action(
+            session, action_id=begun.action_id, seen_started_at=begun.started_at
+        )
+        await session.commit()
+        if not claimed:
+            log.info(
+                "S1-29 lost the stale-reclaim race; backing off",
+                extra={
+                    "client_id": str(client_id),
+                    "transcript_id": str(transcript_id),
+                    "action_id": str(begun.action_id),
+                },
+            )
+            raise ConcurrentSummaryInProgress(transcript_id)
         log.warning(
-            "S1-29 reclaiming a stale in_progress summary (prior run presumed dead)",
+            "S1-29 reclaimed a stale in_progress summary (prior run presumed dead)",
             extra={
                 "client_id": str(client_id),
                 "transcript_id": str(transcript_id),

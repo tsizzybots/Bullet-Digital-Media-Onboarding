@@ -220,6 +220,43 @@ async def fail_action(
     )
 
 
+async def reclaim_stale_action(
+    session: AsyncSession,
+    *,
+    action_id: uuid.UUID,
+    seen_started_at: datetime,
+) -> bool:
+    """Atomically claim a STALE `in_progress` row for the calling run.
+
+    A compare-and-swap on `started_at`: the UPDATE matches only if the row is
+    still `in_progress` AND its `started_at` is exactly the (stale) value the
+    caller observed via `begin_action`; it sets `started_at = now()` so the row
+    is freshly claimed. Two concurrent reclaimers read the same stale value, but
+    the row lock serialises their UPDATEs - the first wins (RETURNING a row), the
+    second re-evaluates the predicate (`started_at` is now `now()`, no longer the
+    stale value), matches 0 rows, and gets False so it MUST back off. This closes
+    the double-reclaim window a bare staleness check leaves open (two runs both
+    passing the age test and both proceeding to do the work + external call).
+
+    Returns True when THIS run won the claim, False when another run did.
+    """
+    result = await session.execute(
+        text(
+            "UPDATE platform_actions SET started_at = now() "
+            "WHERE id = :action_id "
+            "  AND status = :status "
+            "  AND started_at = :seen_started_at "
+            "RETURNING id"
+        ),
+        {
+            "action_id": action_id,
+            "status": STATUS_IN_PROGRESS,
+            "seen_started_at": seen_started_at,
+        },
+    )
+    return result.first() is not None
+
+
 __all__ = [
     "STATUS_FAILED",
     "STATUS_IN_PROGRESS",
@@ -229,4 +266,5 @@ __all__ = [
     "build_idempotency_key",
     "complete_action",
     "fail_action",
+    "reclaim_stale_action",
 ]

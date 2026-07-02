@@ -640,6 +640,41 @@ async def test_stale_in_progress_is_reclaimed(async_session: AsyncSession) -> No
     assert len(emitter.sent) == 1
 
 
+@pytest.mark.db
+async def test_lost_stale_reclaim_backs_off(async_session: AsyncSession, monkeypatch) -> None:
+    """When the atomic stale-reclaim loses the CAS (another run claimed the stale
+    row first), the worker backs off without a second LLM call - so two runs that
+    both pass the age check cannot both re-summarise (the S1-30 PR #11 finding,
+    fixed in the shared reclaim primitive both workers now use)."""
+    client_id = await _seed_client(async_session)
+    transcript_id = uuid.uuid4()
+    await _seed_in_progress(
+        async_session,
+        client_id=client_id,
+        transcript_id=transcript_id,
+        age_sql="now() - interval '20 minutes'",
+    )
+
+    async def _lost(*a, **k):
+        return False
+
+    monkeypatch.setattr(sales_summary_module, "reclaim_stale_action", _lost)
+
+    summary_client = FakeSummaryClient(summary=_summary())
+    emitter = FakeEventEmitter()
+    with pytest.raises(ConcurrentSummaryInProgress):
+        await _run(
+            async_session,
+            client_id=client_id,
+            transcript_id=transcript_id,
+            storage=FakeStorageClient(gets={R2_KEY: TRANSCRIPT_BYTES}),
+            summary_client=summary_client,
+            emitter=emitter,
+        )
+    assert summary_client.calls == 0  # lost the race -> no second LLM spend
+    assert emitter.sent == []
+
+
 # --------------------------------------------------------------------------- #
 # Pre-PR review hardening (S1-29): HttpAnthropicClient stop_reason branches
 # --------------------------------------------------------------------------- #

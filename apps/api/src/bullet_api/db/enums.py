@@ -59,8 +59,37 @@ SALES_CALL_TRANSCRIPT_SOURCE_GOOGLE_MEET = "google_meet"
 
 SALES_CALL_TRANSCRIPT_SOURCE_VALUES: tuple[str, ...] = (SALES_CALL_TRANSCRIPT_SOURCE_GOOGLE_MEET,)
 
+# `source` enum on `client_knowledge`. Source: 0003_create_client_knowledge.py
+# `CLIENT_KNOWLEDGE_SOURCE_VALUES`. Each row's provenance: S1-30 writes the AI
+# sales-call summary as `sales_call`; later fan-outs write `agreement` (signed
+# doc), `portal` (GHL onboarding survey), `research` (scraper), `kickoff`
+# (kick-off call), and `manual` (hand-entered). Add a value here AND in the
+# migration's tuple if a new provenance is introduced.
+CLIENT_KNOWLEDGE_SOURCE_SALES_CALL = "sales_call"
+CLIENT_KNOWLEDGE_SOURCE_AGREEMENT = "agreement"
+CLIENT_KNOWLEDGE_SOURCE_PORTAL = "portal"
+CLIENT_KNOWLEDGE_SOURCE_RESEARCH = "research"
+CLIENT_KNOWLEDGE_SOURCE_KICKOFF = "kickoff"
+CLIENT_KNOWLEDGE_SOURCE_MANUAL = "manual"
+
+CLIENT_KNOWLEDGE_SOURCE_VALUES: tuple[str, ...] = (
+    CLIENT_KNOWLEDGE_SOURCE_SALES_CALL,
+    CLIENT_KNOWLEDGE_SOURCE_AGREEMENT,
+    CLIENT_KNOWLEDGE_SOURCE_PORTAL,
+    CLIENT_KNOWLEDGE_SOURCE_RESEARCH,
+    CLIENT_KNOWLEDGE_SOURCE_KICKOFF,
+    CLIENT_KNOWLEDGE_SOURCE_MANUAL,
+)
+
 
 __all__ = [
+    "CLIENT_KNOWLEDGE_SOURCE_AGREEMENT",
+    "CLIENT_KNOWLEDGE_SOURCE_KICKOFF",
+    "CLIENT_KNOWLEDGE_SOURCE_MANUAL",
+    "CLIENT_KNOWLEDGE_SOURCE_PORTAL",
+    "CLIENT_KNOWLEDGE_SOURCE_RESEARCH",
+    "CLIENT_KNOWLEDGE_SOURCE_SALES_CALL",
+    "CLIENT_KNOWLEDGE_SOURCE_VALUES",
     "CURRENT_STEP_AGREEMENT",
     "CURRENT_STEP_BUILD",
     "CURRENT_STEP_KICKOFF",
