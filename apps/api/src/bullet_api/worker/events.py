@@ -52,6 +52,14 @@ MEET_TRANSCRIPT_READY_EVENT = "google_meet.transcript_ready"
 # after commit, so a consumer MUST be idempotent per `transcript_id`.
 TRANSCRIPT_LINKED_EVENT = "transcript.linked"
 
+# Emitted by the S1-29 `summarise_sales_call` worker once it has produced + validated
+# the PRD §7.1 sales-call summary for a linked transcript. S1-30 keys off this to
+# write the summary into `client_knowledge` (+ embeddings). Data payload:
+# {client_id, transcript_id, document_id, summary} where `summary` is the validated
+# §7.1 JSON (model_dump of SalesCallSummary). At-least-once: emitted after commit
+# and re-emitted on retry, so the S1-30 consumer MUST be idempotent per transcript.
+SALES_SUMMARY_READY_EVENT = "sales_summary.ready"
+
 
 class EventEmitter(Protocol):
     async def send(self, name: str, data: dict) -> None:

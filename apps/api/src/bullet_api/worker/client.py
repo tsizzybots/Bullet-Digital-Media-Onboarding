@@ -20,6 +20,7 @@ from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.client_record import create_client_record
 from bullet_api.worker.ghl_subaccount import create_ghl_subaccount
 from bullet_api.worker.meet_transcript import capture_meet_transcript
+from bullet_api.worker.sales_summary import summarise_sales_call
 from bullet_api.worker.signed_pdf import store_signed_pdf
 
 
@@ -38,6 +39,7 @@ FUNCTIONS = [
     create_ghl_subaccount,
     store_signed_pdf,
     capture_meet_transcript,
+    summarise_sales_call,
 ]
 
 # `inngest_client` is intentionally NOT re-exported here - it is sourced
@@ -52,4 +54,5 @@ __all__ = [
     "create_ghl_subaccount",
     "noop_function",
     "store_signed_pdf",
+    "summarise_sales_call",
 ]

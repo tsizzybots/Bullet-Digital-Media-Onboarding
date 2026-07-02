@@ -388,6 +388,27 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- S1-29 Anthropic sales-call summarisation -----
+    anthropic_api_key: str = Field(
+        default="",
+        description=(
+            "Anthropic API key for the Claude sales-call summariser (S1-29). "
+            "Empty in local dev / tests (the FakeSummaryClient is used); set in the "
+            "Render staging / prod env groups. HttpAnthropicClient fails loudly "
+            "(RuntimeError) if empty on a real call, so an unconfigured deployment "
+            "is loud rather than silently producing nothing. Filling this in needs "
+            "NO code change - the worker swaps Fake -> Http purely on config."
+        ),
+    )
+    anthropic_model: str = Field(
+        default="claude-opus-4-7",
+        description=(
+            "Claude model id for the sales-call summariser. Overridable per "
+            "environment. (The current-generation id is claude-opus-4-8; this "
+            "defaults to claude-opus-4-7 per the S1-29 card. Same API surface.)"
+        ),
+    )
+
     @property
     def r2_endpoint_url(self) -> str:
         """The R2 S3-compatible endpoint, derived from the account id.
