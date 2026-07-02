@@ -9,6 +9,7 @@ error) for tests. Mirrors the PandaDoc / GHL / Google client seams.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Protocol
 
 from anthropic import AsyncAnthropic
@@ -96,7 +97,12 @@ class HttpAnthropicClient:
                 raise SummaryConfigError(
                     "ANTHROPIC_API_KEY is empty; cannot summarise. Set it on the Render env group."
                 )
+            # Build once and cache on the instance. A per-call AsyncAnthropic
+            # each opens (and never closes) an httpx connection pool; reusing one
+            # client keeps connections pooled across summaries. Paired with the
+            # cached get_summary_client() factory, that is one client per process.
             client = AsyncAnthropic(api_key=self._api_key)
+            self._client = client
 
         response = await client.messages.parse(
             model=self._model,
@@ -141,8 +147,12 @@ class FakeSummaryClient:
         return self.summary
 
 
+@lru_cache(maxsize=1)
 def get_summary_client() -> SummaryClient:
-    """Worker factory. Tests substitute a FakeSummaryClient."""
+    """Worker factory, process-cached so the HttpAnthropicClient (and its pooled
+    AsyncAnthropic) is reused across runs rather than rebuilt per invocation.
+    Tests inject a FakeSummaryClient directly into the core, so this cache is
+    only exercised on the production path."""
     settings = get_settings()
     return HttpAnthropicClient(api_key=settings.anthropic_api_key, model=settings.anthropic_model)
 

@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,13 +51,22 @@ def build_idempotency_key(
     platform: str,
     action: str,
     event_id: uuid.UUID,
+    *extra: str,
 ) -> str:
     """Build the canonical `{client_id}:{platform}:{action}:{event_id}` key.
 
     Centralised so every fan-out derives the same key for the same logical
     action and the UNIQUE constraint actually dedupes retries.
+
+    `*extra` appends further colon-separated parts for actions whose identity
+    is not fully captured by `event_id` alone. S1-29 passes the transcript's
+    `r2_key` so that a re-link to a *corrected* transcript (same transcript_id,
+    new object) produces a NEW key and resummarises, rather than replay-
+    short-circuiting on the stale original summary. Existing callers pass no
+    extra parts, so their key is unchanged.
     """
-    return f"{client_id}:{platform}:{action}:{event_id}"
+    parts = [str(client_id), platform, action, str(event_id), *extra]
+    return ":".join(parts)
 
 
 @dataclass(frozen=True)
@@ -68,11 +78,20 @@ class BeginActionResult:
     status. `already_succeeded` is the convenience flag callers branch on
     to skip the external call entirely on a replay of an already-completed
     action.
+
+    `inserted` is True when THIS call inserted the row (no conflict) and False
+    when it matched an existing row on conflict - so a caller can tell "I
+    claimed this" from "someone got here first". `started_at` is the row's
+    current start timestamp. Together they let a caller detect a concurrent
+    live run (`not inserted and status == 'in_progress'`) and decide whether
+    to back off (fresh) or reclaim (stale) - see S1-29's concurrency guard.
     """
 
     action_id: uuid.UUID
     status: str
     already_succeeded: bool
+    inserted: bool
+    started_at: datetime
 
 
 async def begin_action(
@@ -112,7 +131,11 @@ async def begin_action(
             ") "
             "ON CONFLICT (idempotency_key) DO UPDATE "
             "  SET idempotency_key = EXCLUDED.idempotency_key "
-            "RETURNING id, status"
+            # (xmax = 0) is true only for a freshly INSERTed row; a row reached
+            # via the ON CONFLICT DO UPDATE branch has a non-zero xmax. This is
+            # how the caller tells "I inserted this" from "I matched an existing
+            # row", without a second round-trip.
+            "RETURNING id, status, (xmax = 0) AS inserted, started_at"
         ),
         {
             "client_id": client_id,
@@ -131,6 +154,8 @@ async def begin_action(
         action_id=row.id,
         status=row.status,
         already_succeeded=row.status == STATUS_SUCCESS,
+        inserted=row.inserted,
+        started_at=row.started_at,
     )
 
 

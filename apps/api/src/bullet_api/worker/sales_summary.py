@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import anthropic
 import inngest
@@ -50,6 +51,7 @@ from bullet_api.worker.events import (
     InngestEventEmitter,
 )
 from bullet_api.worker.platform_actions import (
+    STATUS_IN_PROGRESS,
     begin_action,
     build_idempotency_key,
     complete_action,
@@ -67,6 +69,12 @@ log = logging.getLogger(__name__)
 PLATFORM = "anthropic"
 SUMMARISE_ACTION = "summarise_sales_call"
 
+# A run older than this is presumed dead (crashed mid-LLM-call), so a
+# concurrent run may reclaim its in_progress row rather than backing off
+# forever. Sized well above the Anthropic SDK's default request timeout
+# (~10 min) so a legitimately slow-but-live call is never stolen.
+STALE_IN_PROGRESS = timedelta(minutes=15)
+
 
 class EmptyTranscriptForSummaryError(ValueError):
     """The transcript at the R2 key is empty / whitespace. Summarising it would
@@ -76,6 +84,22 @@ class EmptyTranscriptForSummaryError(ValueError):
     def __init__(self, r2_key: str) -> None:
         self.r2_key = r2_key
         super().__init__(f"Transcript at {r2_key} is empty; nothing to summarise.")
+
+
+class ConcurrentSummaryInProgress(RuntimeError):
+    """Another live run already holds this transcript's action `in_progress`.
+
+    RETRIABLE by design: we back off instead of double-spending a second LLM
+    call. The Inngest per-`transcript_id` concurrency cap prevents this in the
+    normal case; this guard closes the redeploy / at-least-once race the cap
+    cannot. On the retry the winning run has committed `success`, so the replay
+    short-circuits and re-emits from the stored summary."""
+
+    def __init__(self, transcript_id: uuid.UUID) -> None:
+        self.transcript_id = transcript_id
+        super().__init__(
+            f"Summary for transcript {transcript_id} is already in progress; backing off."
+        )
 
 
 @dataclass(frozen=True)
@@ -125,12 +149,17 @@ async def summarise_sales_call_core(
         pydantic.ValidationError / anthropic.BadRequestError -> non-retriable;
         transport errors / 5xx / SummaryTruncatedError -> retriable.
     """
-    # The idempotency key carries the transcript_id so a replay of
-    # transcript.linked for the same transcript short-circuits. event_id stays
-    # NULL: the column FK-references onboarding_events, and transcript.linked is
-    # not backed by an onboarding_events row (transcript_id is a
-    # sales_call_transcripts id). The unique idempotency_key is the real guard.
-    idempotency_key = build_idempotency_key(client_id, PLATFORM, SUMMARISE_ACTION, transcript_id)
+    # The idempotency key carries the transcript_id AND the r2_key so a replay
+    # of transcript.linked for the same transcript+object short-circuits, but a
+    # re-link to a *corrected* transcript (same transcript_id, new r2_key - a
+    # scenario S1-27 documents) produces a NEW key and resummarises instead of
+    # re-emitting the stale original. event_id stays NULL: the column
+    # FK-references onboarding_events, and transcript.linked is not backed by an
+    # onboarding_events row (transcript_id is a sales_call_transcripts id). The
+    # unique idempotency_key is the real guard.
+    idempotency_key = build_idempotency_key(
+        client_id, PLATFORM, SUMMARISE_ACTION, transcript_id, r2_key
+    )
     begun = await begin_action(
         session,
         client_id=client_id,
@@ -177,6 +206,36 @@ async def summarise_sales_call_core(
                 },
             )
         return SummariseResult(summarised=False, skipped=True)
+
+    # Concurrency guard. If we did NOT insert this row and it is still a fresh
+    # in_progress, another live run claimed it (the Inngest per-transcript cap
+    # missed the race - redeploy / at-least-once double-delivery). Back off with
+    # a retriable error rather than double-spending a second LLM call; the
+    # winner will commit success and our retry short-circuits + re-emits. A
+    # STALE in_progress (older than the LLM ceiling) means that run crashed, so
+    # we fall through and reclaim it.
+    if not begun.inserted and begun.status == STATUS_IN_PROGRESS:
+        age = datetime.now(UTC) - begun.started_at
+        if age < STALE_IN_PROGRESS:
+            log.info(
+                "S1-29 backing off; transcript summary already in progress",
+                extra={
+                    "client_id": str(client_id),
+                    "transcript_id": str(transcript_id),
+                    "action_id": str(begun.action_id),
+                    "in_progress_age_seconds": age.total_seconds(),
+                },
+            )
+            raise ConcurrentSummaryInProgress(transcript_id)
+        log.warning(
+            "S1-29 reclaiming a stale in_progress summary (prior run presumed dead)",
+            extra={
+                "client_id": str(client_id),
+                "transcript_id": str(transcript_id),
+                "action_id": str(begun.action_id),
+                "in_progress_age_seconds": age.total_seconds(),
+            },
+        )
 
     # Only the EXTERNAL work is wrapped: an R2 read error or an LLM error flips
     # the row to `failed` (visible) rather than leaving it stuck `in_progress`.
@@ -246,10 +305,21 @@ async def summarise_sales_call(ctx: inngest.Context, step: inngest.Step) -> dict
         Other exceptions (httpx/5xx/429/overloaded, truncation): propagate so
             Inngest retries.
     """
-    client_id = uuid.UUID(ctx.event.data["client_id"])
-    transcript_id = uuid.UUID(ctx.event.data["transcript_id"])
-    document_id = ctx.event.data.get("document_id")
-    r2_key = str(ctx.event.data["r2_key"])
+    try:
+        client_id = uuid.UUID(ctx.event.data["client_id"])
+        transcript_id = uuid.UUID(ctx.event.data["transcript_id"])
+        document_id = ctx.event.data.get("document_id")
+        r2_key = str(ctx.event.data["r2_key"])
+    except (KeyError, ValueError, TypeError) as exc:
+        # A malformed transcript.linked payload (missing / non-UUID / wrong-type
+        # field) will never self-heal on retry, and without a valid client_id we
+        # cannot even record a platform_actions row - so dead-letter it loudly
+        # rather than retrying forever with zero dashboard visibility.
+        log.error(
+            "S1-29 received a malformed transcript.linked event",
+            extra={"run_id": ctx.run_id, "error": str(exc)},
+        )
+        raise inngest.NonRetriableError(f"malformed transcript.linked event: {exc}") from exc
 
     storage = get_storage_client()
     summary_client = get_summary_client()
@@ -272,15 +342,28 @@ async def summarise_sales_call(ctx: inngest.Context, step: inngest.Step) -> dict
             EmptyTranscriptForSummaryError,
             SummaryRefusedError,
             ValidationError,
-            anthropic.BadRequestError,
+            UnicodeDecodeError,
             SummaryConfigError,
         ) as exc:
+            # Structural / deterministic failures (missing object, empty or
+            # non-UTF-8 transcript, refusal, schema-invalid output, empty key)
+            # will not self-heal -> dead-letter.
             raise inngest.NonRetriableError(str(exc)) from exc
-        # SummaryTruncatedError, anthropic.APIStatusError (>=500/429/overloaded),
-        # httpx transport errors, and any UNEXPECTED RuntimeError (e.g. a closed
-        # event loop) propagate -> Inngest retries. Only the typed
-        # SummaryConfigError (empty key) is dead-lettered as non-retriable, so a
-        # genuinely transient RuntimeError is never silently swallowed.
+        except anthropic.APIStatusError as exc:
+            # Full 4xx taxonomy, not just 400: a bad/expired key (401), a
+            # disabled key (403), an unknown model id (404), an oversized
+            # transcript (413), etc. are structural and will not self-heal ->
+            # dead-letter. 429 (rate limit) and 5xx / overloaded are transient
+            # -> propagate so Inngest retries.
+            if 400 <= exc.status_code < 500 and exc.status_code != 429:
+                raise inngest.NonRetriableError(str(exc)) from exc
+            raise
+        # SummaryTruncatedError, ConcurrentSummaryInProgress (back-off),
+        # anthropic 429 / 5xx / overloaded, anthropic.APIConnectionError /
+        # APITimeoutError (transport, no status code), and any UNEXPECTED
+        # RuntimeError (e.g. a closed event loop) propagate -> Inngest retries.
+        # Only the typed SummaryConfigError (empty key) is dead-lettered among
+        # RuntimeErrors, so a genuinely transient RuntimeError is never swallowed.
 
     return {
         "client_id": str(client_id),
@@ -292,7 +375,9 @@ async def summarise_sales_call(ctx: inngest.Context, step: inngest.Step) -> dict
 
 __all__ = [
     "PLATFORM",
+    "STALE_IN_PROGRESS",
     "SUMMARISE_ACTION",
+    "ConcurrentSummaryInProgress",
     "EmptyTranscriptForSummaryError",
     "SummariseResult",
     "summarise_sales_call",
