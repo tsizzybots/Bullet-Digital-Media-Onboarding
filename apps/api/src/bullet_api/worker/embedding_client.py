@@ -25,6 +25,12 @@ from bullet_api.config import get_settings
 # text-embedding-3-small's native dimension; matches the vector(1536) column.
 EMBEDDING_DIM = 1536
 
+# Per-request timeout (seconds) for the embedding call. The OpenAI SDK's default
+# is 600s, far too long for a worker holding the run open; a hung endpoint should
+# surface as a retriable timeout quickly, not stall for ten minutes. Embeddings
+# of a handful of short strings return in well under a second.
+EMBEDDING_TIMEOUT_SECONDS = 30.0
+
 
 class EmbeddingConfigError(RuntimeError):
     """A deployment-config failure (e.g. an empty OPENAI_API_KEY) that will not
@@ -75,7 +81,7 @@ class HttpOpenAIEmbeddingClient:
             # Build once and cache on the instance; a per-call AsyncOpenAI opens
             # (and never closes) an httpx pool. Paired with the cached
             # get_embedding_client() factory, that is one client per process.
-            client = AsyncOpenAI(api_key=self._api_key)
+            client = AsyncOpenAI(api_key=self._api_key, timeout=EMBEDDING_TIMEOUT_SECONDS)
             self._client = client
 
         # One batch request for all non-empty texts. The API echoes an `index`

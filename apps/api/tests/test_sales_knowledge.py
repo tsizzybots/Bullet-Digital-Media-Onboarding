@@ -396,6 +396,81 @@ async def test_concurrent_fresh_in_progress_backs_off(async_session: AsyncSessio
     assert await _rows(async_session, client_id) == []
 
 
+async def _seed_in_progress(async_session, client_id, transcript_id, summary, *, age_sql):
+    key = build_idempotency_key(
+        client_id,
+        PLATFORM,
+        STORE_ACTION,
+        transcript_id,
+        sales_knowledge_module._summary_hash(summary),
+    )
+    await async_session.execute(
+        text(
+            "INSERT INTO platform_actions "
+            "(client_id, platform, action, idempotency_key, status, started_at) "
+            f"VALUES (:cid, :p, :a, :k, 'in_progress', {age_sql})"
+        ),
+        {"cid": client_id, "p": PLATFORM, "a": STORE_ACTION, "k": key},
+    )
+    await async_session.commit()
+
+
+@pytest.mark.db
+async def test_stale_in_progress_is_reclaimed_and_writes(async_session: AsyncSession) -> None:
+    """A STALE in_progress row (prior run crashed) is atomically reclaimed and the
+    batch is written to success."""
+    client_id = await _seed_client(async_session)
+    transcript_id = uuid.uuid4()
+    summary = _summary_dict()
+    await _seed_in_progress(
+        async_session, client_id, transcript_id, summary, age_sql="now() - interval '20 minutes'"
+    )
+
+    embedder = FakeEmbeddingClient()
+    result = await _run(
+        async_session,
+        client_id=client_id,
+        transcript_id=transcript_id,
+        summary=summary,
+        embedder=embedder,
+    )
+    assert result.stored is True
+    assert embedder.calls == 1
+    assert len(await _rows(async_session, client_id)) == 7
+    action = await _action(async_session, client_id)
+    assert len(action) == 1 and action[0]["status"] == "success"
+
+
+@pytest.mark.db
+async def test_lost_stale_reclaim_backs_off(async_session: AsyncSession, monkeypatch) -> None:
+    """If the atomic stale-reclaim loses the CAS (another run claimed it first),
+    the worker backs off (retriable) and does NOT embed or write - closing the
+    double-reclaim / double-spend window the reviewer flagged."""
+    client_id = await _seed_client(async_session)
+    transcript_id = uuid.uuid4()
+    summary = _summary_dict()
+    await _seed_in_progress(
+        async_session, client_id, transcript_id, summary, age_sql="now() - interval '20 minutes'"
+    )
+
+    async def _lost(*a, **k):
+        return False
+
+    monkeypatch.setattr(sales_knowledge_module, "reclaim_stale_action", _lost)
+
+    embedder = FakeEmbeddingClient()
+    with pytest.raises(ConcurrentKnowledgeInProgress):
+        await _run(
+            async_session,
+            client_id=client_id,
+            transcript_id=transcript_id,
+            summary=summary,
+            embedder=embedder,
+        )
+    assert embedder.calls == 0  # lost the race -> no second embedding spend
+    assert await _rows(async_session, client_id) == []
+
+
 # --------------------------------------------------------------------------- #
 # Inngest wrapper: input validation + error taxonomy + config
 # --------------------------------------------------------------------------- #

@@ -48,6 +48,7 @@ from bullet_api.db.session import AsyncSessionLocal
 from bullet_api.summary.models import SalesCallSummary
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.embedding_client import (
+    EMBEDDING_DIM,
     EmbeddingClient,
     EmbeddingConfigError,
     get_embedding_client,
@@ -59,13 +60,13 @@ from bullet_api.worker.platform_actions import (
     build_idempotency_key,
     complete_action,
     fail_action,
+    reclaim_stale_action,
 )
 
 log = logging.getLogger(__name__)
 
 PLATFORM = "openai"
 STORE_ACTION = "store_sales_knowledge"
-KNOWLEDGE_DIM = 1536
 
 # A run older than this is presumed dead, so a concurrent run may reclaim its
 # in_progress row rather than backing off forever. Sized well above the embedding
@@ -218,8 +219,25 @@ async def store_sales_knowledge_core(
                 },
             )
             raise ConcurrentKnowledgeInProgress(transcript_id)
+        # Stale: ATOMICALLY claim it (compare-and-swap on started_at). Only one
+        # concurrent reclaimer wins; a loser gets False and backs off, so two
+        # overlapping runs cannot both re-do the work + double-spend embeddings.
+        claimed = await reclaim_stale_action(
+            session, action_id=begun.action_id, seen_started_at=begun.started_at
+        )
+        await session.commit()
+        if not claimed:
+            log.info(
+                "S1-30 lost the stale-reclaim race; backing off",
+                extra={
+                    "client_id": str(client_id),
+                    "transcript_id": str(transcript_id),
+                    "action_id": str(begun.action_id),
+                },
+            )
+            raise ConcurrentKnowledgeInProgress(transcript_id)
         log.warning(
-            "S1-30 reclaiming a stale in_progress knowledge write (prior run presumed dead)",
+            "S1-30 reclaimed a stale in_progress knowledge write (prior run presumed dead)",
             extra={
                 "client_id": str(client_id),
                 "transcript_id": str(transcript_id),
@@ -240,9 +258,9 @@ async def store_sales_knowledge_core(
         # A misconfigured model (wrong dimension) is DETERMINISTIC: it would fail
         # opaquely at the `vector(1536)` cast on INSERT and retry forever. Catch
         # it here as a config error so it dead-letters with a clear message.
-        if any(len(vector) != KNOWLEDGE_DIM for vector in vectors):
+        if any(len(vector) != EMBEDDING_DIM for vector in vectors):
             raise EmbeddingConfigError(
-                f"embedding model returned a non-{KNOWLEDGE_DIM}-dimension vector; "
+                f"embedding model returned a non-{EMBEDDING_DIM}-dimension vector; "
                 "check openai_embedding_model matches the vector(1536) column"
             )
     except Exception as exc:
@@ -391,7 +409,6 @@ async def store_sales_knowledge(ctx: inngest.Context, step: inngest.Step) -> dic
 
 
 __all__ = [
-    "KNOWLEDGE_DIM",
     "PLATFORM",
     "STALE_IN_PROGRESS",
     "STORE_ACTION",
