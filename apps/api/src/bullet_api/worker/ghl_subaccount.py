@@ -34,18 +34,23 @@ Correctness rules:
   lost create response finds the orphaned location rather than creating a
   second one). Either reuse is recorded as a `success` action carrying a
   `response.skipped_existing` + `response.reason` marker (no new enum value;
-  see plan). A per-email concurrency cap serialises same-email processing so
-  two different rows sharing an email cannot both create.
+  see plan). A per-email concurrency cap serialises same-email processing;
+  its key is a raw string while `clients.email` is citext, so two rows sharing
+  an email in DIFFERENT casings are not serialised by the cap - the citext DB
+  sibling SELECT + the GHL lookup are the correctness backstop for that case
+  (see the per-email cap comment on the decorator).
 - **Commit the `in_progress` row BEFORE the GHL call**, then commit the
   terminal (`success`/`failed`) state after. A crash mid-call therefore
   leaves a visible `in_progress` row in the dashboard rather than a silent
   gap - partial failures must be visible, never silent.
 - **Concurrency.** Two guards (Inngest's per-function max): a per-client cap
   of 1 eliminates a concurrent double-create for the same client, and a
-  per-email cap of 1 serialises two different rows sharing an email. The
-  former global in-flight cap was dropped (S1-26a) - it exceeded Inngest's
-  2-constraint limit (failing ALL function registration) and the DB
-  idempotency key + returning-client check protect correctness without it.
+  per-email cap of 1 serialises rows sharing an email (modulo email casing -
+  see the returning-client note above). The former global in-flight cap was
+  dropped (S1-26a) - it made THREE constraints, exceeding Inngest's 2-per-
+  function limit, which failed the whole `/fn/register` sync (verified live:
+  the sync 400s with 3, returns 200 with 2). The DB idempotency key +
+  returning-client check protect duplicate-create correctness without it.
 - **Retriable vs not.** `GhlClientError` (4xx - bad payload / auth) and an
   empty API key / company id are NonRetriable (cannot self-heal), so
   Inngest dead-letters. `GhlServerError` (5xx / 429) and transient errors
