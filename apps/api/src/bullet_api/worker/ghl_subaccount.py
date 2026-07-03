@@ -40,9 +40,12 @@ Correctness rules:
   terminal (`success`/`failed`) state after. A crash mid-call therefore
   leaves a visible `in_progress` row in the dashboard rather than a silent
   gap - partial failures must be visible, never silent.
-- **Concurrency.** A global cap of 3 in-flight creations respects the GHL
-  agency API rate limit (card requirement); a per-client cap of 1
-  eliminates a concurrent double-create for the same client.
+- **Concurrency.** Two guards (Inngest's per-function max): a per-client cap
+  of 1 eliminates a concurrent double-create for the same client, and a
+  per-email cap of 1 serialises two different rows sharing an email. The
+  former global in-flight cap was dropped (S1-26a) - it exceeded Inngest's
+  2-constraint limit (failing ALL function registration) and the DB
+  idempotency key + returning-client check protect correctness without it.
 - **Retriable vs not.** `GhlClientError` (4xx - bad payload / auth) and an
   empty API key / company id are NonRetriable (cannot self-heal), so
   Inngest dead-letters. `GhlServerError` (5xx / 429) and transient errors
@@ -449,9 +452,18 @@ async def create_ghl_subaccount_core(
     fn_id="create-ghl-subaccount",
     trigger=inngest.TriggerEvent(event=CLIENT_CREATED_EVENT),
     concurrency=[
-        # Global cap: at most 3 in-flight GHL location creations across all
-        # clients, to respect the agency API rate limit (card requirement).
-        inngest.Concurrency(limit=3, scope="fn"),
+        # Inngest allows a MAX of 2 concurrency constraints per function, and
+        # exceeding it fails the WHOLE (all-or-nothing) function registration, so
+        # NO function registers. We therefore keep only the two correctness
+        # guards below and drop the former global `Concurrency(limit=3)` GHL-
+        # politeness cap (S1-26a). That cap only bounded simultaneous runs, which
+        # at Bullet's signing volume (rarely >1-2 at once) almost never engaged;
+        # the DB idempotency key (`platform_actions` ON CONFLICT) + the S1-26
+        # returning-client check protect against duplicate accounts regardless,
+        # and Inngest auto-retry covers a rare GHL rate blip. If a global cap is
+        # ever wanted, use `throttle=`/`rate_limit=` (rate-over-time, which does
+        # NOT count against the 2-constraint concurrency limit).
+        #
         # Per-client cap: at most one creation in flight for a given client,
         # so two concurrent `client.created` deliveries cannot both POST a
         # location before either commits its `ghl_subaccount_id`.
