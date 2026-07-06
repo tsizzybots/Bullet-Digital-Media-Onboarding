@@ -712,7 +712,7 @@ async def test_lookup_server_error_records_failed_and_propagates(
 
 
 # --------------------------------------------------------------------------- #
-# Concurrency declaration assertion
+# Flow-control declaration assertions (concurrency caps + throttle)
 # --------------------------------------------------------------------------- #
 
 
