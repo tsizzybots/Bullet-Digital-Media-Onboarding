@@ -135,10 +135,30 @@ async def link_transcript(
         linked_by=user.id,
     )
     if outcome is None:
-        # Lost a race: another request linked it between our check and update.
-        # Fall back to the idempotent re-emit so the event is never dropped.
+        # Lost a race: another request linked this transcript between our initial
+        # check (saw it unlinked) and the guarded UPDATE (matched 0 rows). Re-read
+        # who actually won: the SAME client we asked for -> idempotent re-emit so
+        # the event is never dropped; a DIFFERENT client -> genuine conflict (409),
+        # NOT a silent 200 echoing the requested client (which would report a
+        # wrong-client success while the transcript is linked elsewhere - S1-27b).
         await db.commit()
-        return await _idempotent_link_response(db, emitter, tid, client_uuid, existing.r2_key)
+        winner = (
+            await db.execute(
+                text("SELECT client_id, r2_key FROM sales_call_transcripts WHERE id = :tid"),
+                {"tid": tid},
+            )
+        ).one_or_none()
+        if winner is None or winner.client_id is None:
+            # The UPDATE matched 0 rows yet the row is not linked (or gone) - only
+            # reachable if the row was deleted mid-request; treat as not found.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="transcript not found"
+            )
+        if winner.client_id != client_uuid:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="transcript already linked"
+            )
+        return await _idempotent_link_response(db, emitter, tid, client_uuid, winner.r2_key)
     await db.commit()
 
     if outcome.document_id is not None:

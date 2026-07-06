@@ -14,6 +14,20 @@ Entry types:
 
 ## [Unreleased]
 
+### 06/07/2026 - S1-27b + S1-27c: transcript link wrong-client 409 + typed useClients() hook (combined PR)
+
+The two follow-ups split out of the S1-27a PR #9 review. They touch DISJOINT surfaces (`apps/api/.../transcripts/` vs `apps/dashboard/`), so they ship together in a SINGLE PR/branch (`feat/s1-27bc-transcript-race-and-useclients`) - one review, two tickets.
+
+**S1-27b - fix wrong-client race on transcript link (lost race must 409, not 200):**
+- **Fixed**: the lost-race branch of `POST /transcripts/{id}/link` (`transcripts/router.py`). When `link_transcript_to_client` returns None (another request linked the transcript between our initial unlinked-check and the guarded `WHERE client_id IS NULL` UPDATE) the code assumed the winner used the SAME client and returned **200 echoing the requested client** - even though the transcript was actually linked ELSEWHERE (a silent wrong-client success). Now it re-reads the actual winner: same client -> idempotent 2xx (recovery re-emit); **DIFFERENT client -> 409**. Mirrors the already-linked branch (already correct). The S1-27a dashboard's `onError` already maps 409 -> `invalidateQueries(['transcripts','unlinked'])` (verified in the code), so the UI stale-refreshes and recovers.
+- **Added (tests)**: two lost-race tests in `test_transcripts_endpoints.py` that SIMULATE the race (monkeypatch `link_transcript_to_client` to return None while linking the row to a DIFFERENT client -> 409 + no wrong-client emit; and to the SAME client -> idempotent 200). They exercise the endpoint's lost-race branch (the fix); the true DB-level race itself is S1-27's guarded UPDATE, unchanged. The existing already-linked-different-client -> 409 and same-client-idempotent -> 200 tests still pass.
+
+**S1-27c - extract typed useClients() hook (dashboard):**
+- **Added**: `hooks/use-clients.ts` - a single typed `useClients()` hook (+ shared `clientsQueryKey`, `CLIENTS_POLL_INTERVAL_MS`) wrapping `GET /clients` (8s abort, 10s poll). Routed BOTH the S1-31 board (`clients-table.tsx`) and the S1-27a picker (`unlinked-transcripts.tsx`), plus the picker's two cache invalidations, through it - so those call sites cannot drift apart. (Acknowledged residual: it does NOT stop a NEW call site from hand-writing `['clients']` again; the guard against that is using `useClients()` everywhere, not the constant.)
+- **Not needed (already done)**: the card's 2nd item (combobox stale-client desync) was already fixed on `main` in the PR #9 round - the Attach button gates on the resolved client (`clients.find(id) ?? null`). Confirmed; nothing to change.
+
+- **Verified**: `uv run pytest apps/api -q` -> **429 passed** (incl. the 2 new lost-race tests, against post-S1-26a-merge `main`); `ruff check` + `ruff format --check` clean; `make typecheck` (shared + dashboard) clean; `make codegen` no drift (S1-27b changes internal status logic only - no response-model change); `pnpm --filter dashboard build` green. Playwright `clients-list.spec` + `unlinked-transcripts.spec` both pass (`clients-list` needs a warm run - the pre-existing cold-Next-compile login-timeout flake, not this change).
+
 ### 06/07/2026 - S1-26a: PR review fixes (throttle + citext-casing claim)
 
 Addressed the two P2s from the PR review (verdict: MERGE AFTER MINOR FIXES, no P0/P1 across 7 lenses). On branch `feat/s1-26a-ghl-concurrency-limit`.

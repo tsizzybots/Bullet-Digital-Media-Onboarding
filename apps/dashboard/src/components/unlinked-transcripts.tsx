@@ -9,6 +9,7 @@ import type { ReactNode } from 'react'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { ClientCombobox, type ClientOption } from '@/components/ui/client-combobox'
+import { clientsQueryKey, useClients } from '@/hooks/use-clients'
 import { api } from '@/lib/api'
 import { formatCharCount, formatDateTime } from '@/lib/format'
 
@@ -58,20 +59,13 @@ export function UnlinkedTranscripts() {
     refetchInterval: TRANSCRIPTS_POLL_INTERVAL_MS,
   })
 
-  // Clients for the picker. Same key as the board so it is cached/deduped, and
-  // polled so the options do not go stale on a page left open. A background
-  // failure is surfaced (below) rather than silently leaving the picker empty -
-  // on a page whose whole job is attaching to a client, "no clients" must be
+  // Clients for the picker, via the ONE shared useClients() hook (S1-27c) so the
+  // board and the picker cannot drift to different keys / fetch shapes. Polled so
+  // the options do not go stale on a page left open. A background failure is
+  // surfaced (below) rather than silently leaving the picker empty - on a page
+  // whose whole job is attaching to a client, "no clients" must be
   // distinguishable from "the client list failed to load".
-  const clientsQuery = useQuery({
-    queryKey: ['clients'],
-    queryFn: async () => {
-      const { data, error } = await api.GET('/clients', { signal: AbortSignal.timeout(8_000) })
-      if (error || !data) throw new Error('clients request failed')
-      return data
-    },
-    refetchInterval: TRANSCRIPTS_POLL_INTERVAL_MS,
-  })
+  const clientsQuery = useClients()
 
   if (isError && !data) {
     return (
@@ -188,7 +182,7 @@ function TranscriptRowView({
     onSuccess: () => {
       // Row drops off the unlinked list; the client may now show the transcript.
       queryClient.invalidateQueries({ queryKey: ['transcripts', 'unlinked'] })
-      queryClient.invalidateQueries({ queryKey: ['clients'] })
+      queryClient.invalidateQueries({ queryKey: clientsQueryKey })
     },
     onError: (error) => {
       if (!(error instanceof AttachError)) return
@@ -199,7 +193,7 @@ function TranscriptRowView({
       // A 400 (unknown client) most likely means a stale picker option; refresh
       // the client list so the picker self-corrects.
       if (error.status === 400) {
-        queryClient.invalidateQueries({ queryKey: ['clients'] })
+        queryClient.invalidateQueries({ queryKey: clientsQueryKey })
       }
     },
   })

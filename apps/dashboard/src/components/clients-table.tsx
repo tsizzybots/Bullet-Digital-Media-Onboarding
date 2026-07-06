@@ -1,42 +1,24 @@
 'use client'
 
-import type { components } from '@bullet/shared'
-import { useQuery } from '@tanstack/react-query'
 import Link from 'next/link'
 import type { ReactNode } from 'react'
 
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
-import { api } from '@/lib/api'
 import {
   actionStatusVariant,
   formatTimeInStep,
   humanizeToken,
   stepLabel,
 } from '@/lib/format'
+import { type ClientListItem, useClients } from '@/hooks/use-clients'
 
-type ClientRow = components['schemas']['ClientListItem']
-
-// 10s polling per the S1-31 card (the shared POLL_INTERVAL_MS is 7s; this view
-// is explicit so the value matches the spec and the e2e wait window).
-const CLIENTS_POLL_INTERVAL_MS = 10_000
+type ClientRow = ClientListItem
 
 const COLUMNS = ['Client', 'Step', 'Time in step', 'Last action'] as const
 
 export function ClientsTable() {
-  const { data, isPending, isError } = useQuery({
-    queryKey: ['clients'],
-    queryFn: async () => {
-      // Fail fast on a slow/stuck request rather than holding it open under
-      // polling load (pairs with the DB-side statement_timeout).
-      const { data, error } = await api.GET('/clients', {
-        signal: AbortSignal.timeout(8_000),
-      })
-      if (error || !data) throw new Error('clients request failed')
-      return data
-    },
-    refetchInterval: CLIENTS_POLL_INTERVAL_MS,
-  })
+  const { data, isPending, isError } = useClients()
 
   // Only blank the board when we have nothing to show. On a transient
   // background-poll failure we keep the last good rows on screen (the header
