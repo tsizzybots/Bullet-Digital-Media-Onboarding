@@ -21,6 +21,7 @@ Card spec mandates:
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -736,6 +737,22 @@ def test_create_ghl_subaccount_declares_concurrency_caps() -> None:
     per_email = next(c for c in fn_config.concurrency if c.key == "event.data.email")
     assert per_email.limit == 1
     assert per_email.scope == "fn"
+
+
+def test_create_ghl_subaccount_declares_global_throttle() -> None:
+    """A keyless `throttle=` bounds the aggregate GHL start-rate across all
+    clients (S1-26a follow-up): the two per-key concurrency caps cannot bound a
+    `reconcile_pandadoc` multi-signing heal, which fans out to N distinct
+    `client.created` events. `throttle=` is a SEPARATE Inngest param (not a
+    concurrency constraint), so it restores the dropped global cap's throughput
+    politeness without re-tripping the 2-constraint limit. Enforcement is
+    server-side; this only asserts the declaration."""
+    fn_config = create_ghl_subaccount.get_config("").main
+    assert fn_config.throttle is not None
+    # Keyless: caps the whole function, not per-client/per-email.
+    assert fn_config.throttle.key is None
+    assert fn_config.throttle.limit == 5
+    assert fn_config.throttle.period == timedelta(seconds=10)
 
 
 def test_create_ghl_subaccount_triggers_on_client_created() -> None:
