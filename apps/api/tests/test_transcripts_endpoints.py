@@ -253,8 +253,9 @@ async def test_manual_link_already_linked_409(
 
 def _fake_lost_race_link(winner_client_id: uuid.UUID):
     """A `link_transcript_to_client` stand-in that simulates losing the race: it
-    links the row to `winner_client_id` (as the winning request would have) and
-    returns None, so the endpoint takes the lost-race branch."""
+    commits what the winning request would have (the link AND the winner's
+    transcript-text documents row) and returns None, so the endpoint takes the
+    lost-race branch against realistic winner state."""
 
     async def _fake(session, *, transcript_id, client_id, link_method, linked_by=None):
         await session.execute(
@@ -264,6 +265,18 @@ def _fake_lost_race_link(winner_client_id: uuid.UUID):
                 "WHERE id = :tid"
             ),
             {"w": winner_client_id, "tid": transcript_id},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO documents (client_id, kind, r2_key, metadata) "
+                "SELECT :w, 'transcript_text', r2_key, cast(:meta AS jsonb) "
+                "FROM sales_call_transcripts WHERE id = :tid"
+            ),
+            {
+                "w": winner_client_id,
+                "tid": transcript_id,
+                "meta": json.dumps({"source": "google_meet", "transcript_id": str(transcript_id)}),
+            },
         )
         return None
 
@@ -308,8 +321,9 @@ async def test_manual_link_lost_race_to_same_client_idempotent_200(
     monkeypatch,
 ) -> None:
     """The lost-race branch where the winner linked to the SAME client we asked
-    for: idempotent 2xx (recovery re-emit), not 409."""
-    client, _, _ = authed_client
+    for: idempotent 2xx and the recovery RE-EMIT fires from the winner's
+    committed state (the event is never dropped), not 409."""
+    client, fake, _ = authed_client
     transcript_id = await _park_transcript(async_session, ["x@gym.com"])
     requested_client = await _seed_client(async_session)
     monkeypatch.setattr(
@@ -322,7 +336,15 @@ async def test_manual_link_lost_race_to_same_client_idempotent_200(
         f"/transcripts/{transcript_id}/link", json={"client_id": str(requested_client)}
     )
     assert response.status_code == 200
-    assert response.json()["client_id"] == str(requested_client)
+    body = response.json()
+    assert body["client_id"] == str(requested_client)
+    # The winner's documents row is found and the recovery re-emit fires.
+    assert body["document_id"] is not None
+    assert len(fake.sent) == 1
+    event_name, payload = fake.sent[0]
+    assert event_name == TRANSCRIPT_LINKED_EVENT
+    assert payload["client_id"] == str(requested_client)
+    assert payload["document_id"] == body["document_id"]
 
 
 @pytest.mark.db
