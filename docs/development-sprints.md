@@ -169,7 +169,7 @@ Goal: Project scaffold, database, auth, dashboard shell live. PandaDoc signing e
 ### S1-25: GHL sub-account creation (direct API, replaces Pabbly)
 
 - **Description**: Inngest function `create_ghl_subaccount` triggered by `pandadoc.signed`. Calls GHL agency API directly. Writes `platform_actions` row pre/post.
-- **Tests**: Mocked GHL agency API returns a sub-account id; row recorded with `status=success`, `external_id` set, `clients.ghl_subaccount_id` populated. API failure marks `status=failed` with `last_error` and increments `retry_count`. Concurrency cap of 3 enforced (verified by parallel test events).
+- **Tests**: Mocked GHL agency API returns a sub-account id; row recorded with `status=success`, `external_id` set, `clients.ghl_subaccount_id` populated. API failure marks `status=failed` with `last_error` and increments `retry_count`. Concurrency: the two dedup guards (per-client + per-email) are declared. (The original global "cap of 3" was dropped in **S1-26a** - Inngest's per-function max is 2 constraints; the DB idempotency key + returning-client check protect correctness without it.)
 - **Dependencies**: S1-09, S1-22
 
 ### S1-26: Returning-client check + parent_client_id linking

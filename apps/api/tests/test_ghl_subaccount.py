@@ -12,7 +12,8 @@ Card spec mandates:
   set, and `clients.ghl_subaccount_id` populated;
 - API failure: `status='failed'` with `last_error` and `retry_count`
   incremented;
-- a concurrency cap of 3 (declared on the function);
+- the two dedup concurrency guards (per-client + per-email; the former global
+  cap of 3 was dropped in S1-26a - Inngest's max is 2);
 - idempotency: a replay must not create a second sub-account or a second
   action row.
 """
@@ -20,6 +21,7 @@ Card spec mandates:
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -710,22 +712,23 @@ async def test_lookup_server_error_records_failed_and_propagates(
 
 
 # --------------------------------------------------------------------------- #
-# Concurrency declaration assertion
+# Flow-control declaration assertions (concurrency caps + throttle)
 # --------------------------------------------------------------------------- #
 
 
 def test_create_ghl_subaccount_declares_concurrency_caps() -> None:
-    """The function declares a global cap of 3 (rate limit), a per-client cap
-    of 1 (no concurrent double-create), and a per-email cap of 1 (S1-26: no
-    duplicate create across two rows sharing an email). Enforcement is
-    server-side in Inngest; this only asserts the declaration."""
+    """The function declares EXACTLY the two dedup guards: a per-client cap of 1
+    (no concurrent double-create) and a per-email cap of 1 (S1-26: no duplicate
+    create across two rows sharing an email). The former global cap of 3 was
+    dropped (S1-26a) because Inngest allows a max of 2 concurrency constraints -
+    exceeding it fails ALL function registration. Enforcement is server-side in
+    Inngest; this only asserts the declaration."""
     fn_config = create_ghl_subaccount.get_config("").main
     assert fn_config.concurrency is not None
-    assert len(fn_config.concurrency) == 3
+    assert len(fn_config.concurrency) == 2  # <= Inngest's max of 2
 
-    global_cap = next(c for c in fn_config.concurrency if c.key is None)
-    assert global_cap.limit == 3
-    assert global_cap.scope == "fn"
+    # No un-keyed global cap remains.
+    assert all(c.key is not None for c in fn_config.concurrency)
 
     per_client = next(c for c in fn_config.concurrency if c.key == "event.data.client_id")
     assert per_client.limit == 1
@@ -734,6 +737,31 @@ def test_create_ghl_subaccount_declares_concurrency_caps() -> None:
     per_email = next(c for c in fn_config.concurrency if c.key == "event.data.email")
     assert per_email.limit == 1
     assert per_email.scope == "fn"
+
+
+def test_create_ghl_subaccount_declares_global_throttle() -> None:
+    """A keyless `throttle=` bounds the aggregate GHL start-rate across all
+    clients (S1-26a follow-up): the two per-key concurrency caps cannot bound a
+    `reconcile_pandadoc` multi-signing heal, which fans out to N distinct
+    `client.created` events. `throttle=` is a SEPARATE Inngest param (not a
+    concurrency constraint), so it does not re-trip the 2-constraint limit. It
+    bounds run STARTS only (GCRA: at most `limit + burst` starts per period
+    window, so 5 + the default burst of 1 = up to 6 starts in a single 10s
+    window; sustained 5/10s), NOT in-flight calls. Enforcement is server-side;
+    this only asserts the declaration."""
+    fn_config = create_ghl_subaccount.get_config("").main
+    assert fn_config.throttle is not None
+    # Keyless: caps the whole function, not per-client/per-email.
+    assert fn_config.throttle.key is None
+    assert fn_config.throttle.limit == 5
+    assert fn_config.throttle.period == timedelta(seconds=10)
+    # Lock the SDK-default burst so the real per-window ceiling (limit + burst
+    # = 6) is a documented, deliberate choice - a silent default bump would
+    # change the enforced rate without failing any test.
+    assert fn_config.throttle.burst == 1
+    # Throttle (queue-and-drain) was chosen over rate_limit (drop-excess):
+    # dropping a backlog-heal's `client.created` would strand real signings.
+    assert fn_config.rate_limit is None
 
 
 def test_create_ghl_subaccount_triggers_on_client_created() -> None:
