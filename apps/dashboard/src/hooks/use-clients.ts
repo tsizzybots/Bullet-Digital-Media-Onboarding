@@ -17,7 +17,12 @@ export type ClientListItem = components['schemas']['ClientListItem']
  */
 export const clientsQueryKey = ['clients'] as const
 
-/** Poll interval (10s) shared by the clients board + the transcript picker. */
+/**
+ * Poll interval shared by the clients board + the transcript picker. 10s per
+ * the S1-31 card spec - deliberately NOT unified with the shared 7s
+ * POLL_INTERVAL_MS: the Playwright e2e wait windows are tuned to this 10s
+ * cadence, so "cleaning this up" to 7s would break them.
+ */
 export const CLIENTS_POLL_INTERVAL_MS = 10_000
 
 /**

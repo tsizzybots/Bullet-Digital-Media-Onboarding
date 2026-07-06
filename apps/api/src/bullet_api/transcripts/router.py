@@ -110,15 +110,15 @@ async def link_transcript(
     if existing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="transcript not found")
     if existing.client_id is not None:
-        # Already linked. If it is linked to the SAME client the caller asked
-        # for, treat the request as idempotent and RE-EMIT transcript.linked -
-        # this is the recovery path for a prior attempt whose post-commit emit
-        # failed (the link committed, the event did not). A DIFFERENT client is
-        # a genuine conflict (409).
-        if existing.client_id == client_uuid:
-            return await _idempotent_link_response(db, emitter, tid, client_uuid, existing.r2_key)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="transcript already linked"
+        # Already linked at the initial check: apply the ONE shared
+        # same-vs-different-client rule (see _linked_conflict_or_idempotent).
+        return await _linked_conflict_or_idempotent(
+            db,
+            emitter,
+            tid,
+            requested_client_id=client_uuid,
+            linked_client_id=existing.client_id,
+            r2_key=existing.r2_key,
         )
 
     client_exists = (
@@ -149,16 +149,26 @@ async def link_transcript(
             )
         ).one_or_none()
         if winner is None or winner.client_id is None:
-            # The UPDATE matched 0 rows yet the row is not linked (or gone) - only
-            # reachable if the row was deleted mid-request; treat as not found.
+            # The UPDATE matched 0 rows yet the re-read finds no link. Two ways
+            # here: the transcript row was deleted mid-request (winner is None),
+            # or the winner's CLIENT was deleted between their commit and our
+            # re-read - `clients` FK is ON DELETE SET NULL (migration 0010), so
+            # that resets the transcript to unlinked rather than deleting it.
+            # Neither is reachable today (no transcript- or client-delete
+            # endpoint exists); both surface as 404 so the caller re-fetches
+            # the list and retries against current state.
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="transcript not found"
             )
-        if winner.client_id != client_uuid:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail="transcript already linked"
-            )
-        return await _idempotent_link_response(db, emitter, tid, client_uuid, winner.r2_key)
+        # Linked after the race: apply the same shared rule as the initial check.
+        return await _linked_conflict_or_idempotent(
+            db,
+            emitter,
+            tid,
+            requested_client_id=client_uuid,
+            linked_client_id=winner.client_id,
+            r2_key=winner.r2_key,
+        )
     await db.commit()
 
     if outcome.document_id is not None:
@@ -178,6 +188,29 @@ async def link_transcript(
         client_id=str(outcome.client_id),
         document_id=str(outcome.document_id) if outcome.document_id else None,
     )
+
+
+async def _linked_conflict_or_idempotent(
+    db: AsyncSession,
+    emitter: EventEmitter,
+    transcript_id: uuid.UUID,
+    *,
+    requested_client_id: uuid.UUID,
+    linked_client_id: uuid.UUID,
+    r2_key: str | None,
+) -> LinkTranscriptResponse:
+    """The ONE same-vs-different-client rule for a transcript observed already
+    linked - whether at the initial check or on the lost-race re-read (S1-27b),
+    so the two sites cannot drift. Linked to the SAME client the caller asked
+    for -> idempotent success with the recovery re-emit (a prior attempt's link
+    committed but its post-commit emit may have failed; the event is never
+    dropped). Linked to a DIFFERENT client -> 409, never a silent 200 echoing
+    the requested client."""
+    if linked_client_id == requested_client_id:
+        return await _idempotent_link_response(
+            db, emitter, transcript_id, requested_client_id, r2_key
+        )
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="transcript already linked")
 
 
 async def _idempotent_link_response(
