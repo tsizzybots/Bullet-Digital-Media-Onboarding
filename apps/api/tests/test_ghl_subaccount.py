@@ -744,15 +744,24 @@ def test_create_ghl_subaccount_declares_global_throttle() -> None:
     clients (S1-26a follow-up): the two per-key concurrency caps cannot bound a
     `reconcile_pandadoc` multi-signing heal, which fans out to N distinct
     `client.created` events. `throttle=` is a SEPARATE Inngest param (not a
-    concurrency constraint), so it restores the dropped global cap's throughput
-    politeness without re-tripping the 2-constraint limit. Enforcement is
-    server-side; this only asserts the declaration."""
+    concurrency constraint), so it does not re-trip the 2-constraint limit. It
+    bounds run STARTS only (GCRA: at most `limit + burst` starts per period
+    window, so 5 + the default burst of 1 = up to 6 starts in a single 10s
+    window; sustained 5/10s), NOT in-flight calls. Enforcement is server-side;
+    this only asserts the declaration."""
     fn_config = create_ghl_subaccount.get_config("").main
     assert fn_config.throttle is not None
     # Keyless: caps the whole function, not per-client/per-email.
     assert fn_config.throttle.key is None
     assert fn_config.throttle.limit == 5
     assert fn_config.throttle.period == timedelta(seconds=10)
+    # Lock the SDK-default burst so the real per-window ceiling (limit + burst
+    # = 6) is a documented, deliberate choice - a silent default bump would
+    # change the enforced rate without failing any test.
+    assert fn_config.throttle.burst == 1
+    # Throttle (queue-and-drain) was chosen over rate_limit (drop-excess):
+    # dropping a backlog-heal's `client.created` would strand real signings.
+    assert fn_config.rate_limit is None
 
 
 def test_create_ghl_subaccount_triggers_on_client_created() -> None:

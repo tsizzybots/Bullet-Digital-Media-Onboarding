@@ -37,10 +37,13 @@ Correctness rules:
   see plan). A per-email concurrency cap serialises same-email processing;
   its key is a raw string while `clients.email` is citext, so two rows sharing
   an email in DIFFERENT casings are not serialised by the cap. The citext DB
-  sibling SELECT + the GHL lookup back that case up only for SEQUENTIAL arrival
+  sibling SELECT + the GHL lookup cover that case only for SEQUENTIAL arrival
   (a returning signing that lands after the first has committed its id); two
   different-casing rows arriving truly CONCURRENTLY remain an unclosed narrow
-  window (see the per-email cap comment on the decorator).
+  window - the consequences are a possible duplicate GHL location AND a
+  silently missed `parent_client_id` link (neither row sees the other as a
+  sibling, so the returning-client tree is never wired). Tracked as the S1-26b
+  follow-up (see the per-email cap comment on the decorator).
 - **Commit the `in_progress` row BEFORE the GHL call**, then commit the
   terminal (`success`/`failed`) state after. A crash mid-call therefore
   leaves a visible `in_progress` row in the dashboard rather than a silent
@@ -52,11 +55,14 @@ Correctness rules:
   dropped (S1-26a) - it made THREE constraints, exceeding Inngest's 2-per-
   function limit, which failed the whole `/fn/register` sync (verified live:
   the sync 400s with 3, returns 200 with 2). The DB idempotency key +
-  returning-client check protect duplicate-create correctness without it. Its
-  throughput-politeness intent is restored by a keyless `throttle=` (rate-over-
-  time), which is a SEPARATE param and so does not re-trip the 2-constraint
-  limit; it bounds the aggregate GHL start-rate across all clients (e.g. a
-  `reconcile_pandadoc` multi-signing heal) that the per-key caps cannot.
+  returning-client check protect duplicate-create correctness without it. A
+  keyless `throttle=` (rate-over-time, a SEPARATE param that does not re-trip
+  the 2-constraint limit) bounds the aggregate GHL START-rate across all
+  clients (e.g. a `reconcile_pandadoc` multi-signing heal) that the per-key
+  caps cannot. Note it bounds starts, NOT in-flight calls - under sustained
+  GHL slowness overlapping runs can still exceed the old in-flight cap of 3,
+  so the throttle is a weaker politeness bound, not a restoration of the
+  dropped cap (see the decorator comment for the exact GCRA semantics).
 - **Retriable vs not.** `GhlClientError` (4xx - bad payload / auth) and an
   empty API key / company id are NonRetriable (cannot self-heal), so
   Inngest dead-letters. `GhlServerError` (5xx / 429) and transient errors
@@ -470,21 +476,28 @@ async def create_ghl_subaccount_core(
     # so neither `limit=1` keyed cap bounds that aggregate burst - without this the
     # heal would fire N simultaneous GHL creates. `throttle=` is rate-over-time and
     # is a SEPARATE Inngest param, so it does NOT count against the 2-constraint
-    # concurrency limit that the S1-26a bug tripped. 5 per 10s drains a backlog
-    # steadily while staying well under GHL's API ceiling; keyless so it caps the
-    # whole function, not per-client.
+    # concurrency limit that the S1-26a bug tripped.
+    #
+    # Semantics, precisely: Inngest throttle is GCRA over run STARTS - at most
+    # `limit + burst` starts per `period` window (burst is the SDK default 1, so
+    # up to 6 starts can land in a single 10s window; the sustained rate is
+    # 5/10s). It does NOT bound in-flight calls: under sustained GHL slowness,
+    # runs started across successive windows can overlap, so concurrency can
+    # still exceed the old in-flight cap of 3 - this is a start-rate politeness
+    # bound, weaker than (not a restoration of) the dropped Concurrency cap.
+    # Keyless so it caps the whole function, not per-client.
     throttle=inngest.Throttle(limit=5, period=timedelta(seconds=10)),
     concurrency=[
         # Inngest allows a MAX of 2 concurrency constraints per function, and
         # exceeding it fails the WHOLE (all-or-nothing) function registration, so
         # NO function registers. We therefore keep only the two correctness
         # guards below and drop the former global `Concurrency(limit=3)` GHL-
-        # politeness cap (S1-26a) - a THIRD constraint. That cap only bounded
-        # simultaneous runs; its throughput-politeness intent is now served by the
-        # `throttle=` above (rate-over-time, which does not count against the
-        # 2-constraint limit), and the DB idempotency key (`platform_actions`
-        # ON CONFLICT) + the S1-26 returning-client check protect against
-        # duplicate accounts regardless.
+        # politeness cap (S1-26a) - a THIRD constraint. That cap bounded
+        # simultaneous IN-FLIGHT runs; the `throttle=` above approximates its
+        # politeness intent as a start-rate bound only (see its comment - it is
+        # weaker, not a restoration), and the DB idempotency key
+        # (`platform_actions` ON CONFLICT) + the S1-26 returning-client check
+        # protect against duplicate accounts regardless.
         #
         # Per-client cap: at most one creation in flight for a given client,
         # so two concurrent `client.created` deliveries cannot both POST a
@@ -500,10 +513,12 @@ async def create_ghl_subaccount_core(
         # by this cap. The citext DB sibling SELECT + GHL lookup close only the
         # SEQUENTIAL casing case (a second signing that arrives after the first
         # has COMMITTED its id); two different-casing rows arriving TRULY
-        # CONCURRENTLY can still both pass the check before either commits. That
+        # CONCURRENTLY can still both pass the check before either commits -
+        # risking a duplicate GHL location AND a silently missed
+        # `parent_client_id` link (neither row sees the other as a sibling). That
         # narrow window is unclosed here; normalising the key to
         # `lower(event.data.email)` would shut it but needs the Inngest CEL key
-        # evaluator's `lower()` support confirmed first (follow-up).
+        # evaluator's `lower()` support confirmed first (S1-26b follow-up).
         inngest.Concurrency(key="event.data.email", limit=1, scope="fn"),
     ],
 )
