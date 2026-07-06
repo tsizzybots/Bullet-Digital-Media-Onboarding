@@ -49,9 +49,11 @@ export function createApiClient(
           // Strip scheme+host and any query/hash to get the pathname, without
           // relying on the `URL` global (this package targets both node + the
           // browser and the tsconfig lib does not declare it).
-          const path = request.url
-            .replace(/^[a-z]+:\/\/[^/]+/i, "")
-            .split(/[?#]/)[0];
+          // `split` always returns at least one element, but under
+          // `noUncheckedIndexedAccess` the index is `string | undefined`;
+          // default it so the narrow holds type-level too.
+          const path =
+            request.url.replace(/^[a-z]+:\/\/[^/]+/i, "").split(/[?#]/)[0] ?? "";
           if (path !== "/me" && !path.startsWith("/auth/")) {
             onUnauthorized(path);
           }

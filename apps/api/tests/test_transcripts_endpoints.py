@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bullet_api.auth import CurrentUser, get_current_user
 from bullet_api.db import get_session
 from bullet_api.main import app
+from bullet_api.transcripts import router as transcripts_router_module
 from bullet_api.worker import TRANSCRIPT_LINKED_EVENT, FakeEventEmitter, get_event_emitter
 
 
@@ -248,6 +249,178 @@ async def test_manual_link_already_linked_409(
         f"/transcripts/{transcript_id}/link", json={"client_id": str(other_client)}
     )
     assert response.status_code == 409
+
+
+def _fake_lost_race_link(winner_client_id: uuid.UUID):
+    """A `link_transcript_to_client` stand-in that simulates losing the race: it
+    commits what the winning request would have and returns None, so the
+    endpoint takes the lost-race branch against realistic winner state. Mirrors
+    the real writes column-for-column (the guarded link UPDATE incl. the
+    caller's `link_method` + `linked_by`, and the ON CONFLICT-guarded
+    transcript-text documents insert), so the branch is proven against the
+    shared link path's actual effects rather than a simplified double."""
+
+    async def _fake(session, *, transcript_id, client_id, link_method, linked_by=None):
+        await session.execute(
+            text(
+                "UPDATE sales_call_transcripts "
+                "SET client_id = :w, linked_at = now(), "
+                "    link_method = :link_method, linked_by = :linked_by "
+                "WHERE id = :tid AND client_id IS NULL"
+            ),
+            {
+                "w": winner_client_id,
+                "link_method": link_method,
+                "linked_by": linked_by,
+                "tid": transcript_id,
+            },
+        )
+        await session.execute(
+            text(
+                "INSERT INTO documents (client_id, kind, r2_key, metadata) "
+                "SELECT :w, 'transcript_text', r2_key, cast(:meta AS jsonb) "
+                "FROM sales_call_transcripts WHERE id = :tid "
+                "ON CONFLICT (client_id, kind, r2_key) "
+                "  WHERE kind = 'transcript_text' DO NOTHING"
+            ),
+            {
+                "w": winner_client_id,
+                "tid": transcript_id,
+                "meta": json.dumps({"source": "google_meet", "transcript_id": str(transcript_id)}),
+            },
+        )
+        return None
+
+    return _fake
+
+
+@pytest.mark.db
+async def test_manual_link_lost_race_to_different_client_409(
+    async_session: AsyncSession,
+    authed_client: tuple[AsyncClient, FakeEventEmitter],
+    monkeypatch,
+) -> None:
+    """The lost-race branch (S1-27b): the transcript is unlinked at our initial
+    check but another request links it to a DIFFERENT client before our guarded
+    UPDATE. Must be 409, NOT a silent 200 echoing the requested client."""
+    client, fake, _ = authed_client
+    transcript_id = await _park_transcript(async_session, ["x@gym.com"])
+    requested_client = await _seed_client(async_session)
+    race_winner = await _seed_client(async_session)
+    monkeypatch.setattr(
+        transcripts_router_module, "link_transcript_to_client", _fake_lost_race_link(race_winner)
+    )
+
+    response = await client.post(
+        f"/transcripts/{transcript_id}/link", json={"client_id": str(requested_client)}
+    )
+    assert response.status_code == 409
+    linked = (
+        await async_session.execute(
+            text("SELECT client_id FROM sales_call_transcripts WHERE id = :tid"),
+            {"tid": transcript_id},
+        )
+    ).scalar_one()
+    assert linked == race_winner  # linked to the winner, NOT the requested client
+    assert fake.sent == []  # no wrong-client transcript.linked emitted
+
+
+@pytest.mark.db
+async def test_manual_link_lost_race_to_same_client_idempotent_200(
+    async_session: AsyncSession,
+    authed_client: tuple[AsyncClient, FakeEventEmitter],
+    monkeypatch,
+) -> None:
+    """The lost-race branch where the winner linked to the SAME client we asked
+    for: idempotent 2xx and the recovery RE-EMIT fires from the winner's
+    committed state (the event is never dropped), not 409."""
+    client, fake, _ = authed_client
+    transcript_id = await _park_transcript(async_session, ["x@gym.com"])
+    requested_client = await _seed_client(async_session)
+    monkeypatch.setattr(
+        transcripts_router_module,
+        "link_transcript_to_client",
+        _fake_lost_race_link(requested_client),
+    )
+
+    response = await client.post(
+        f"/transcripts/{transcript_id}/link", json={"client_id": str(requested_client)}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["client_id"] == str(requested_client)
+    # The winner's documents row is found and the recovery re-emit fires.
+    assert body["document_id"] is not None
+    assert len(fake.sent) == 1
+    event_name, payload = fake.sent[0]
+    assert event_name == TRANSCRIPT_LINKED_EVENT
+    assert payload["client_id"] == str(requested_client)
+    assert payload["document_id"] == body["document_id"]
+
+
+@pytest.mark.db
+async def test_manual_link_lost_race_row_deleted_404(
+    async_session: AsyncSession,
+    authed_client: tuple[AsyncClient, FakeEventEmitter],
+    monkeypatch,
+) -> None:
+    """The lost-race 404 guard, arm 1: the guarded UPDATE matched 0 rows and the
+    re-read finds the transcript row GONE (deleted mid-request). 404, no emit."""
+    client, fake, _ = authed_client
+    transcript_id = await _park_transcript(async_session, ["x@gym.com"])
+    requested_client = await _seed_client(async_session)
+
+    async def _race_then_row_deleted(
+        session, *, transcript_id, client_id, link_method, linked_by=None
+    ):
+        await session.execute(
+            text("DELETE FROM sales_call_transcripts WHERE id = :tid"), {"tid": transcript_id}
+        )
+        return None
+
+    monkeypatch.setattr(
+        transcripts_router_module, "link_transcript_to_client", _race_then_row_deleted
+    )
+
+    response = await client.post(
+        f"/transcripts/{transcript_id}/link", json={"client_id": str(requested_client)}
+    )
+    assert response.status_code == 404
+    assert fake.sent == []
+
+
+@pytest.mark.db
+async def test_manual_link_lost_race_reset_to_unlinked_404(
+    async_session: AsyncSession,
+    authed_client: tuple[AsyncClient, FakeEventEmitter],
+    monkeypatch,
+) -> None:
+    """The lost-race 404 guard, arm 2: the guarded UPDATE matched 0 rows yet the
+    re-read finds the row UNLINKED again - the end state when the winner's
+    client is deleted between their commit and our re-read (the clients FK is
+    ON DELETE SET NULL, migration 0010; no delete endpoint exists today, so this
+    models the anticipated future path). 404 so the caller re-fetches and can
+    retry against current state; no emit."""
+    client, fake, _ = authed_client
+    transcript_id = await _park_transcript(async_session, ["x@gym.com"])
+    requested_client = await _seed_client(async_session)
+
+    async def _race_then_reset_to_unlinked(
+        session, *, transcript_id, client_id, link_method, linked_by=None
+    ):
+        # The winner linked and their client was then deleted: FK SET NULL
+        # leaves the row present but unlinked - exactly this end state.
+        return None
+
+    monkeypatch.setattr(
+        transcripts_router_module, "link_transcript_to_client", _race_then_reset_to_unlinked
+    )
+
+    response = await client.post(
+        f"/transcripts/{transcript_id}/link", json={"client_id": str(requested_client)}
+    )
+    assert response.status_code == 404
+    assert fake.sent == []
 
 
 @pytest.mark.db
