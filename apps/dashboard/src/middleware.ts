@@ -21,5 +21,11 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  // Gate PAGE routes only. Exclude `api` so the middleware never intercepts the
+  // dashboard's own API routes - `/api/healthz` and, critically, the
+  // `/api/backend/*` same-origin proxy to the backend API (which carries the
+  // session cookie and is authenticated by the API itself). Without this
+  // exclusion the middleware would redirect the login POST to /login before the
+  // rewrite could proxy it, so login could never complete.
+  matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)'],
 }
