@@ -8,6 +8,23 @@ const nextConfig: NextConfig = {
   // pre-built JS. This keeps the dashboard build free of any separate
   // shared-package build step.
   transpilePackages: ['@bullet/shared'],
+
+  // Same-origin API proxy. The session cookie is HttpOnly + host-scoped, so it
+  // can only be read by the dashboard's own domain (and `.onrender.com` is a
+  // public suffix, so a shared parent-domain cookie is impossible). When the
+  // dashboard and API live on different hosts, the browser must therefore talk
+  // to the API *through the dashboard's own origin* so the session cookie lands
+  // on - and is sent back from - the dashboard host, and the middleware can read
+  // it. Set `NEXT_PUBLIC_API_URL=/api/backend` (relative) so the browser hits
+  // this path, and `API_PROXY_TARGET=<api origin>` so Next proxies it server-
+  // side. Locally both are unset: `NEXT_PUBLIC_API_URL` falls back to
+  // localhost:8000 (same host as the dashboard, so cookies already work) and
+  // this rewrite is a no-op.
+  async rewrites() {
+    const target = process.env.API_PROXY_TARGET
+    if (!target) return []
+    return [{ source: '/api/backend/:path*', destination: `${target}/:path*` }]
+  },
 }
 
 // Wrap with Sentry's Next.js plugin (S1-20, Slice B). Source-map upload only
