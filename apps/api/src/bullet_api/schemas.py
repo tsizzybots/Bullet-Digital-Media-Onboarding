@@ -91,6 +91,9 @@ class ClientListItem(BaseModel):
     email: str
     current_step: str
     step_entered_at: datetime
+    # S1-26c: badge a client whose identity key collided with an existing one
+    # (divergent names) so a human can review the possible duplicate.
+    possible_duplicate: bool
     last_action_status: str | None
     last_action_platform: str | None
     last_action: str | None
@@ -157,6 +160,11 @@ class ClientDetailResponse(BaseModel):
     current_step: str
     step_entered_at: datetime
     created_at: datetime
+    # S1-26c: raised when this client's identity key collided with an existing
+    # client's but the full business names diverged (a possible duplicate for a
+    # human to review/merge). `possible_duplicate_of` points at the candidate.
+    possible_duplicate: bool
+    possible_duplicate_of: str | None
     sales_summary: list[KnowledgeEntry]
     actions: list[PlatformActionItem]
     hubspot_contact_id: str | None

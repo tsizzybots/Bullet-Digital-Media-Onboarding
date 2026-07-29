@@ -57,6 +57,7 @@ _LIST_CLIENTS_SQL = text(
         c.email,
         c.current_step,
         c.step_entered_at,
+        c.possible_duplicate,
         la.status   AS last_action_status,
         la.platform AS last_action_platform,
         la.action   AS last_action
@@ -94,6 +95,7 @@ async def list_clients(
             email=row["email"],
             current_step=row["current_step"],
             step_entered_at=row["step_entered_at"],
+            possible_duplicate=row["possible_duplicate"],
             last_action_status=row["last_action_status"],
             last_action_platform=row["last_action_platform"],
             last_action=row["last_action"],
@@ -108,6 +110,7 @@ _GET_CLIENT_SQL = text(
     SELECT
         id, business_name, contact_first_name, contact_last_name, email,
         phone, legal_entity, current_step, step_entered_at, created_at,
+        possible_duplicate, possible_duplicate_of,
         hubspot_contact_id, pandadoc_document_id, ghl_contact_id,
         ghl_subaccount_id, asana_project_id, asana_finance_task_id,
         stripe_customer_id, stripe_subscription_id, xero_contact_id,
@@ -211,6 +214,12 @@ async def get_client_detail(
         current_step=client_row["current_step"],
         step_entered_at=client_row["step_entered_at"],
         created_at=client_row["created_at"],
+        possible_duplicate=client_row["possible_duplicate"],
+        possible_duplicate_of=(
+            str(client_row["possible_duplicate_of"])
+            if client_row["possible_duplicate_of"] is not None
+            else None
+        ),
         sales_summary=[
             KnowledgeEntry(
                 key=row["key"],

@@ -172,6 +172,21 @@
             ],
             "title": "Phone"
           },
+          "possible_duplicate": {
+            "title": "Possible Duplicate",
+            "type": "boolean"
+          },
+          "possible_duplicate_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Possible Duplicate Of"
+          },
           "sales_summary": {
             "items": {
               "$ref": "#/components/schemas/KnowledgeEntry"
@@ -272,6 +287,8 @@
           "current_step",
           "step_entered_at",
           "created_at",
+          "possible_duplicate",
+          "possible_duplicate_of",
           "sales_summary",
           "actions",
           "hubspot_contact_id",
@@ -363,6 +380,10 @@
             ],
             "title": "Last Action Status"
           },
+          "possible_duplicate": {
+            "title": "Possible Duplicate",
+            "type": "boolean"
+          },
           "step_entered_at": {
             "format": "date-time",
             "title": "Step Entered At",
@@ -376,6 +397,7 @@
           "email",
           "current_step",
           "step_entered_at",
+          "possible_duplicate",
           "last_action_status",
           "last_action_platform",
           "last_action"

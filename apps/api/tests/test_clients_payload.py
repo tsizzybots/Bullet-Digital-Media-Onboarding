@@ -344,3 +344,107 @@ def test_first_matching_token_wins() -> None:
     )
     out = extract_client_fields(document)
     assert out.email == "first@example.com"
+
+
+# --------------------------------------------------------------------------- #
+# HubSpot linked_objects (real signed-document shape, S1-26b)
+# --------------------------------------------------------------------------- #
+
+
+def _linked(provider: str, entity_type: str, entity_id: str) -> dict:
+    return {"provider": provider, "entity_type": entity_type, "entity_id": entity_id}
+
+
+def test_hubspot_deal_id_from_linked_objects() -> None:
+    """A REAL completed document carries the HubSpot deal in `linked_objects`
+    (only the deal - no company, no contact) and near-empty metadata."""
+    document = _document(
+        metadata={"document__creation_source": "template"},
+        linked_objects=[_linked("hubspot", "deal", "62950540639")],
+    )
+    out = extract_client_fields(document)
+    assert out.hubspot_deal_id == "62950540639"
+    assert out.hubspot_company_id is None
+    assert out.hubspot_contact_id is None
+    assert out.document_creation_source == "template"
+
+
+def test_linked_objects_take_precedence_over_metadata() -> None:
+    """When both are present, `linked_objects` (the authoritative source) wins."""
+    document = _document(
+        metadata={"hubspot.deal_id": "stale-metadata-deal"},
+        linked_objects=[_linked("hubspot", "deal", "linked-deal")],
+    )
+    out = extract_client_fields(document)
+    assert out.hubspot_deal_id == "linked-deal"
+
+
+def test_linked_objects_falls_back_to_metadata_when_absent() -> None:
+    """No `linked_objects` -> the dot-notation metadata fallback still populates
+    (older / other-template documents)."""
+    document = _document(metadata={"hubspot.deal_id": "meta-deal"})
+    document.pop("linked_objects", None)
+    out = extract_client_fields(document)
+    assert out.hubspot_deal_id == "meta-deal"
+
+
+def test_linked_objects_ignores_non_hubspot_provider() -> None:
+    document = _document(
+        metadata={},
+        linked_objects=[_linked("salesforce", "deal", "sf-deal")],
+    )
+    out = extract_client_fields(document)
+    assert out.hubspot_deal_id is None
+
+
+def test_linked_objects_first_match_wins_with_many() -> None:
+    document = _document(
+        metadata={},
+        linked_objects=[
+            _linked("hubspot", "deal", "deal-1"),
+            _linked("hubspot", "deal", "deal-2"),
+        ],
+    )
+    out = extract_client_fields(document)
+    assert out.hubspot_deal_id == "deal-1"
+
+
+def test_linked_objects_matches_case_insensitively() -> None:
+    document = _document(
+        metadata={},
+        linked_objects=[_linked("HubSpot", "Deal", "mixed-case-deal")],
+    )
+    out = extract_client_fields(document)
+    assert out.hubspot_deal_id == "mixed-case-deal"
+
+
+def test_linked_objects_reads_company_and_contact_when_present() -> None:
+    """Defensive: real Bullet docs link only the deal, but if a company/contact
+    is ever linked we read it (precedence over metadata)."""
+    document = _document(
+        metadata={},
+        linked_objects=[
+            _linked("hubspot", "deal", "d1"),
+            _linked("hubspot", "company", "c1"),
+            _linked("hubspot", "contact", "p1"),
+        ],
+    )
+    out = extract_client_fields(document)
+    assert out.hubspot_deal_id == "d1"
+    assert out.hubspot_company_id == "c1"
+    assert out.hubspot_contact_id == "p1"
+
+
+def test_non_list_linked_objects_falls_back_to_metadata() -> None:
+    document = _document(
+        metadata={"hubspot.deal_id": "meta-deal"},
+        linked_objects="not-a-list",
+    )
+    out = extract_client_fields(document)
+    assert out.hubspot_deal_id == "meta-deal"
+
+
+def test_linked_objects_empty_list_yields_none_deal() -> None:
+    document = _document(metadata={}, linked_objects=[])
+    out = extract_client_fields(document)
+    assert out.hubspot_deal_id is None

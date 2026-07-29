@@ -22,9 +22,14 @@ PandaDoc UK account (inspected 04/06/2026 via
   trading name, which can differ from the legal entity.
 
 - `metadata` - arbitrary key/value pairs set by HubSpot's PandaDoc
-  integration at doc-creation time. Keys use DOT notation
-  (`hubspot.contact_id`, `hubspot.deal_id`, `hubspot.company_id`), not
-  underscores or camelCase.
+  integration at doc-creation time. On real docs it carries only
+  `source_process_uuid` + `document__creation_source`; the dot-notation
+  `hubspot.*` keys are a defensive fallback for older/other templates.
+
+- `linked_objects` - the top-level CRM link list on a REAL signed document
+  (`[{provider, entity_type, entity_id}]`), the authoritative source for the
+  HubSpot ids. Bullet's docs link ONLY the deal (no company, no contact), so
+  `hubspot_deal_id` comes from here and company/contact resolve to None.
 
 - `recipients` is the signing roster (4 entries: 2 client signers + 2
   Bullet signers on a typical agreement). It is NOT a reliable single
@@ -114,10 +119,22 @@ _TOKEN_DEAL_MONTHLY_SERVICE_FEE = "Deal.MonthlyServiceFee"
 _FIELD_LEGAL_TRADING_NAME = "Enter Your Company's Legal Trading Name"
 
 # HubSpot integration metadata. Keys use DOT notation in Bullet's account.
+# NOTE: on a real signed document the HubSpot ids live in the top-level
+# `linked_objects` list (see below), NOT here - these metadata keys are kept
+# only as a defensive fallback for older / other-template documents.
 _META_HUBSPOT_CONTACT_ID = "hubspot.contact_id"
 _META_HUBSPOT_DEAL_ID = "hubspot.deal_id"
 _META_HUBSPOT_COMPANY_ID = "hubspot.company_id"
 _META_DOCUMENT_CREATION_SOURCE = "document__creation_source"
+
+# CRM links on a REAL signed document live in a top-level `linked_objects`
+# list of {provider, entity_type, entity_id} (verified 28/07/2026). Bullet's
+# docs link ONLY the deal (no company, no contact) - the company/contact reads
+# below therefore resolve to None on real docs and are retained defensively.
+_LINKED_PROVIDER_HUBSPOT = "hubspot"
+_LINKED_ENTITY_DEAL = "deal"
+_LINKED_ENTITY_COMPANY = "company"
+_LINKED_ENTITY_CONTACT = "contact"
 
 
 def _stringy(value: object) -> str | None:
@@ -193,6 +210,30 @@ def _metadata_value(document: dict, key: str) -> str | None:
     return None
 
 
+def _linked_object_id(
+    document: dict, entity_type: str, provider: str = _LINKED_PROVIDER_HUBSPOT
+) -> str | None:
+    """Return the `entity_id` of the first matching linked object, or None.
+
+    Matches `provider` + `entity_type` case-insensitively against the
+    top-level `linked_objects` list. Defensive for the 0 / 1 / many cases:
+    the first match wins; a missing or non-list `linked_objects` yields None.
+    """
+    linked = document.get("linked_objects")
+    if not isinstance(linked, list):
+        return None
+    for entry in linked:
+        if not isinstance(entry, dict):
+            continue
+        entry_provider = _stringy(entry.get("provider"))
+        entry_type = _stringy(entry.get("entity_type"))
+        if entry_provider is None or entry_type is None:
+            continue
+        if entry_provider.lower() == provider.lower() and entry_type.lower() == entity_type.lower():
+            return _stringy(entry.get("entity_id"))
+    return None
+
+
 def _template_id(document: dict) -> str | None:
     """Read the template id from the `template` object at the top level.
 
@@ -242,9 +283,18 @@ def extract_client_fields(document: dict) -> ExtractedClientFields:
         state=_token(document, _TOKEN_COMPANY_STATE),
         postal_code=_token(document, _TOKEN_COMPANY_ZIP),
         country=_token(document, _TOKEN_COMPANY_COUNTRY),
-        hubspot_contact_id=_metadata_value(document, _META_HUBSPOT_CONTACT_ID),
-        hubspot_deal_id=_metadata_value(document, _META_HUBSPOT_DEAL_ID),
-        hubspot_company_id=_metadata_value(document, _META_HUBSPOT_COMPANY_ID),
+        hubspot_contact_id=(
+            _linked_object_id(document, _LINKED_ENTITY_CONTACT)
+            or _metadata_value(document, _META_HUBSPOT_CONTACT_ID)
+        ),
+        hubspot_deal_id=(
+            _linked_object_id(document, _LINKED_ENTITY_DEAL)
+            or _metadata_value(document, _META_HUBSPOT_DEAL_ID)
+        ),
+        hubspot_company_id=(
+            _linked_object_id(document, _LINKED_ENTITY_COMPANY)
+            or _metadata_value(document, _META_HUBSPOT_COMPANY_ID)
+        ),
         monthly_service_fee=_token(document, _TOKEN_DEAL_MONTHLY_SERVICE_FEE),
         deal_currency=_token(document, _TOKEN_DEAL_CURRENCY),
         pandadoc_template_id=_template_id(document),

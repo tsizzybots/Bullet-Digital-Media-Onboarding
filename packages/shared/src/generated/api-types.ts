@@ -359,6 +359,10 @@ export interface components {
             pandadoc_document_id: string | null;
             /** Phone */
             phone: string | null;
+            /** Possible Duplicate */
+            possible_duplicate: boolean;
+            /** Possible Duplicate Of */
+            possible_duplicate_of: string | null;
             /** Sales Summary */
             sales_summary: components["schemas"]["KnowledgeEntry"][];
             /** Sheet Row Id */
@@ -409,6 +413,8 @@ export interface components {
             last_action_platform: string | null;
             /** Last Action Status */
             last_action_status: string | null;
+            /** Possible Duplicate */
+            possible_duplicate: boolean;
             /**
              * Step Entered At
              * Format: date-time

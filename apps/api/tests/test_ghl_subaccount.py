@@ -12,8 +12,8 @@ Card spec mandates:
   set, and `clients.ghl_subaccount_id` populated;
 - API failure: `status='failed'` with `last_error` and `retry_count`
   incremented;
-- the two dedup concurrency guards (per-client + per-email; the former global
-  cap of 3 was dropped in S1-26a - Inngest's max is 2);
+- the two dedup concurrency guards (per-client + per-identity; the former
+  global cap of 3 was dropped in S1-26a - Inngest's max is 2);
 - idempotency: a replay must not create a second sub-account or a second
   action row.
 """
@@ -35,6 +35,7 @@ from bullet_api.worker.ghl_subaccount import (
     create_ghl_subaccount,
     create_ghl_subaccount_core,
 )
+from bullet_api.worker.identity_key import compute_identity_key
 
 COMPANY_ID = "comp_agency_1"
 
@@ -47,16 +48,27 @@ async def _seed_client(
     email: str = "signer@example.com",
     phone: str | None = "+447000000000",
     ghl_subaccount_id: str | None = None,
+    postal_code: str | None = "E8 1AA",
 ) -> uuid.UUID:
-    """Insert a minimal `clients` row (as S1-25a would have created)."""
+    """Insert a minimal `clients` row (as S1-25a would have created).
+
+    `identity_key` is computed from `business_name` + `postal_code` exactly as
+    the orchestrator does (S1-26c), so seeded rows match the returning-client
+    check. Two seeds with the same name+postcode share an identity_key (a
+    returning client); different name OR postcode -> different key. Passing
+    `postal_code=None` yields a NULL identity_key (unidentifiable client).
+    """
+    identity_key = compute_identity_key(business_name, postal_code)
     result = await session.execute(
         text(
             "INSERT INTO clients ("
             "  email, business_name, legal_entity, contact_first_name, "
-            "  contact_last_name, phone, ghl_subaccount_id, current_step, step_entered_at"
+            "  contact_last_name, phone, ghl_subaccount_id, postal_code, "
+            "  identity_key, current_step, step_entered_at"
             ") VALUES ("
             "  :email, :business_name, :legal_entity, 'Sample', 'Signer', "
-            "  :phone, :ghl_subaccount_id, 'signed', now()"
+            "  :phone, :ghl_subaccount_id, :postal_code, :identity_key, "
+            "  'signed', now()"
             ") RETURNING id"
         ),
         {
@@ -65,6 +77,8 @@ async def _seed_client(
             "legal_entity": legal_entity,
             "phone": phone,
             "ghl_subaccount_id": ghl_subaccount_id,
+            "postal_code": postal_code,
+            "identity_key": identity_key,
         },
     )
     return result.scalar_one()
@@ -377,17 +391,23 @@ async def test_already_provisioned_client_skips_ghl_call(async_session: AsyncSes
 async def test_returning_client_links_parent_and_reuses_db_sibling(
     async_session: AsyncSession,
 ) -> None:
-    """Second signing for an email whose prior client row is already
-    provisioned: link the new row via parent_client_id and reuse the existing
-    sub-account id without any GHL call."""
+    """Second signing for the same BUSINESS (identity key = name + postcode)
+    whose prior client row is already provisioned: link the new row via
+    parent_client_id and reuse the existing sub-account id without any GHL
+    call. The two signings use DIFFERENT emails - identity-key matching still
+    recognises the returning client, which the old email match could not."""
     parent_id = await _seed_client(
-        async_session, email="returning@example.com", ghl_subaccount_id="loc_parent"
+        async_session,
+        email="parent@example.com",
+        business_name="Returning Gym Ltd",
+        legal_entity="Returning Gym Ltd",
+        ghl_subaccount_id="loc_parent",
     )
     child_id = await _seed_client(
         async_session,
-        email="returning@example.com",
-        business_name="Second Site Ltd",
-        legal_entity="Second Site Ltd",
+        email="different-email@example.com",
+        business_name="Returning Gym Ltd",
+        legal_entity="Returning Gym Ltd",
     )
     event_id = await _seed_onboarding_event(async_session)
     # A create location is configured but must NEVER be used on this path.
@@ -491,14 +511,18 @@ async def test_returning_client_links_to_root_not_intermediate(
     root_id = await _seed_client(
         async_session, email="root@example.com", ghl_subaccount_id="loc_root"
     )
-    # An already-linked child (parent_client_id = root, same sub-account).
+    # An already-linked child (parent_client_id = root, same sub-account) that
+    # ALSO shares root's identity key, so it is a candidate sibling too - the
+    # test proves the third signing links to the ROOT (earliest), not this
+    # intermediate.
     await async_session.execute(
         text(
-            "INSERT INTO clients (email, legal_entity, ghl_subaccount_id, parent_client_id, "
-            "  current_step, step_entered_at) "
-            "VALUES ('root@example.com', 'Child One', 'loc_root', :root, 'signed', now())"
+            "INSERT INTO clients (email, business_name, legal_entity, ghl_subaccount_id, "
+            "  parent_client_id, postal_code, identity_key, current_step, step_entered_at) "
+            "VALUES ('root@example.com', 'Sample Gym Ltd', 'Child One', 'loc_root', :root, "
+            "  'E8 1AA', :identity_key, 'signed', now())"
         ),
-        {"root": root_id},
+        {"root": root_id, "identity_key": compute_identity_key("Sample Gym Ltd", "E8 1AA")},
     )
     third_id = await _seed_client(async_session, email="root@example.com")
     event_id = await _seed_onboarding_event(async_session)
@@ -566,6 +590,154 @@ async def test_ghl_lookup_reuses_existing_when_no_db_sibling(
     assert actions[0].status == "success"
     assert actions[0].external_id == "loc_existing_ghl"
     assert actions[0].response["reason"] == "ghl_lookup"
+
+
+@pytest.mark.db
+async def test_franchise_separation_different_postcode_not_linked(
+    async_session: AsyncSession,
+) -> None:
+    """Same brand at a DIFFERENT postcode is a different client (a franchise):
+    different identity key -> no DB sibling -> the second signing provisions
+    its OWN sub-account, parent_client_id stays NULL. Email matching (both
+    share `ops@brandgyms.com`) would have WRONGLY linked these."""
+    await _seed_client(
+        async_session,
+        email="ops@brandgyms.com",
+        business_name="Brand Gym",
+        legal_entity="Brand Gym",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_hackney",
+    )
+    croydon_id = await _seed_client(
+        async_session,
+        email="ops@brandgyms.com",  # same email, different location
+        business_name="Brand Gym",
+        legal_entity="Brand Gym",
+        postal_code="CR0 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=GhlLocation(
+            id="loc_croydon", name="Brand Gym", company_id=COMPANY_ID, raw={"id": "loc_croydon"}
+        )
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=croydon_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.parent_client_id is None
+    assert result.ghl_subaccount_id == "loc_croydon"
+    # A real create POST happened (not a DB-sibling reuse).
+    assert len(ghl.calls) == 1
+
+
+@pytest.mark.db
+async def test_prefix_collision_divergent_names_flags_possible_duplicate(
+    async_session: AsyncSession,
+) -> None:
+    """Two DIFFERENT businesses share a 6-char name prefix AND a postcode, so
+    they collide on the identity key - but the full names diverge. The second
+    signing is NOT merged: it is flagged possible_duplicate (pointing at the
+    collided sibling) and provisions its OWN sub-account."""
+    # Sanity: these DO collide on the identity key.
+    assert compute_identity_key("Fitness First", "E8 1AA") == compute_identity_key(
+        "Fitness Studio", "E8 1AA"
+    )
+    first_id = await _seed_client(
+        async_session,
+        email="a@fitnessfirst.com",
+        business_name="Fitness First",
+        legal_entity="Fitness First",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_first",
+    )
+    second_id = await _seed_client(
+        async_session,
+        email="b@fitnessstudio.com",
+        business_name="Fitness Studio",
+        legal_entity="Fitness Studio",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=GhlLocation(
+            id="loc_studio", name="Fitness Studio", company_id=COMPANY_ID, raw={"id": "loc_studio"}
+        )
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=second_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # NOT merged: own sub-account created, no parent link.
+    assert result.created is True
+    assert result.parent_client_id is None
+    assert result.ghl_subaccount_id == "loc_studio"
+
+    # Flagged for a human, pointing at the collided sibling.
+    flag = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": second_id},
+    )
+    possible_duplicate, possible_duplicate_of = flag.one()
+    assert possible_duplicate is True
+    assert possible_duplicate_of == first_id
+
+
+@pytest.mark.db
+async def test_missing_postcode_null_identity_key_creates_fresh(
+    async_session: AsyncSession,
+) -> None:
+    """A client with no postcode has a NULL identity key, so the sibling check
+    self-skips (fail-safe to CREATE) even when another client shares the name -
+    and it is NOT flagged as a possible duplicate."""
+    await _seed_client(
+        async_session,
+        email="a@nopostcode.com",
+        business_name="No Postcode Gym",
+        legal_entity="No Postcode Gym",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_existing",
+    )
+    new_id = await _seed_client(
+        async_session,
+        email="b@nopostcode.com",
+        business_name="No Postcode Gym",
+        legal_entity="No Postcode Gym",
+        postal_code=None,  # -> identity_key NULL -> no match
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=GhlLocation(
+            id="loc_new", name="No Postcode Gym", company_id=COMPANY_ID, raw={"id": "loc_new"}
+        )
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=new_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.parent_client_id is None
+    flag = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :id"),
+        {"id": new_id},
+    )
+    assert flag.scalar_one() is False
 
 
 @pytest.mark.db
@@ -718,11 +890,12 @@ async def test_lookup_server_error_records_failed_and_propagates(
 
 def test_create_ghl_subaccount_declares_concurrency_caps() -> None:
     """The function declares EXACTLY the two dedup guards: a per-client cap of 1
-    (no concurrent double-create) and a per-email cap of 1 (S1-26: no duplicate
-    create across two rows sharing an email). The former global cap of 3 was
-    dropped (S1-26a) because Inngest allows a max of 2 concurrency constraints -
-    exceeding it fails ALL function registration. Enforcement is server-side in
-    Inngest; this only asserts the declaration."""
+    (no concurrent double-create) and a per-identity cap of 1 (S1-26c: no
+    duplicate create across two rows for the same business, keyed on
+    `event.data.dedup_key` = identity_key or the unique client_id). The former
+    global cap of 3 was dropped (S1-26a) because Inngest allows a max of 2
+    concurrency constraints - exceeding it fails ALL function registration.
+    Enforcement is server-side in Inngest; this only asserts the declaration."""
     fn_config = create_ghl_subaccount.get_config("").main
     assert fn_config.concurrency is not None
     assert len(fn_config.concurrency) == 2  # <= Inngest's max of 2
@@ -734,9 +907,9 @@ def test_create_ghl_subaccount_declares_concurrency_caps() -> None:
     assert per_client.limit == 1
     assert per_client.scope == "fn"
 
-    per_email = next(c for c in fn_config.concurrency if c.key == "event.data.email")
-    assert per_email.limit == 1
-    assert per_email.scope == "fn"
+    per_identity = next(c for c in fn_config.concurrency if c.key == "event.data.dedup_key")
+    assert per_identity.limit == 1
+    assert per_identity.scope == "fn"
 
 
 def test_create_ghl_subaccount_declares_global_throttle() -> None:
@@ -751,7 +924,7 @@ def test_create_ghl_subaccount_declares_global_throttle() -> None:
     this only asserts the declaration."""
     fn_config = create_ghl_subaccount.get_config("").main
     assert fn_config.throttle is not None
-    # Keyless: caps the whole function, not per-client/per-email.
+    # Keyless: caps the whole function, not per-client/per-identity.
     assert fn_config.throttle.key is None
     assert fn_config.throttle.limit == 5
     assert fn_config.throttle.period == timedelta(seconds=10)

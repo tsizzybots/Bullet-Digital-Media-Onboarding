@@ -23,35 +23,39 @@ Correctness rules:
   success), the function records the action as `success` against the
   existing id and returns without calling GHL - never double-create a
   location.
-- **Returning-client check (S1-26).** Before provisioning, the function
-  looks for an existing sub-account two ways and reuses it instead of
-  creating a duplicate: (1) a prior `clients` row with the same email
-  (citext) that already holds a `ghl_subaccount_id` - the new row is linked
-  via `parent_client_id` to the original root and the id is reused; (2) no
-  DB sibling, so a live GHL lookup-by-email runs on EVERY create attempt
-  before the POST - this catches a client that exists in GHL but not our DB
-  AND closes S1-25's at-least-once duplicate-create window (a retry after a
-  lost create response finds the orphaned location rather than creating a
-  second one). Either reuse is recorded as a `success` action carrying a
-  `response.skipped_existing` + `response.reason` marker (no new enum value;
-  see plan). A per-email concurrency cap serialises same-email processing;
-  its key is a raw string while `clients.email` is citext, so two rows sharing
-  an email in DIFFERENT casings are not serialised by the cap. The citext DB
-  sibling SELECT + the GHL lookup cover that case only for SEQUENTIAL arrival
-  (a returning signing that lands after the first has committed its id); two
-  different-casing rows arriving truly CONCURRENTLY remain an unclosed narrow
-  window - the consequences are a possible duplicate GHL location AND a
-  silently missed `parent_client_id` link (neither row sees the other as a
-  sibling, so the returning-client tree is never wired). Tracked as the S1-26b
-  follow-up (see the per-email cap comment on the decorator).
+- **Returning-client check (S1-26 / S1-26c).** Before provisioning, the
+  function looks for an existing sub-account two ways and reuses it instead
+  of creating a duplicate: (1) a prior `clients` row with the same IDENTITY
+  KEY (S1-26c: `first6(normalized business name) + "|" + normalized postcode`)
+  that already holds a `ghl_subaccount_id` - the new row is linked via
+  `parent_client_id` to the original root and the id is reused; this now
+  unites the same business signing under DIFFERENT emails and separates
+  franchises (same brand, different postcode) that email-keying conflated;
+  (2) no DB sibling, so a live GHL lookup-by-email runs on EVERY create
+  attempt before the POST - this catches a client that exists in GHL but not
+  our DB AND closes S1-25's at-least-once duplicate-create window (a retry
+  after a lost create response finds the orphaned location rather than
+  creating a second one). Either reuse is recorded as a `success` action
+  carrying a `response.skipped_existing` + `response.reason` marker (no new
+  enum value; see plan). Dedup guard (S1-26c): the key truncates the name to
+  6 chars, so two DIFFERENT businesses sharing a name prefix AND a postcode
+  collide on it; when the key matches but the FULL normalized names diverge,
+  the row is flagged `possible_duplicate` (+ `possible_duplicate_of`) and
+  provisioned as its OWN client rather than auto-merged. A NULL identity_key
+  (no usable name/postcode) matches nothing and falls through to CREATE
+  (fail-safe). A per-identity concurrency cap serialises same-identity
+  processing so two returning signings cannot both pass the check
+  concurrently.
 - **Commit the `in_progress` row BEFORE the GHL call**, then commit the
   terminal (`success`/`failed`) state after. A crash mid-call therefore
   leaves a visible `in_progress` row in the dashboard rather than a silent
   gap - partial failures must be visible, never silent.
 - **Concurrency.** Two guards (Inngest's per-function max): a per-client cap
   of 1 eliminates a concurrent double-create for the same client, and a
-  per-email cap of 1 serialises rows sharing an email (modulo email casing -
-  see the returning-client note above). The former global in-flight cap was
+  per-identity cap of 1 (`event.data.dedup_key` = identity_key when present,
+  else the unique client_id) serialises rows for the same business so two
+  returning signings (even under different emails) cannot both pass the
+  returning-client check concurrently. The former global in-flight cap was
   dropped (S1-26a) - it made THREE constraints, exceeding Inngest's 2-per-
   function limit, which failed the whole `/fn/register` sync (verified live:
   the sync 400s with 3, returns 200 with 2). The DB idempotency key +
@@ -89,6 +93,7 @@ from bullet_api.db.session import AsyncSessionLocal
 from bullet_api.ghl.client import GhlClient, GhlClientError, HttpGhlClient
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.events import CLIENT_CREATED_EVENT
+from bullet_api.worker.identity_key import names_materially_diverge
 from bullet_api.worker.platform_actions import (
     begin_action,
     build_idempotency_key,
@@ -216,7 +221,7 @@ async def create_ghl_subaccount_core(
             text(
                 "SELECT email, business_name, legal_entity, "
                 "       contact_first_name, contact_last_name, phone, "
-                "       ghl_subaccount_id "
+                "       ghl_subaccount_id, identity_key "
                 "FROM clients WHERE id = :client_id"
             ),
             {"client_id": client_id},
@@ -262,26 +267,61 @@ async def create_ghl_subaccount_core(
         )
 
     # S1-26 returning-client check (1/2): local DB sibling. If a PRIOR
-    # clients row with the same email already holds a ghl_subaccount_id,
-    # this is a returning client (e.g. signing for a second gym/site). Link
-    # this row to the original ROOT (`COALESCE(parent_client_id, id)`, which
-    # keeps a flat two-level tree rather than chains) and reuse the existing
-    # sub-account id - never provision a second location for the same client.
-    # email is citext, so the match is case-insensitive. Earliest row wins so
+    # clients row with the same IDENTITY KEY (S1-26c: first6(normalized name)
+    # + postcode) already holds a ghl_subaccount_id, this is a returning
+    # client (e.g. signing for a second gym/site, or the same business under a
+    # different email). Link this row to the original ROOT
+    # (`COALESCE(parent_client_id, id)`, which keeps a flat two-level tree
+    # rather than chains) and reuse the existing sub-account id - never
+    # provision a second location for the same client. Earliest row wins so
     # the root is stable across multiple returning signings.
-    sibling = (
+    #
+    # A NULL identity_key (no usable name/postcode) matches nothing and skips
+    # the branch entirely - fail-safe to CREATE rather than mis-merge.
+    sibling = None
+    if client.identity_key is not None:
+        sibling = (
+            await session.execute(
+                text(
+                    "SELECT id, COALESCE(parent_client_id, id) AS root_id, "
+                    "       ghl_subaccount_id, business_name "
+                    "FROM clients "
+                    "WHERE identity_key = :identity_key AND id <> :client_id "
+                    "      AND ghl_subaccount_id IS NOT NULL "
+                    "ORDER BY created_at ASC "
+                    "LIMIT 1"
+                ),
+                {"identity_key": client.identity_key, "client_id": client_id},
+            )
+        ).one_or_none()
+
+    # S1-26c dedup guard: the identity key truncates the name to 6 chars, so
+    # two DIFFERENT businesses that share a name prefix AND a postcode collide
+    # on it (e.g. "Fitness First" vs "Fitness Studio" at the same postcode).
+    # When the key matches but the FULL normalized names diverge, do NOT merge
+    # - flag a possible duplicate for a human and provision this signing as its
+    # own client (never auto-merge; merges are hard to undo).
+    if sibling is not None and names_materially_diverge(
+        client.business_name, sibling.business_name
+    ):
         await session.execute(
             text(
-                "SELECT id, COALESCE(parent_client_id, id) AS root_id, ghl_subaccount_id "
-                "FROM clients "
-                "WHERE email = :email AND id <> :client_id "
-                "      AND ghl_subaccount_id IS NOT NULL "
-                "ORDER BY created_at ASC "
-                "LIMIT 1"
+                "UPDATE clients "
+                "SET possible_duplicate = true, possible_duplicate_of = :sibling_id "
+                "WHERE id = :client_id"
             ),
-            {"email": client.email, "client_id": client_id},
+            {"sibling_id": sibling.id, "client_id": client_id},
         )
-    ).one_or_none()
+        log.warning(
+            "S1-26c possible duplicate: identity_key collision with divergent names",
+            extra={
+                "client_id": str(client_id),
+                "sibling_client_id": str(sibling.id),
+                "identity_key": client.identity_key,
+            },
+        )
+        sibling = None  # fall through to normal provisioning (own root)
+
     if sibling is not None:
         begun = await begin_action(
             session,
@@ -503,23 +543,19 @@ async def create_ghl_subaccount_core(
         # so two concurrent `client.created` deliveries cannot both POST a
         # location before either commits its `ghl_subaccount_id`.
         inngest.Concurrency(key="event.data.client_id", limit=1, scope="fn"),
-        # Per-email cap (S1-26): serialise processing for the same email so
-        # two DIFFERENT client rows that share an email (two near-simultaneous
-        # returning signings) cannot both pass the returning-client check and
-        # create duplicate locations - the second waits, then finds the first
-        # as a committed DB sibling. Residual (pre-existing from S1-26): the key
-        # is a raw string while `clients.email` is citext, so two rows whose
-        # emails differ only in CASE ("X@y.com" vs "x@Y.COM") are NOT serialised
-        # by this cap. The citext DB sibling SELECT + GHL lookup close only the
-        # SEQUENTIAL casing case (a second signing that arrives after the first
-        # has COMMITTED its id); two different-casing rows arriving TRULY
-        # CONCURRENTLY can still both pass the check before either commits -
-        # risking a duplicate GHL location AND a silently missed
-        # `parent_client_id` link (neither row sees the other as a sibling). That
-        # narrow window is unclosed here; normalising the key to
-        # `lower(event.data.email)` would shut it but needs the Inngest CEL key
-        # evaluator's `lower()` support confirmed first (S1-26b follow-up).
-        inngest.Concurrency(key="event.data.email", limit=1, scope="fn"),
+        # Per-identity cap (S1-26c): serialise processing for the same identity
+        # key so two DIFFERENT client rows for the same business (two
+        # near-simultaneous returning signings, possibly under different emails)
+        # cannot both pass the returning-client check and create duplicate
+        # locations - the second waits, then finds the first as a committed DB
+        # sibling. `dedup_key` (event payload) = the identity_key when present,
+        # else the unique client_id, so unidentifiable signings (NULL
+        # identity_key) each get their own bucket instead of contending on a
+        # shared empty key. The identity_key is already normalized (lowercased,
+        # punctuation-stripped), so this also closes the old S1-26 residual
+        # where the raw-string email key failed to serialise case-only email
+        # differences.
+        inngest.Concurrency(key="event.data.dedup_key", limit=1, scope="fn"),
     ],
 )
 async def create_ghl_subaccount(ctx: inngest.Context) -> dict:

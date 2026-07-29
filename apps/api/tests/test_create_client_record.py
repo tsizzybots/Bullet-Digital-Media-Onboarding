@@ -152,7 +152,8 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
     client_row = await async_session.execute(
         text(
             "SELECT id, email, business_name, legal_entity, contact_first_name, "
-            "  contact_last_name, phone, hubspot_contact_id, current_step::text AS step "
+            "  contact_last_name, phone, hubspot_contact_id, postal_code, "
+            "  identity_key, current_step::text AS step "
             "FROM clients WHERE pandadoc_document_id = :doc"
         ),
         {"doc": document_id},
@@ -167,6 +168,11 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
     assert row.phone == "+447000000000"
     assert row.hubspot_contact_id == "hs-contact-1234"
     assert row.step == "signed"
+    # S1-26c: postcode is now persisted, and identity_key is computed from
+    # first6(normalize("Sample Gym Ltd")) + "|" + normalize("M1 1AA").
+    # "Sample Gym Ltd" -> drop "ltd" -> "samplegym" -> first6 "sample".
+    assert row.postal_code == "M1 1AA"
+    assert row.identity_key == "sample|M11AA"
 
     # The onboarding_events row is backfilled with client_id + processed_at.
     event_row = await async_session.execute(
@@ -187,6 +193,9 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
     assert data["email"] == "signer@example.com"
     # account defaults to uk when not supplied (back-compat for pre-S1-25c events).
     assert data["account"] == "uk"
+    # S1-26c: dedup_key = identity_key (present here) drives the GHL worker's
+    # per-identity concurrency guard.
+    assert data["dedup_key"] == "sample|M11AA"
 
 
 @pytest.mark.db

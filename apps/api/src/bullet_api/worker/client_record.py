@@ -110,6 +110,7 @@ from bullet_api.worker.events import (
     EventEmitter,
     InngestEventEmitter,
 )
+from bullet_api.worker.identity_key import compute_identity_key
 
 log = logging.getLogger(__name__)
 
@@ -301,6 +302,13 @@ async def create_client_record_core(
     legal_entity = fields.legal_entity or fields.business_name or LEGAL_ENTITY_PLACEHOLDER
     business_name = fields.business_name
 
+    # S1-26c: the returning-client identity key = first6(normalized name) +
+    # "|" + normalized postcode. None when it cannot be computed (no usable
+    # name, or no postcode) - the returning-client check (in the GHL worker)
+    # self-skips on a NULL key, so an unidentifiable signing becomes a fresh
+    # client rather than being merged into the wrong one (fail-safe to CREATE).
+    identity_key = compute_identity_key(fields.business_name, fields.postal_code)
+
     # ON CONFLICT DO UPDATE with a no-op SET so RETURNING id populates on
     # both insert and conflict. current_step is set only on INSERT (ON
     # CONFLICT path does not touch it); a replay must not regress a
@@ -318,11 +326,13 @@ async def create_client_record_core(
             "  email, business_name, legal_entity,"
             "  contact_first_name, contact_last_name, phone,"
             "  pandadoc_document_id, hubspot_contact_id,"
+            "  postal_code, identity_key,"
             "  current_step"
             ") VALUES ("
             "  :email, :business_name, :legal_entity,"
             "  :contact_first_name, :contact_last_name, :phone,"
             "  :pandadoc_document_id, :hubspot_contact_id,"
+            "  :postal_code, :identity_key,"
             "  :current_step"
             ") "
             "ON CONFLICT (pandadoc_document_id) DO UPDATE "
@@ -338,6 +348,8 @@ async def create_client_record_core(
             "phone": fields.phone,
             "pandadoc_document_id": document_id,
             "hubspot_contact_id": fields.hubspot_contact_id,
+            "postal_code": fields.postal_code,
+            "identity_key": identity_key,
             "current_step": CURRENT_STEP_SIGNED,
         },
     )
@@ -388,6 +400,13 @@ async def create_client_record_core(
             # Propagate the PandaDoc account (S1-25c) so the signed-PDF worker
             # downloads with the matching account's API key.
             "account": account,
+            # S1-26c: concurrency key for the GHL returning-client check. Two
+            # signings that share an identity_key must not run the sibling
+            # check concurrently (both would see "no sibling" and both create).
+            # Serialize by identity_key; when it is NULL (unidentifiable), fall
+            # back to the unique client_id so those signings do NOT contend on
+            # a shared empty bucket (they cannot match anyone anyway).
+            "dedup_key": identity_key or str(client_id),
         },
     )
 
@@ -417,10 +436,13 @@ async def create_client_record_core(
             "has_template_id": fields.pandadoc_template_id is not None,
             "has_monthly_service_fee": fields.monthly_service_fee is not None,
             "deal_currency": fields.deal_currency,
-            # Address fields are extracted but not yet persisted (no
-            # columns on `clients` for them); logging presence here so
-            # they are visible in production logs until the follow-up
-            # migration adds the columns.
+            # S1-26c: identity_key is NULL when name or postcode is missing;
+            # log its presence so a "why did this not match a returning
+            # client" question is answerable from production logs.
+            "has_identity_key": identity_key is not None,
+            # postal_code is now persisted (0013); address/state/country are
+            # still extracted-but-not-stored (no columns yet) - logging their
+            # presence until a follow-up migration adds them.
             "has_address": fields.address is not None,
             "has_state": fields.state is not None,
             "has_postal_code": fields.postal_code is not None,
