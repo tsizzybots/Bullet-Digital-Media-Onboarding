@@ -14,7 +14,6 @@ from bullet_api.worker.identity_key import (
     corroborating_signal_agrees,
     identity_name,
     names_materially_diverge,
-    normalize_address,
     normalize_name,
     normalize_phone,
     normalize_postcode,
@@ -218,86 +217,63 @@ class TestNormalizePhone:
         assert normalize_phone(value) == ""
 
 
-class TestNormalizeAddress:
-    def test_punctuation_and_case_ignored(self) -> None:
-        assert normalize_address("123 High Street,  London") == normalize_address(
-            "123 high street london"
-        )
-
-    def test_different_addresses_do_not_agree(self) -> None:
-        assert normalize_address("123 High Street") != normalize_address("456 High Street")
-
-    @pytest.mark.parametrize("value", [None, "", "   ", "---"])
-    def test_blank_is_unusable(self, value: str | None) -> None:
-        assert normalize_address(value) == ""
-
-
 class TestCorroboratingSignalAgrees:
-    def test_matching_phone_corroborates(self) -> None:
+    """The second bar: a signal INDEPENDENT of the company record.
+
+    Address is deliberately NOT accepted (review round 2, finding 2) - it is
+    read from the same HubSpot company record as the postcode, so it agrees
+    exactly when the key already does and corroborates nothing.
+    """
+
+    def test_matching_phone_corroborates_across_formats(self) -> None:
         assert (
-            corroborating_signal_agrees(
-                phone_a="+44 7700 900123",
-                address_a=None,
-                phone_b="07700 900123",
-                address_b=None,
-            )
-            is True
+            corroborating_signal_agrees(phone_a="+44 7700 900123", phone_b="07700 900123") is True
         )
 
-    def test_matching_address_corroborates_when_phone_is_absent(self) -> None:
+    def test_differing_phone_does_not_corroborate(self) -> None:
         assert (
-            corroborating_signal_agrees(
-                phone_a=None,
-                address_a="123 High Street",
-                phone_b=None,
-                address_b="123 High Street,",
-            )
-            is True
-        )
-
-    def test_address_corroborates_even_when_phones_differ(self) -> None:
-        # Either signal satisfies it - a changed contact number should not veto
-        # an otherwise solid match on the premises.
-        assert (
-            corroborating_signal_agrees(
-                phone_a="+447700900123",
-                address_a="123 High Street",
-                phone_b="+447700900999",
-                address_b="123 High Street",
-            )
-            is True
-        )
-
-    def test_differing_phone_with_no_address_does_not_corroborate(self) -> None:
-        assert (
-            corroborating_signal_agrees(
-                phone_a="+447700900123",
-                address_a=None,
-                phone_b="+447700900999",
-                address_b=None,
-            )
-            is False
+            corroborating_signal_agrees(phone_a="+447700900123", phone_b="+447700900999") is False
         )
 
     def test_absence_is_not_agreement(self) -> None:
         # THE point of finding 4: when only name and postcode agree - nothing
-        # else known on either side - that is not proof of one business, so it
-        # must NOT corroborate. Two nulls are not a match.
-        assert (
-            corroborating_signal_agrees(phone_a=None, address_a=None, phone_b=None, address_b=None)
-            is False
-        )
+        # else known on either side - that is not proof of one business.
+        assert corroborating_signal_agrees(phone_a=None, phone_b=None) is False
 
     def test_signal_present_on_only_one_side_does_not_corroborate(self) -> None:
-        assert (
-            corroborating_signal_agrees(
-                phone_a="+447700900123", address_a=None, phone_b=None, address_b=None
-            )
-            is False
-        )
-        assert (
-            corroborating_signal_agrees(
-                phone_a=None, address_a="123 High Street", phone_b=None, address_b=None
-            )
-            is False
-        )
+        assert corroborating_signal_agrees(phone_a="+447700900123", phone_b=None) is False
+        assert corroborating_signal_agrees(phone_a=None, phone_b="+447700900123") is False
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("+44 0000 000000", "+44 0000 000000"),
+            ("1111111111", "1111111111"),
+            ("123456789", "123456789"),
+        ],
+    )
+    def test_placeholder_numbers_never_corroborate(self, a: str, b: str) -> None:
+        # Two unrelated clients whose phone field was filled with filler must
+        # not corroborate each other into a merge.
+        assert corroborating_signal_agrees(phone_a=a, phone_b=b) is False
+
+
+class TestPostcodePlaceholderShapes:
+    """A denylist only catches the placeholders someone thought of.
+
+    These are rejected by SHAPE, not membership, so filler nobody listed still
+    fails (review round 2, P2).
+    """
+
+    @pytest.mark.parametrize("value", ["99999", "XXXX", "1111", "AAAA"])
+    def test_single_repeated_character_rejected(self, value: str) -> None:
+        assert normalize_postcode(value) == ""
+
+    @pytest.mark.parametrize("value", ["TBA", "NONE", "ASAP", "PENDING"])
+    def test_no_digit_at_all_rejected(self, value: str) -> None:
+        # Every real postal format in use carries at least one digit.
+        assert normalize_postcode(value) == ""
+
+    @pytest.mark.parametrize("value", ["75008", "10115", "D02X285", "E81AA"])
+    def test_real_postcodes_still_survive(self, value: str) -> None:
+        assert normalize_postcode(value) != ""

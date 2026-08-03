@@ -94,7 +94,23 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if reachable:
         return
 
+    db_items = [item for item in items if "db" in item.keywords]
+
+    # In CI, an unreachable database is a CONFIGURATION FAILURE, not a reason to
+    # quietly pass. Skipping is a developer convenience for a laptop with no
+    # Postgres running; in CI it silently removes the majority of the suite and
+    # reports green. That is not hypothetical - S1-26b/c was reviewed and
+    # merged-ready at "279 passed / 193 skipped", and the skipped 193 were
+    # exactly where the returning-client bugs lived. Two review rounds of
+    # findings existed only because those tests never ran.
+    if os.environ.get("CI"):
+        raise pytest.UsageError(
+            f"DATABASE_URL is not reachable, so {len(db_items)} db-marked tests would be "
+            "SKIPPED - but CI is set, where skipping them reports a false green. "
+            "Start Postgres (docker compose up -d postgres), run migrations, and "
+            "export a reachable DATABASE_URL."
+        )
+
     skip_marker = pytest.mark.skip(reason="DATABASE_URL is not reachable; skipping live-DB tests.")
-    for item in items:
-        if "db" in item.keywords:
-            item.add_marker(skip_marker)
+    for item in db_items:
+        item.add_marker(skip_marker)

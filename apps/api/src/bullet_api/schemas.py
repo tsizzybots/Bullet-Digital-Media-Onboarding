@@ -164,10 +164,12 @@ class ClientDetailResponse(BaseModel):
     # corroborated - an identity-key collision whose full business names
     # diverged, or a GHL location found by email that we could not prove is the
     # same site. The client is provisioned its OWN sub-account either way; the
-    # flag is the human-review signal. Exactly one candidate field is populated:
-    # `possible_duplicate_of` for a clients-row collision,
-    # `possible_duplicate_ghl_id` for a GHL-location one, so the dashboard can
-    # name what to merge into rather than sending someone hunting for it.
+    # flag is the human-review signal. EITHER OR BOTH candidate fields may be
+    # populated - `possible_duplicate_of` for a clients-row collision,
+    # `possible_duplicate_ghl_id` for a GHL-location one - because one run can
+    # hit both (a DB collision, then an undecidable GHL verdict). The dashboard
+    # renders whichever are present so a human is told what to merge into
+    # rather than sent hunting for it.
     possible_duplicate: bool
     possible_duplicate_of: str | None
     possible_duplicate_ghl_id: str | None

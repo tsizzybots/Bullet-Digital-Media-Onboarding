@@ -153,7 +153,7 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
     client_row = await async_session.execute(
         text(
             "SELECT id, email, business_name, legal_entity, contact_first_name, "
-            "  contact_last_name, phone, hubspot_contact_id, postal_code, "
+            "  contact_last_name, phone, hubspot_contact_id, postal_code, address, "
             "  identity_key, current_step::text AS step "
             "FROM clients WHERE pandadoc_document_id = :doc"
         ),
@@ -174,6 +174,9 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
     # "Sample Gym Ltd" -> drop "ltd" -> "samplegym" -> first6 "sample".
     assert row.postal_code == "M1 1AA"
     assert row.identity_key == "sample|M11AA"
+    # Persisted for audit + for whoever resolves a duplicate flag. Nothing
+    # asserted this before, so dropping `address` from the INSERT stayed green.
+    assert row.address == "123 High Street"
 
     # The onboarding_events row is backfilled with client_id + processed_at.
     event_row = await async_session.execute(
@@ -651,12 +654,13 @@ async def test_replay_does_not_overwrite_an_existing_identity_key(
         {"doc": document_id},
     )
 
+    emitter = FakeEventEmitter()
     await create_client_record_core(
         async_session,
         onboarding_event_id=event_id,
         document_id=document_id,
         document=_detail_body(document_id),
-        emitter=FakeEventEmitter(),
+        emitter=emitter,
     )
 
     row = await async_session.execute(
@@ -664,6 +668,12 @@ async def test_replay_does_not_overwrite_an_existing_identity_key(
         {"doc": document_id},
     )
     assert row.one() == ("CORRECTED", "humanfix|CORRECTED")
+    # The emitted key must be the SURVIVING one, not the freshly-computed one -
+    # otherwise the concurrency bucket names a key the sibling query will never
+    # match. Discarding the emitter here left that line unpinned: reverting it
+    # kept the suite green.
+    _, data = emitter.sent[0]
+    assert data["dedup_key"] == "humanfix|CORRECTED"
 
 
 @pytest.mark.db

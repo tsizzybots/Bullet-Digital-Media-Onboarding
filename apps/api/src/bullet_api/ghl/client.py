@@ -32,6 +32,22 @@ from bullet_api.config import get_settings
 GHL_API_BASE_URL = "https://services.leadconnectorhq.com"
 GHL_API_VERSION = "2021-07-28"
 
+# 4xx codes that are transient rather than structural, so the worker retries
+# instead of dead-lettering:
+#
+# - 408 request timeout: the server saying "you took too long". The identical
+#   request can succeed next time.
+# - 429 rate-limit: explicitly a "try again later".
+# - 401 / 403 auth: a rotated or briefly-unavailable agency key. Dead-lettering
+#   these was the sharpest edge here - one key blip would TERMINALLY fail every
+#   signing in flight, and each needs a human to re-drive. A genuinely wrong key
+#   still dead-letters, just via Inngest's retry budget instead of instantly, so
+#   retrying costs a few minutes of backoff and buys back the whole blip case.
+#
+# Everything else in the 4xx range means the request itself is wrong and will
+# keep failing, so it stays non-retriable.
+_RETRIABLE_STATUS = frozenset({401, 403, 408, 429})
+
 
 @dataclass(frozen=True)
 class GhlLocation:
@@ -111,9 +127,10 @@ class GhlClient(Protocol):
         Used by S1-26's returning-client check to avoid creating a duplicate
         sub-account: if a location already exists for the signed-document
         email, the caller reuses its id instead of POSTing a new one. This
-        also closes S1-25's at-least-once duplicate-create window - a retry
-        after a lost create response finds the orphaned location here rather
-        than provisioning a second one.
+        was ALSO meant to close S1-25's at-least-once duplicate-create window,
+        but does NOT (S1-26d): the search is eventually consistent, so a create
+        whose response was lost and is retried seconds later cannot see its own
+        orphan and provisions a second location anyway. That window is OPEN.
 
         Returns the matching location (first hit) or None when no location
         exists for the email. "No match" is a normal answer, NOT an error.
@@ -170,9 +187,12 @@ class HttpGhlClient:
                 company_id=str(body.get("companyId", "")),
                 raw=body,
             )
-        # 429 (rate-limit) is retriable alongside 5xx; everything else in the
-        # 4xx range is a non-retriable client error.
-        if response.status_code == 429 or response.status_code >= 500:
+        # 408 (request timeout) and 429 (rate-limit) are retriable alongside
+        # 5xx; everything else in the 4xx range is a non-retriable client error.
+        # 408 matters because it is a TRANSIENT server-side condition wearing a
+        # 4xx code - dead-lettering it would terminally fail a signing that
+        # would have succeeded on the next attempt.
+        if response.status_code in _RETRIABLE_STATUS or response.status_code >= 500:
             raise GhlServerError(response.status_code, response.text)
         raise GhlClientError(response.status_code, response.text)
 
@@ -229,6 +249,23 @@ class HttpGhlClient:
         raise GhlClientError(response.status_code, response.text)
 
 
+class _Unset:
+    """Sentinel for "the test did not say what the GHL lookup returns".
+
+    `lookup_result` used to default to `None`, meaning "no existing location".
+    That default silently disarmed the returning-client email leg in 27 of the
+    GHL tests, so an entire production code path was invisible to the suite -
+    which is how a franchise-merging bug shipped with a green test that could
+    never have caught it (review rounds 1 and 2 both landed on an instance of
+    this). Requiring an explicit value makes the omission a loud failure
+    instead of a silent pass; tests that genuinely want "no existing location"
+    pass `lookup_result=None`.
+    """
+
+
+_UNSET = _Unset()
+
+
 @dataclass
 class FakeGhlClient:
     """Test double.
@@ -246,7 +283,7 @@ class FakeGhlClient:
     location: GhlLocation | None = None
     error: Exception | None = None
     calls: list[dict] = field(default_factory=list)
-    lookup_result: GhlLocation | None = None
+    lookup_result: GhlLocation | None | _Unset = _UNSET
     lookup_error: Exception | None = None
     lookup_calls: list[tuple[str, str]] = field(default_factory=list)
 
@@ -262,6 +299,15 @@ class FakeGhlClient:
         self.lookup_calls.append((email, company_id))
         if self.lookup_error is not None:
             raise self.lookup_error
+        if isinstance(self.lookup_result, _Unset):
+            raise AssertionError(
+                "FakeGhlClient.find_location_by_email was called but the test never "
+                "said what it returns. This leg decides whether an existing GHL "
+                "sub-account is REUSED, so leaving it implicit hides the reuse path "
+                "entirely - exactly how a franchise-merging bug shipped green twice. "
+                "Pass lookup_result=None for 'no existing location', or a GhlLocation "
+                "for a hit."
+            )
         return self.lookup_result
 
 

@@ -19,11 +19,21 @@ Matching names are still not enough on their own. `Company.Zip` is the COMPANY
 postcode, not the studio's, so a franchisee running two studios who enters only
 the brand plus their head-office postcode produces an identical key AND
 identical names. A link therefore also requires `corroborating_signal_agrees` -
-a phone or address line present on BOTH rows and matching. Absence is not
-agreement: when only name and postcode agree, the caller flags rather than
-merges. The failure direction is deliberate, since a missed link creates a
-spare sub-account (visible, deletable) while a wrong link puts one client's
-assets inside another client's account.
+the PHONE, present on both rows and matching. Absence is not agreement: when
+only name and postcode agree, the caller flags rather than merges. The failure
+direction is deliberate, since a missed link creates a spare sub-account
+(visible, deletable) while a wrong link puts one client's assets inside another
+client's account.
+
+WHAT THIS DOES AND DOES NOT PREVENT - read before trusting it. The bar narrows
+the franchisee case to "same brand, same head-office postcode, same signing
+contact"; it does NOT eliminate it. A franchisee who signs for both studios
+personally presents the same `Client.Phone` both times and will still
+auto-link. Address is deliberately NOT a second signal: `Company.Address` and
+`Company.Zip` come from the same HubSpot company record, so address agrees
+exactly when the key already does and corroborates nothing (review round 2,
+finding 2). `clients.address` is persisted for audit and for whoever resolves a
+flag, but it does not vote.
 
 Fail-safe to CREATE: `compute_identity_key` returns None whenever it lacks a
 usable signal (no normalized business name, or no usable postcode). A None key
@@ -75,6 +85,12 @@ _NON_DIGIT = re.compile(r"[^0-9]")
 # scenario, and short enough to survive every national prefix convention.
 _PHONE_SIGNIFICANT_DIGITS = 9
 _PHONE_MIN_DIGITS = 7
+
+# A number made of one or two repeated digits ("0000000000", "1111122222") is
+# filler, not a contact. Rejecting it stops two unrelated clients corroborating
+# each other purely because both had a placeholder in the phone field.
+_PHONE_MIN_DISTINCT_DIGITS = 2
+_PLACEHOLDER_PHONE_TAILS = frozenset({"123456789", "987654321", "012345678"})
 
 # UK postcode: outward (area + district) then inward (sector + unit), with any
 # amount of whitespace between. Searched ANYWHERE in the string so a value that
@@ -200,6 +216,16 @@ def normalize_postcode(postcode: str | None) -> str:
     stripped = _NON_ALNUM.sub("", upper)
     if len(stripped) < _MIN_POSTCODE_LEN or stripped in _PLACEHOLDER_POSTCODES:
         return ""
+    # A denylist is a BLOCKLIST, so it only ever catches the placeholders
+    # somebody thought of - "TBA", "99999" and "12345" all sail past one
+    # (review round 2, P2). Add two shape checks that reject filler by FORM
+    # rather than by membership: a value made of a single repeated character
+    # ("99999", "XXXX"), and one with no digit at all ("TBA", "NONE"). Every
+    # real postal format in use carries at least one digit.
+    if len(set(stripped)) == 1:
+        return ""
+    if not any(ch.isdigit() for ch in stripped):
+        return ""
     return stripped
 
 
@@ -239,55 +265,52 @@ def normalize_phone(phone: str | None) -> str:
     digits = _NON_DIGIT.sub("", phone)
     if len(digits) < _PHONE_MIN_DIGITS:
         return ""
-    return digits[-_PHONE_SIGNIFICANT_DIGITS:]
-
-
-def normalize_address(address: str | None) -> str:
-    """Normalize an address line to a comparable stem, or "" if unusable.
-
-    Same fold/lowercase/alphanumeric-token treatment as `normalize_name`, so
-    punctuation and spacing differences do not matter. Deliberately does NOT
-    try to expand abbreviations ("St" vs "Street"), because the failure
-    direction is safe: an address that does not match simply fails to
-    corroborate, which flags for review rather than merging.
-    """
-    if not address:
+    tail = digits[-_PHONE_SIGNIFICANT_DIGITS:]
+    # A placeholder number is not a signal. "0000000000" / "1234567890" pass
+    # the length check, so without this two unrelated clients whose phone field
+    # was filled with filler would CORROBORATE each other and auto-link - the
+    # exact mis-merge this signal exists to prevent (review round 2, P2).
+    if len(set(tail)) <= _PHONE_MIN_DISTINCT_DIGITS or tail in _PLACEHOLDER_PHONE_TAILS:
         return ""
-    return "".join(_ALNUM_TOKEN.findall(_fold_unicode(address).lower()))
+    return tail
 
 
-def corroborating_signal_agrees(
-    *,
-    phone_a: str | None,
-    address_a: str | None,
-    phone_b: str | None,
-    address_b: str | None,
-) -> bool:
-    """True when a SECOND identifying signal is present on both sides and agrees.
+def corroborating_signal_agrees(*, phone_a: str | None, phone_b: str | None) -> bool:
+    """True when the PHONE - a signal independent of the company record - agrees.
 
-    Required before two rows sharing an identity key are auto-linked (reviewer
-    finding 4). Name + postcode alone is not proof of one business:
-    `Company.Zip` is the COMPANY address, not the studio's, so a franchisee
-    running two studios who enters only the brand ("F45 Training", "BFT") plus
-    their head-office postcode produces an identical key AND identical
-    normalized names - and studio 2 would be silently linked into studio 1's
-    sub-account.
+    Required before two rows sharing an identity key are auto-linked. Name +
+    postcode is not proof of one business: `Company.Zip` is the COMPANY
+    postcode, not the studio's, so a franchisee running two studios who enters
+    only the brand ("F45 Training") plus their head-office postcode produces an
+    identical key AND identical normalized names.
 
-    Either phone or address line satisfies it. Absence is NOT agreement: when
-    neither signal is present on both rows this returns False, so "only name
-    and postcode agree" flags for a human instead of merging. That is the
-    conservative direction on purpose - a missed link creates a spare
+    **Why phone and NOT address (review round 2, finding 2).** The first
+    implementation accepted `Company.Address` as an alternative signal. That is
+    worthless as corroboration: address and postcode are read from the SAME
+    HubSpot company record (`Company.Address` / `Company.Zip`), so they agree
+    exactly when the key already agrees - including in the franchisee case the
+    bar exists to block. `Client.Phone` is the signing CONTACT, sourced
+    independently of the company record, so it is the only second signal we
+    hold that can actually disagree. `clients.address` is still persisted, for
+    audit and for a human resolving a flag, but it does not vote.
+
+    **This does not make the franchisee case impossible**, and the docstrings
+    must not claim it does: a franchisee who signs both studios personally
+    presents the same contact number both times and will still auto-link. It
+    narrows the case to "same brand, same head-office postcode, same signing
+    contact", which is a materially smaller target than before.
+
+    Absence is NOT agreement: a phone missing on either side returns False, so
+    "only name and postcode agree" flags for a human instead of merging. That
+    is the conservative direction on purpose - a missed link creates a spare
     sub-account, a wrong link puts one client's assets in another's account.
     """
     phone_norm_a = normalize_phone(phone_a)
-    if phone_norm_a and phone_norm_a == normalize_phone(phone_b):
-        return True
-    address_norm_a = normalize_address(address_a)
-    return bool(address_norm_a) and address_norm_a == normalize_address(address_b)
+    return bool(phone_norm_a) and phone_norm_a == normalize_phone(phone_b)
 
 
 def names_materially_diverge(name_a: str | None, name_b: str | None) -> bool:
-    """True when two names normalize to DIFFERENT full stems.
+    """True when two names normalize to different stems, OR either is unusable.
 
     Deliberately STRICT (exact equality of the full normalized stems). The
     leniency in this module lives in the KEY - the 6-char truncation - not
@@ -296,8 +319,19 @@ def names_materially_diverge(name_a: str | None, name_b: str | None) -> bool:
     flagged rather than merged, which is the safe side of "never auto-merge":
     a missed link creates a spare sub-account (visible, deletable), a wrong
     link puts one client's assets in another client's account.
+
+    An EMPTY stem on either side is divergence, not agreement (review round 2,
+    finding 6). Two unidentifiable signings both normalize to "", so plain
+    equality called them a match - directly contradicting `identity_name`'s
+    guarantee that an unidentifiable signing can never merge with another.
+    Absence is not agreement here either, consistent with how a missing
+    postcode is treated when classifying a GHL hit.
     """
-    return normalize_name(name_a) != normalize_name(name_b)
+    stem_a = normalize_name(name_a)
+    stem_b = normalize_name(name_b)
+    if not stem_a or not stem_b:
+        return True
+    return stem_a != stem_b
 
 
 __all__ = [
@@ -306,7 +340,6 @@ __all__ = [
     "corroborating_signal_agrees",
     "identity_name",
     "names_materially_diverge",
-    "normalize_address",
     "normalize_name",
     "normalize_phone",
     "normalize_postcode",

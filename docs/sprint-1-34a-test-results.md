@@ -99,7 +99,9 @@ The first embeddings run hit `429 insufficient_quota` - an account-balance gate,
 
 **Loaded on `bullet-staging-env`:** DATABASE_URL, INNGEST_SIGNING_KEY + INNGEST_EVENT_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GHL_AGENCY_API_KEY, GHL_COMPANY_ID, PANDADOC_API_KEY_UK/_INT + base URL, **PANDADOC_WEBHOOK_SECRET_UK/_INT** (new), RESEND_API_KEY + EMAIL_FROM, SENTRY_ENVIRONMENT, EMAIL_TOKEN_SECRET + EMAIL_CONFIRMATION_BASE_URL, GOOGLE_SERVICE_ACCOUNT_JSON. Service-level: CORS_ALLOW_ORIGINS + SENTRY_DSN on the API.
 
-**Not yet set:** `R2_*` (4 vars), `GOOGLE_WORKSPACE_IMPERSONATE_SUBJECT`, `GOOGLE_PUBSUB_PUSH_AUDIENCE`, `GOOGLE_PUBSUB_PUSH_SA_EMAIL`, `GHL_SNAPSHOT_ID` (optional).
+**Not yet set (AS AT 22/07/2026 - SUPERSEDED, see below):** `R2_*` (4 vars), `GOOGLE_WORKSPACE_IMPERSONATE_SUBJECT`, `GOOGLE_PUBSUB_PUSH_AUDIENCE`, `GOOGLE_PUBSUB_PUSH_SA_EMAIL`, `GHL_SNAPSHOT_ID` (optional).
+
+> **STATUS UPDATE - this document is a point-in-time record, and the list above is now stale.** Every variable named there was subsequently loaded: the four `R2_*` vars and `GHL_SNAPSHOT_ID` on 22/07, and the three Google vars with the Pub/Sub setup later the same day ("All Render credential/config loads are now complete", CHANGELOG 22/07). Staging's PandaDoc keys were also switched from SANDBOX to **PRODUCTION** on 28/07, so the "PandaDoc: SANDBOX accounts" premise in the test plan no longer holds either. Read the CHANGELOG entries from 22/07 onward for the current position; the only outstanding GCP item is the domain-wide-delegation authorisation in Bullet's Google Admin (client id `101676461443838784376`, scopes `meetings.space.readonly` + `calendar.readonly`).
 
 **Note:** the DB migration step is manual (no `preDeployCommand` in `render.yaml`) - fine while the DB is at head `0012`, but a future migration-bearing deploy needs `alembic upgrade head` run by hand until that follow-up lands.
 

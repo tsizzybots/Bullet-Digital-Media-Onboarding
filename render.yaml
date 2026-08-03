@@ -169,6 +169,17 @@ services:
     plan: starter
     branch: main
     buildCommand: pip install uv && uv sync --frozen
+    # Migrations run BEFORE the new code serves traffic (S1-26c review round 2,
+    # finding 7). Without this there is a window between deploy and a manual
+    # `make db-upgrade` where the new code queries columns that do not exist
+    # yet, and a signing landing in it is lost PERMANENTLY: the clients INSERT
+    # raises `UndefinedColumn` before `begin_action`, so there is no
+    # `platform_actions` row to show the failure, the run burns its retries into
+    # dead-letter, and `reconcile_pandadoc` cannot re-emit it because its
+    # `ON CONFLICT DO NOTHING` sees the onboarding_events row already present.
+    # Render aborts the deploy if this command fails, so a bad migration keeps
+    # the OLD code serving rather than half-migrating.
+    preDeployCommand: uv run alembic upgrade head
     startCommand: uv run uvicorn bullet_api.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
     envVars:

@@ -75,7 +75,10 @@ async def test_empty_api_key_raises_runtime_error() -> None:
     assert "GHL_AGENCY_API_KEY" in str(exc.value)
 
 
-@pytest.mark.parametrize("status_code", [400, 401, 403, 422])
+# 401/403 deliberately absent: an agency-key blip is transient, so they are
+# retriable now (see `_RETRIABLE_STATUS`) and are covered by the 5xx-style
+# tests below. Dead-lettering them terminally failed every in-flight signing.
+@pytest.mark.parametrize("status_code", [400, 422])
 async def test_4xx_raises_client_error(status_code: int) -> None:
     transport = _transport(status_code, "bad request")
     client = HttpGhlClient(api_key="agency-key", transport=transport)
@@ -154,7 +157,10 @@ async def test_find_location_by_email_empty_api_key_raises_runtime_error() -> No
     assert "GHL_AGENCY_API_KEY" in str(exc.value)
 
 
-@pytest.mark.parametrize("status_code", [400, 401, 403, 422])
+# 401/403 deliberately absent: an agency-key blip is transient, so they are
+# retriable now (see `_RETRIABLE_STATUS`) and are covered by the 5xx-style
+# tests below. Dead-lettering them terminally failed every in-flight signing.
+@pytest.mark.parametrize("status_code", [400, 422])
 async def test_find_location_by_email_4xx_raises_client_error(status_code: int) -> None:
     transport = _transport(status_code, "bad request")
     client = HttpGhlClient(api_key="agency-key", transport=transport)
@@ -169,4 +175,21 @@ async def test_find_location_by_email_429_and_5xx_raise_server_error(status_code
     client = HttpGhlClient(api_key="agency-key", transport=transport)
     with pytest.raises(GhlServerError) as exc:
         await client.find_location_by_email("a@b.com", company_id="c")
+    assert exc.value.status_code == status_code
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 408])
+async def test_transient_4xx_is_retriable_not_dead_lettered(status_code: int) -> None:
+    """An auth blip or a request timeout must NOT terminally fail a signing.
+
+    These arrive wearing 4xx codes but are transient: a rotated or momentarily
+    unavailable agency key, or the server saying "you took too long". Raising
+    `GhlClientError` here would dead-letter EVERY signing in flight during the
+    blip, each then needing a human to re-drive. A genuinely bad key still
+    dead-letters, just via Inngest's retry budget rather than instantly.
+    """
+    transport = _transport(status_code, "transient")
+    client = HttpGhlClient(api_key="agency-key", transport=transport)
+    with pytest.raises(GhlServerError) as exc:
+        await client.create_location({"name": "Gym", "companyId": "c"})
     assert exc.value.status_code == status_code

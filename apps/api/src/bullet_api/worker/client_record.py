@@ -35,11 +35,14 @@ Correctness rules:
 - **PandaDoc fetch happens OUTSIDE the DB session.** A signed PandaDoc
   fetch can take seconds; holding the pooled connection during that
   window would leak connections under a burst of signings.
-- The UPSERT uses ``ON CONFLICT (pandadoc_document_id) DO UPDATE SET
-  pandadoc_document_id = EXCLUDED.pandadoc_document_id`` - the SET is a
-  no-op but guarantees ``RETURNING id`` populates on both insert and
-  conflict, so the orchestrator always learns the surviving row's id in
-  a single round-trip. The unique index on `pandadoc_document_id`
+- The UPSERT uses ``ON CONFLICT (pandadoc_document_id) DO UPDATE`` so
+  ``RETURNING`` populates on both insert and conflict, and the orchestrator
+  always learns the SURVIVING row's id and identity_key in one round-trip.
+  The SET is no longer a no-op: `postal_code`, `address` and `identity_key`
+  are COALESCE-backfilled (fill-if-NULL, never overwrite), so a row written
+  before migration 0013 - or one whose first extraction could not compute a
+  key - gains one on replay instead of staying unmatched forever.
+  The unique index on `pandadoc_document_id`
   (migration 0007) is the structural idempotency guarantee: a replayed
   `pandadoc.signed` event never creates a second client.
 - `current_step = 'signed'` is set on INSERT only; ON CONFLICT DO UPDATE
@@ -87,6 +90,7 @@ from dataclasses import dataclass
 
 import inngest
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.config import get_settings
@@ -566,6 +570,33 @@ async def create_client_record(ctx: inngest.Context) -> dict:
             # Structural data error - retry will not produce the missing
             # token. Dead-letter immediately.
             raise inngest.NonRetriableError(str(exc)) from exc
+        except ProgrammingError as exc:
+            # SCHEMA DRIFT - the deploy ran ahead of its migration, so the
+            # INSERT references a column that does not exist yet (S1-26c review
+            # round 2, finding 7). This MUST stay retriable and must be loud.
+            #
+            # It raises before `begin_action`, so there is no `platform_actions`
+            # row for the dashboard to show, and `reconcile_pandadoc` cannot
+            # re-emit the signing either - its `ON CONFLICT DO NOTHING` sees the
+            # `onboarding_events` row already present. Dead-lettering here would
+            # therefore lose the signing PERMANENTLY and SILENTLY, which the
+            # project constraints forbid outright.
+            #
+            # Retrying is the correct response because this IS self-healing: the
+            # window closes the moment the migration lands. `preDeployCommand`
+            # in render.yaml should prevent the window existing at all; this is
+            # the belt to that braces, for a manual deploy or a failed pre-deploy.
+            log.error(
+                "S1-25a schema drift - the deploy is ahead of its migration; "
+                "run `alembic upgrade head`. Retrying (NOT dead-lettering) so "
+                "the signing is not lost.",
+                extra={
+                    "document_id": document_id,
+                    "onboarding_event_id": str(onboarding_event_id),
+                    "error": str(exc),
+                },
+            )
+            raise
         # OnboardingEventNotFoundError propagates: Inngest's default
         # retry policy absorbs the producer's emit-before-commit
         # visibility race (the row exists, our separate transaction
