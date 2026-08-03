@@ -182,11 +182,23 @@ class HttpGhlClient:
                 "GHL_AGENCY_API_KEY is empty; cannot look up sub-account. "
                 "Set it on the Render env group."
             )
-        # CONFIRM PRE-PROD: GHL agency location search shape. Best-guess is
-        # GET /locations/search?companyId=&email=&limit=1 returning
-        # {"locations": [...]}. No live GHL access yet, so the exact path,
-        # query params, and response envelope are confirmed against the real
-        # API before rollout - same deferred posture as `create_location`.
+        # VERIFIED LIVE against Bullet's agency: the path, query params and the
+        # `{"locations": [...], "traceId": ...}` envelope all hold (21/07/2026
+        # read-only probe, then again in the 30/07 end-to-end Chain 1 run). The
+        # earlier CONFIRM PRE-PROD marker is cleared.
+        #
+        # KNOWN CAVEAT (S1-26d, found 30/07): this search is EVENTUALLY
+        # CONSISTENT. A location created seconds ago is not yet findable by
+        # email even though GET by id returns it with that exact address, while
+        # a long-established location resolves fine. So this is a reliable
+        # lookup for a genuinely returning client and an UNRELIABLE backstop for
+        # the at-least-once window it was also meant to cover (a create whose
+        # response was lost, retried immediately, will not find its own
+        # orphan). Callers must not treat a `None` as proof no location exists.
+        #
+        # `limit=1` means a business with several locations returns an arbitrary
+        # one; the caller corroborates the hit on name + postcode before reusing
+        # it, so an unrelated hit is flagged rather than merged.
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.get(
                 f"{self._base_url}/locations/search",

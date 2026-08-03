@@ -110,19 +110,23 @@ from bullet_api.worker.events import (
     EventEmitter,
     InngestEventEmitter,
 )
-from bullet_api.worker.identity_key import compute_identity_key
+from bullet_api.worker.identity_key import (
+    LEGAL_ENTITY_PLACEHOLDER,
+    compute_identity_key,
+    identity_name,
+)
 
 log = logging.getLogger(__name__)
 
-
-# Placeholder used when the legal-trading-name form field is missing AND
-# no business_name token was extracted either. The clients table requires
-# legal_entity NOT NULL, and we deliberately keep the orchestrator
-# insertable rather than dead-lettering on a soft field: the placeholder
-# is obvious in the dashboard so the team can correct it manually. Only
-# ever written to `legal_entity` - never to `business_name`, which is
-# NULL-able and stays NULL when missing.
-LEGAL_ENTITY_PLACEHOLDER = "Unknown - needs review"
+# LEGAL_ENTITY_PLACEHOLDER is the value written when the legal-trading-name form
+# field is missing AND no business_name token was extracted either. The clients
+# table requires legal_entity NOT NULL, and we deliberately keep the orchestrator
+# insertable rather than dead-lettering on a soft field: the placeholder is
+# obvious in the dashboard so the team can correct it manually. Only ever written
+# to `legal_entity` - never to `business_name`, which is NULL-able and stays NULL
+# when missing. It is DEFINED in `worker.identity_key` (and re-exported here for
+# the existing importers) because the identity helpers must reject it: it is a
+# marker, not a name, and keying on it would unite every unidentifiable signing.
 
 
 class OnboardingEventNotFoundError(LookupError):
@@ -304,15 +308,33 @@ async def create_client_record_core(
 
     # S1-26c: the returning-client identity key = first6(normalized name) +
     # "|" + normalized postcode. None when it cannot be computed (no usable
-    # name, or no postcode) - the returning-client check (in the GHL worker)
-    # self-skips on a NULL key, so an unidentifiable signing becomes a fresh
-    # client rather than being merged into the wrong one (fail-safe to CREATE).
-    identity_key = compute_identity_key(fields.business_name, fields.postal_code)
+    # name, or no usable postcode) - the returning-client check (in the GHL
+    # worker) self-skips on a NULL key and falls back to an email-keyed sibling
+    # match, so an unidentifiable signing becomes a fresh client rather than
+    # being merged into the wrong one (fail-safe to CREATE).
+    #
+    # Keyed on `identity_name` (business_name, else the signed legal entity),
+    # NOT business_name alone: Bullet's template fills `Company.Name` from
+    # HubSpot but the legal-trading-name is a form field filled in during
+    # signing, so a document carrying only the latter would otherwise opt out
+    # of returning-client matching entirely. Same expression the GHL location
+    # `name` is built from, so the key, the divergence guard and what GHL sees
+    # all agree on who this client is.
+    identity_key = compute_identity_key(
+        identity_name(fields.business_name, legal_entity), fields.postal_code
+    )
 
-    # ON CONFLICT DO UPDATE with a no-op SET so RETURNING id populates on
-    # both insert and conflict. current_step is set only on INSERT (ON
-    # CONFLICT path does not touch it); a replay must not regress a
-    # downstream step.
+    # ON CONFLICT DO UPDATE so RETURNING id populates on both insert and
+    # conflict. current_step is set only on INSERT (ON CONFLICT path does not
+    # touch it); a replay must not regress a downstream step.
+    #
+    # `postal_code` / `identity_key` ARE refreshed on conflict, under COALESCE
+    # (fill-if-NULL, never overwrite). Without this they are written on first
+    # insert only, so a row that predates migration 0013 - or one whose first
+    # extraction could not compute a key - keeps a NULL key forever while the
+    # re-emitted event carries a real `dedup_key`, which silently disables the
+    # returning-client match for that client. COALESCE rather than a blind
+    # overwrite so a value corrected by hand is not clobbered by a replay.
     #
     # `(xmax = 0) AS inserted` reads the system column to detect insert
     # vs conflict in one round-trip. xmax is 0 for a fresh insert and
@@ -326,18 +348,21 @@ async def create_client_record_core(
             "  email, business_name, legal_entity,"
             "  contact_first_name, contact_last_name, phone,"
             "  pandadoc_document_id, hubspot_contact_id,"
-            "  postal_code, identity_key,"
+            "  postal_code, address, identity_key,"
             "  current_step"
             ") VALUES ("
             "  :email, :business_name, :legal_entity,"
             "  :contact_first_name, :contact_last_name, :phone,"
             "  :pandadoc_document_id, :hubspot_contact_id,"
-            "  :postal_code, :identity_key,"
+            "  :postal_code, :address, :identity_key,"
             "  :current_step"
             ") "
             "ON CONFLICT (pandadoc_document_id) DO UPDATE "
-            "  SET pandadoc_document_id = EXCLUDED.pandadoc_document_id "
-            "RETURNING id, (xmax = 0) AS inserted"
+            "  SET pandadoc_document_id = EXCLUDED.pandadoc_document_id, "
+            "      postal_code = COALESCE(clients.postal_code, EXCLUDED.postal_code), "
+            "      address = COALESCE(clients.address, EXCLUDED.address), "
+            "      identity_key = COALESCE(clients.identity_key, EXCLUDED.identity_key) "
+            "RETURNING id, (xmax = 0) AS inserted, identity_key"
         ),
         {
             "email": fields.email,
@@ -349,6 +374,9 @@ async def create_client_record_core(
             "pandadoc_document_id": document_id,
             "hubspot_contact_id": fields.hubspot_contact_id,
             "postal_code": fields.postal_code,
+            # S1-26c review fix (finding 4): persisted because it is one of the
+            # two corroborating signals a returning-client auto-link requires.
+            "address": fields.address,
             "identity_key": identity_key,
             "current_step": CURRENT_STEP_SIGNED,
         },
@@ -356,6 +384,14 @@ async def create_client_record_core(
     client_row = upserted.one()
     client_id: uuid.UUID = client_row.id
     created: bool = bool(client_row.inserted)
+    # The SURVIVING key, not the one just computed: on a conflict COALESCE
+    # keeps whatever the row already held, and the concurrency bucket below
+    # must name the same key the GHL worker's sibling query will match on.
+    identity_key = client_row.identity_key
+    normalized_email = fields.email.strip().lower()
+    dedup_key = identity_key or (
+        f"email:{normalized_email}" if normalized_email else str(client_id)
+    )
 
     # Backfill the audit row. `processed_at` uses COALESCE so a retry
     # preserves the first-success timestamp; bumping it on every retry
@@ -401,12 +437,19 @@ async def create_client_record_core(
             # downloads with the matching account's API key.
             "account": account,
             # S1-26c: concurrency key for the GHL returning-client check. Two
-            # signings that share an identity_key must not run the sibling
-            # check concurrently (both would see "no sibling" and both create).
-            # Serialize by identity_key; when it is NULL (unidentifiable), fall
-            # back to the unique client_id so those signings do NOT contend on
-            # a shared empty bucket (they cannot match anyone anyway).
-            "dedup_key": identity_key or str(client_id),
+            # signings that share an identity must not run the sibling check
+            # concurrently (both would see "no sibling" and both create).
+            #
+            # Falls back through EMAIL before the per-row id. A NULL
+            # identity_key still has a DB-side dedup path (the GHL worker's
+            # email sibling query), so those signings must still serialise with
+            # each other - keying straight to the unique client_id would give
+            # every one its own bucket and reopen exactly the concurrent
+            # double-create the old `event.data.email` key used to close.
+            # `str(client_id)` is the last resort for the degenerate case where
+            # even the email is blank. Namespaced so an email can never collide
+            # with an identity_key.
+            "dedup_key": dedup_key,
         },
     )
 

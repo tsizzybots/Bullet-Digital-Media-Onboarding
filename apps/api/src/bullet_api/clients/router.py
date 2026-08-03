@@ -110,7 +110,8 @@ _GET_CLIENT_SQL = text(
     SELECT
         id, business_name, contact_first_name, contact_last_name, email,
         phone, legal_entity, current_step, step_entered_at, created_at,
-        possible_duplicate, possible_duplicate_of,
+        possible_duplicate, possible_duplicate_of, possible_duplicate_ghl_id,
+        parent_client_id,
         hubspot_contact_id, pandadoc_document_id, ghl_contact_id,
         ghl_subaccount_id, asana_project_id, asana_finance_task_id,
         stripe_customer_id, stripe_subscription_id, xero_contact_id,
@@ -218,6 +219,12 @@ async def get_client_detail(
         possible_duplicate_of=(
             str(client_row["possible_duplicate_of"])
             if client_row["possible_duplicate_of"] is not None
+            else None
+        ),
+        possible_duplicate_ghl_id=client_row["possible_duplicate_ghl_id"],
+        parent_client_id=(
+            str(client_row["parent_client_id"])
+            if client_row["parent_client_id"] is not None
             else None
         ),
         sales_summary=[

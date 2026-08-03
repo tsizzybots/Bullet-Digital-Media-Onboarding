@@ -54,6 +54,7 @@ def _detail_body(
     business_name: str = "Sample Gym Ltd",
     legal_entity: str = "Sample Gym Ltd",
     hubspot_contact_id: str = "hs-contact-1234",
+    postal_code: str = "M1 1AA",
 ) -> dict:
     """Build a PandaDoc document detail body matching Bullet's UK template shape.
 
@@ -72,7 +73,7 @@ def _detail_body(
             {"name": "Company.Name", "value": business_name},
             {"name": "Company.Address", "value": "123 High Street"},
             {"name": "Company.State", "value": "Greater Manchester"},
-            {"name": "Company.Zip", "value": "M1 1AA"},
+            {"name": "Company.Zip", "value": postal_code},
             {"name": "Company.Country", "value": "United Kingdom"},
             {"name": "Deal.Currency", "value": "GBP"},
             {"name": "Deal.MonthlyServiceFee", "value": "2500"},
@@ -581,3 +582,186 @@ def test_create_client_record_declares_per_document_concurrency_cap() -> None:
     assert cap.limit == 1
     assert cap.key == "event.data.document_id"
     assert cap.scope == "fn"
+
+
+# --------------------------------------------------------------------------- #
+# S1-26c review fixes: identity-key persistence + the dedup_key fallback chain
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.db
+async def test_replay_backfills_a_null_identity_key(async_session: AsyncSession) -> None:
+    """A replay fills `identity_key`/`postal_code` on a row that has NULL for them.
+
+    The ON CONFLICT SET used to be a pure no-op, so these two columns were only
+    ever written on the FIRST insert. A row that predates migration 0013 - or
+    one whose first extraction could not compute a key - would keep a NULL key
+    forever while the re-emitted event carried a real `dedup_key`, silently
+    disabling the returning-client match for that client. The seeded row below
+    reproduces exactly that state.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    await async_session.execute(
+        text(
+            "INSERT INTO clients (email, business_name, legal_entity, "
+            "  pandadoc_document_id, postal_code, identity_key, current_step, step_entered_at) "
+            "VALUES ('signer@example.com', 'Sample Gym Ltd', 'Sample Gym Ltd', :doc, "
+            "  NULL, NULL, 'signed', now())"
+        ),
+        {"doc": document_id},
+    )
+    emitter = FakeEventEmitter()
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id),
+        emitter=emitter,
+    )
+
+    row = await async_session.execute(
+        text("SELECT postal_code, identity_key FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    postal_code, identity_key = row.one()
+    assert postal_code == "M1 1AA"
+    assert identity_key == "sample|M11AA"
+    # And the emitted concurrency key names the SAME key the GHL worker will
+    # match on - not the pre-conflict computed value.
+    _, data = emitter.sent[0]
+    assert data["dedup_key"] == "sample|M11AA"
+
+
+@pytest.mark.db
+async def test_replay_does_not_overwrite_an_existing_identity_key(
+    async_session: AsyncSession,
+) -> None:
+    """COALESCE, not a blind overwrite: a value corrected by hand survives a replay."""
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    await async_session.execute(
+        text(
+            "INSERT INTO clients (email, business_name, legal_entity, "
+            "  pandadoc_document_id, postal_code, identity_key, current_step, step_entered_at) "
+            "VALUES ('signer@example.com', 'Sample Gym Ltd', 'Sample Gym Ltd', :doc, "
+            "  'CORRECTED', 'humanfix|CORRECTED', 'signed', now())"
+        ),
+        {"doc": document_id},
+    )
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id),
+        emitter=FakeEventEmitter(),
+    )
+
+    row = await async_session.execute(
+        text("SELECT postal_code, identity_key FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    assert row.one() == ("CORRECTED", "humanfix|CORRECTED")
+
+
+@pytest.mark.db
+async def test_dedup_key_falls_back_to_email_when_key_is_null(
+    async_session: AsyncSession,
+) -> None:
+    """No usable postcode -> NULL identity_key -> the concurrency key is the
+    EMAIL, not the per-row client_id.
+
+    A NULL-key client still has a DB-side dedup path (the GHL worker's email
+    sibling query), so two such signings must serialise with each other.
+    Keying straight to the unique client_id would give each its own bucket and
+    reopen the concurrent double-create the old `event.data.email` key closed.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    emitter = FakeEventEmitter()
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id, postal_code="N/A", client_email="Mixed@Example.com"),
+        emitter=emitter,
+    )
+
+    row = await async_session.execute(
+        text("SELECT identity_key FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    assert row.scalar_one() is None
+
+    _, data = emitter.sent[0]
+    # Lowercased, so two signings whose emails differ only in case land in the
+    # SAME bucket - the residual the raw-string email key used to leave open.
+    assert data["dedup_key"] == "email:mixed@example.com"
+
+
+@pytest.mark.db
+async def test_identity_key_uses_legal_entity_when_no_business_name(
+    async_session: AsyncSession,
+) -> None:
+    """A document carrying only the signed legal-trading-name still gets a key.
+
+    Keying on `business_name` alone meant such a document silently opted out of
+    returning-client matching entirely - it could never match anyone, and no
+    later signing could match it.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    document = _detail_body(document_id, legal_entity="Legal Only Gym")
+    document["tokens"] = [t for t in document["tokens"] if t["name"] != "Company.Name"]
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+    )
+
+    row = await async_session.execute(
+        text(
+            "SELECT business_name, legal_entity, identity_key "
+            "FROM clients WHERE pandadoc_document_id = :doc"
+        ),
+        {"doc": document_id},
+    )
+    business_name, legal_entity, identity_key = row.one()
+    assert business_name is None
+    assert legal_entity == "Legal Only Gym"
+    assert identity_key == "legalo|M11AA"
+
+
+@pytest.mark.db
+async def test_placeholder_legal_entity_yields_no_identity_key(
+    async_session: AsyncSession,
+) -> None:
+    """The "unknown" placeholder is a marker, not a name: keying on it would
+    unite every unidentifiable signing under one identity."""
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    document = _detail_body(document_id)
+    document["tokens"] = [t for t in document["tokens"] if t["name"] != "Company.Name"]
+    document["fields"] = []
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+    )
+
+    row = await async_session.execute(
+        text("SELECT legal_entity, identity_key FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    legal_entity, identity_key = row.one()
+    assert legal_entity == LEGAL_ENTITY_PLACEHOLDER
+    assert identity_key is None

@@ -31,11 +31,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bullet_api.ghl.client import FakeGhlClient, GhlClientError, GhlLocation, GhlServerError
 from bullet_api.worker import CLIENT_CREATED_EVENT, PANDADOC_SIGNED_EVENT
 from bullet_api.worker.ghl_subaccount import (
+    _SIBLING_CANDIDATE_LIMIT,
     ClientNotFoundError,
     create_ghl_subaccount,
     create_ghl_subaccount_core,
 )
-from bullet_api.worker.identity_key import compute_identity_key
+from bullet_api.worker.identity_key import compute_identity_key, identity_name
 
 COMPANY_ID = "comp_agency_1"
 
@@ -49,26 +50,36 @@ async def _seed_client(
     phone: str | None = "+447000000000",
     ghl_subaccount_id: str | None = None,
     postal_code: str | None = "E8 1AA",
+    parent_client_id: uuid.UUID | None = None,
+    created_at_offset_seconds: int = 0,
+    address: str | None = None,
 ) -> uuid.UUID:
     """Insert a minimal `clients` row (as S1-25a would have created).
 
-    `identity_key` is computed from `business_name` + `postal_code` exactly as
+    `identity_key` is computed from `identity_name` + `postal_code` exactly as
     the orchestrator does (S1-26c), so seeded rows match the returning-client
     check. Two seeds with the same name+postcode share an identity_key (a
     returning client); different name OR postcode -> different key. Passing
     `postal_code=None` yields a NULL identity_key (unidentifiable client).
+
+    `created_at_offset_seconds` sets an EXPLICIT creation order. Rows seeded in
+    one transaction all take the same `now()`, so tests that assert "the
+    earliest candidate wins" would otherwise be resolved by the `id` tiebreak
+    (a random uuid) and could pass for the wrong reason.
     """
-    identity_key = compute_identity_key(business_name, postal_code)
+    identity_key = compute_identity_key(identity_name(business_name, legal_entity), postal_code)
     result = await session.execute(
         text(
             "INSERT INTO clients ("
             "  email, business_name, legal_entity, contact_first_name, "
             "  contact_last_name, phone, ghl_subaccount_id, postal_code, "
-            "  identity_key, current_step, step_entered_at"
+            "  identity_key, address, parent_client_id, current_step, step_entered_at, "
+            "  created_at"
             ") VALUES ("
             "  :email, :business_name, :legal_entity, 'Sample', 'Signer', "
-            "  :phone, :ghl_subaccount_id, :postal_code, :identity_key, "
-            "  'signed', now()"
+            "  :phone, :ghl_subaccount_id, :postal_code, :identity_key, :address, "
+            "  :parent_client_id, 'signed', now(), "
+            "  now() + make_interval(secs => :created_at_offset)"
             ") RETURNING id"
         ),
         {
@@ -79,9 +90,30 @@ async def _seed_client(
             "ghl_subaccount_id": ghl_subaccount_id,
             "postal_code": postal_code,
             "identity_key": identity_key,
+            "parent_client_id": parent_client_id,
+            "created_at_offset": created_at_offset_seconds,
+            "address": address,
         },
     )
     return result.scalar_one()
+
+
+def _ghl_location(
+    location_id: str,
+    *,
+    name: str = "Sample Gym Ltd",
+    postal_code: str | None = "E8 1AA",
+) -> GhlLocation:
+    """A GHL location as `find_location_by_email` projects one.
+
+    `postal_code=None` models a LEGACY sub-account (created before we started
+    sending `postalCode`), which is exactly the case the corroboration guard
+    must refuse to reuse.
+    """
+    raw: dict = {"id": location_id, "name": name, "companyId": COMPANY_ID}
+    if postal_code is not None:
+        raw["postalCode"] = postal_code
+    return GhlLocation(id=location_id, name=name, company_id=COMPANY_ID, raw=raw)
 
 
 async def _seed_onboarding_event(session: AsyncSession) -> uuid.UUID:
@@ -158,6 +190,9 @@ async def test_success_records_action_and_writes_subaccount_id(
             "name": "Sample Gym Ltd",
             "companyId": COMPANY_ID,
             "phone": "+447000000000",
+            # S1-26c: sent so the location is self-identifying for a later
+            # returning-client lookup (see the corroboration tests below).
+            "postalCode": "E8 1AA",
             "prospectInfo": {
                 "firstName": "Sample",
                 "lastName": "Signer",
@@ -507,28 +542,30 @@ async def test_returning_client_links_to_root_not_intermediate(
     async_session: AsyncSession,
 ) -> None:
     """A third signing links to the ORIGINAL root, not an intermediate child,
-    keeping a flat two-level tree (COALESCE(parent_client_id, id))."""
+    keeping a flat two-level tree (COALESCE(parent_client_id, id)).
+
+    The intermediate deliberately holds a DIFFERENT sub-account id and a LATER
+    created_at than the root. Both matter: with the same id, `ghl_subaccount_id`
+    would assert true whichever row won, and with tied `created_at` the winner
+    would be decided by the random-uuid tiebreak - so the original version of
+    this test could not fail.
+    """
     root_id = await _seed_client(
-        async_session, email="root@example.com", ghl_subaccount_id="loc_root"
+        async_session,
+        email="root@example.com",
+        ghl_subaccount_id="loc_root",
+        created_at_offset_seconds=-120,
     )
-    # An already-linked child (parent_client_id = root, same sub-account) that
-    # ALSO shares root's identity key, so it is a candidate sibling too - the
-    # test proves the third signing links to the ROOT (earliest), not this
-    # intermediate.
-    await async_session.execute(
-        text(
-            "INSERT INTO clients (email, business_name, legal_entity, ghl_subaccount_id, "
-            "  parent_client_id, postal_code, identity_key, current_step, step_entered_at) "
-            "VALUES ('root@example.com', 'Sample Gym Ltd', 'Child One', 'loc_root', :root, "
-            "  'E8 1AA', :identity_key, 'signed', now())"
-        ),
-        {"root": root_id, "identity_key": compute_identity_key("Sample Gym Ltd", "E8 1AA")},
+    intermediate_id = await _seed_client(
+        async_session,
+        email="root@example.com",
+        ghl_subaccount_id="loc_intermediate",
+        parent_client_id=root_id,
+        created_at_offset_seconds=-60,
     )
     third_id = await _seed_client(async_session, email="root@example.com")
     event_id = await _seed_onboarding_event(async_session)
-    ghl = FakeGhlClient(
-        location=GhlLocation(id="loc_unused", name="n", company_id=COMPANY_ID, raw={})
-    )
+    ghl = FakeGhlClient(location=_ghl_location("loc_unused"))
 
     result = await create_ghl_subaccount_core(
         async_session,
@@ -539,25 +576,30 @@ async def test_returning_client_links_to_root_not_intermediate(
     )
 
     assert result.parent_client_id == root_id
+    assert result.parent_client_id != intermediate_id
     assert result.ghl_subaccount_id == "loc_root"
+    assert result.ghl_subaccount_id != "loc_intermediate"
 
 
 @pytest.mark.db
 async def test_ghl_lookup_reuses_existing_when_no_db_sibling(
     async_session: AsyncSession,
 ) -> None:
-    """No DB sibling, but GHL already has a location for the email (a client
-    that exists in GHL but not our DB): reuse it, parent_client_id stays NULL,
-    no create POST."""
+    """No DB sibling, but GHL already has a CORROBORATED location for the email
+    (a client that exists in GHL but not our DB, or our own orphan from a
+    create whose response was lost): reuse it, parent_client_id stays NULL, no
+    create POST.
+
+    The location must agree on BOTH name and postcode - which is exactly what a
+    location we created ourselves carries, since `_build_location_payload` now
+    sends the postcode. This is the at-least-once backstop still working.
+    """
     client_id = await _seed_client(async_session, email="inghl@example.com")
     event_id = await _seed_onboarding_event(async_session)
     ghl = FakeGhlClient(
-        location=GhlLocation(id="loc_should_not_create", name="n", company_id=COMPANY_ID, raw={}),
-        lookup_result=GhlLocation(
-            id="loc_existing_ghl",
-            name="Existing",
-            company_id=COMPANY_ID,
-            raw={"id": "loc_existing_ghl"},
+        location=_ghl_location("loc_should_not_create"),
+        lookup_result=_ghl_location(
+            "loc_existing_ghl", name="Sample Gym Ltd", postal_code="E8 1AA"
         ),
     )
 
@@ -598,8 +640,15 @@ async def test_franchise_separation_different_postcode_not_linked(
 ) -> None:
     """Same brand at a DIFFERENT postcode is a different client (a franchise):
     different identity key -> no DB sibling -> the second signing provisions
-    its OWN sub-account, parent_client_id stays NULL. Email matching (both
-    share `ops@brandgyms.com`) would have WRONGLY linked these."""
+    its OWN sub-account, parent_client_id stays NULL.
+
+    The GHL lookup IS seeded with the Hackney location, because both franchises
+    share `ops@brandgyms.com` and the email search really does return it. That
+    is the leg the first implementation left un-re-keyed: the DB check
+    separated the franchises and the email lookup immediately merged them back.
+    Names match here ("Brand Gym" both), so ONLY the postcode corroboration
+    keeps them apart.
+    """
     await _seed_client(
         async_session,
         email="ops@brandgyms.com",
@@ -617,9 +666,8 @@ async def test_franchise_separation_different_postcode_not_linked(
     )
     event_id = await _seed_onboarding_event(async_session)
     ghl = FakeGhlClient(
-        location=GhlLocation(
-            id="loc_croydon", name="Brand Gym", company_id=COMPANY_ID, raw={"id": "loc_croydon"}
-        )
+        location=_ghl_location("loc_croydon", name="Brand Gym", postal_code="CR0 1AA"),
+        lookup_result=_ghl_location("loc_hackney", name="Brand Gym", postal_code="E8 1AA"),
     )
 
     result = await create_ghl_subaccount_core(
@@ -633,8 +681,17 @@ async def test_franchise_separation_different_postcode_not_linked(
     assert result.created is True
     assert result.parent_client_id is None
     assert result.ghl_subaccount_id == "loc_croydon"
-    # A real create POST happened (not a DB-sibling reuse).
+    # A real create POST happened - neither a DB-sibling reuse nor a reuse of
+    # the Hackney location the email lookup returned.
     assert len(ghl.calls) == 1
+    assert ghl.lookup_calls == [("ops@brandgyms.com", COMPANY_ID)]
+
+    # A postcode MISMATCH is a confident "different site", not an ambiguous
+    # one, so it is not flagged for human review.
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :id"), {"id": croydon_id}
+    )
+    assert flagged.scalar_one() is False
 
 
 @pytest.mark.db
@@ -764,11 +821,11 @@ async def test_at_least_once_window_closed_by_lookup_on_retry(
         )
     assert ghl1.calls != []  # the create POST was attempted
 
-    # Attempt 2 (Inngest retry): GHL now reports the orphaned location.
+    # Attempt 2 (Inngest retry): GHL now reports the orphaned location. It
+    # carries the name AND postcode attempt 1 sent, so it corroborates and the
+    # backstop still recognises our own orphan.
     ghl2 = FakeGhlClient(
-        lookup_result=GhlLocation(
-            id="loc_orphan", name="n", company_id=COMPANY_ID, raw={"id": "loc_orphan"}
-        )
+        lookup_result=_ghl_location("loc_orphan", name="Sample Gym Ltd", postal_code="E8 1AA")
     )
     result = await create_ghl_subaccount_core(
         async_session,
@@ -907,7 +964,17 @@ def test_create_ghl_subaccount_declares_concurrency_caps() -> None:
     assert per_client.limit == 1
     assert per_client.scope == "fn"
 
-    per_identity = next(c for c in fn_config.concurrency if c.key == "event.data.dedup_key")
+    # Per-identity cap. The key is a CEL ternary rather than a bare field read
+    # so `client.created` events already QUEUED when this deploys - which
+    # predate `dedup_key` - fall back to their client_id instead of all
+    # colliding in one null bucket. Pinned exactly: CEL has no `??`, and an
+    # expression Inngest rejects fails the ALL-OR-NOTHING registration for every
+    # function (the S1-26a outage), so this string is not a free-form edit.
+    per_identity = next(
+        c
+        for c in fn_config.concurrency
+        if c.key == "has(event.data.dedup_key) ? event.data.dedup_key : event.data.client_id"
+    )
     assert per_identity.limit == 1
     assert per_identity.scope == "fn"
 
@@ -940,3 +1007,741 @@ def test_create_ghl_subaccount_declares_global_throttle() -> None:
 def test_create_ghl_subaccount_triggers_on_client_created() -> None:
     fn_config = create_ghl_subaccount.get_config("").main
     assert fn_config.triggers[0].event == CLIENT_CREATED_EVENT
+
+
+# ---------------------------------------------------------------------------
+# S1-26c review fixes: corroboration on BOTH returning-client checks.
+#
+# The first implementation re-keyed only the DB sibling lookup. These cover the
+# cases the reviewer found: a name match alone is not enough on either leg, the
+# earliest candidate at a key is not necessarily the right one, and a NULL
+# identity key must still have SOME dedup path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.db
+async def test_sibling_match_wins_over_earlier_divergent_candidate(
+    async_session: AsyncSession,
+) -> None:
+    """With several rows on one identity key, the NAME-MATCHING one is chosen -
+    even when an unrelated business got to the key first.
+
+    "Fitness Studio" and "Fitness First" both key `fitnes|E81AA`. Judging only
+    the earliest candidate (the original `LIMIT 1`) meant a second "Fitness
+    First" signing saw "Fitness Studio", declared divergence, and provisioned a
+    duplicate - forever, on every future signing for that business.
+    """
+    await _seed_client(
+        async_session,
+        email="a@example.com",
+        business_name="Fitness Studio",
+        legal_entity="Fitness Studio",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_studio",
+        created_at_offset_seconds=-120,
+    )
+    first_id = await _seed_client(
+        async_session,
+        email="b@example.com",
+        business_name="Fitness First",
+        legal_entity="Fitness First",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_first",
+        created_at_offset_seconds=-60,
+    )
+    returning_id = await _seed_client(
+        async_session,
+        email="c@example.com",  # a third email for the same business
+        business_name="Fitness First",
+        legal_entity="Fitness First",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"))
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=returning_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.skipped is True
+    assert result.ghl_subaccount_id == "loc_first"
+    assert result.parent_client_id == first_id
+    assert ghl.calls == []
+    # A real match was found, so nothing is flagged and GHL is never consulted.
+    assert ghl.lookup_calls == []
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :id"), {"id": returning_id}
+    )
+    assert flagged.scalar_one() is False
+
+
+@pytest.mark.db
+async def test_no_matching_sibling_flags_against_earliest_candidate(
+    async_session: AsyncSession,
+) -> None:
+    """When NO candidate at the key matches on name, the row is flagged against
+    the earliest candidate and provisioned its own sub-account (never merged)."""
+    earliest_id = await _seed_client(
+        async_session,
+        email="a@example.com",
+        business_name="Fitness Studio",
+        legal_entity="Fitness Studio",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_studio",
+        created_at_offset_seconds=-120,
+    )
+    await _seed_client(
+        async_session,
+        email="b@example.com",
+        business_name="Fitness Center",
+        legal_entity="Fitness Center",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_center",
+        created_at_offset_seconds=-60,
+    )
+    new_id = await _seed_client(
+        async_session,
+        email="c@example.com",
+        business_name="Fitness First",
+        legal_entity="Fitness First",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own", name="Fitness First"))
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=new_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.parent_client_id is None
+    assert result.ghl_subaccount_id == "loc_own"
+
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": new_id},
+    )
+    is_dup, dup_of = flagged.one()
+    assert is_dup is True
+    assert dup_of == earliest_id
+
+
+@pytest.mark.db
+async def test_null_identity_key_falls_back_to_email_sibling(
+    async_session: AsyncSession,
+) -> None:
+    """A client with no usable postcode has a NULL identity_key, so the sibling
+    query falls back to EMAIL - S1-26's original key.
+
+    Without this fallback the row has NO DB-side dedup at all: it would miss the
+    sibling and provision a second sub-account for a client we already know
+    about, which is a regression against S1-26 rather than a new safeguard.
+    """
+    parent_id = await _seed_client(
+        async_session,
+        email="nopostcode@example.com",
+        postal_code=None,
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    child_id = await _seed_client(async_session, email="nopostcode@example.com", postal_code=None)
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"))
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=child_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.skipped is True
+    assert result.ghl_subaccount_id == "loc_parent"
+    assert result.parent_client_id == parent_id
+    assert ghl.calls == []
+
+
+@pytest.mark.db
+async def test_null_identity_key_email_sibling_still_name_guarded(
+    async_session: AsyncSession,
+) -> None:
+    """The email fallback is NOT a licence to merge on email alone: a shared
+    mailbox with a different business name is flagged, not linked."""
+    other_id = await _seed_client(
+        async_session,
+        email="ops@brandgyms.com",
+        business_name="Hackney Gym",
+        legal_entity="Hackney Gym",
+        postal_code=None,
+        ghl_subaccount_id="loc_hackney",
+        created_at_offset_seconds=-60,
+    )
+    croydon_id = await _seed_client(
+        async_session,
+        email="ops@brandgyms.com",
+        business_name="Croydon Gym",
+        legal_entity="Croydon Gym",
+        postal_code=None,
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_croydon", name="Croydon Gym"))
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=croydon_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_croydon"
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": croydon_id},
+    )
+    is_dup, dup_of = flagged.one()
+    assert is_dup is True
+    assert dup_of == other_id
+
+
+@pytest.mark.db
+async def test_ghl_hit_without_postcode_is_not_reused(async_session: AsyncSession) -> None:
+    """A LEGACY GHL location (no postcode on file) cannot be corroborated, so
+    it is NOT reused: own sub-account + a flag naming the suspected location.
+
+    This is the deliberate trade-off. Reusing on the name alone is how two
+    franchises on one mailbox get merged, and a wrong merge puts one client's
+    assets inside another client's account. A spare sub-account is visible here
+    and deletable; a wrong merge is neither.
+    """
+    client_id = await _seed_client(async_session, email="legacy@example.com")
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_new"),
+        lookup_result=_ghl_location("loc_legacy", name="Sample Gym Ltd", postal_code=None),
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_new"
+    assert len(ghl.calls) == 1
+
+    flagged = await async_session.execute(
+        text(
+            "SELECT possible_duplicate, possible_duplicate_ghl_id, possible_duplicate_of "
+            "FROM clients WHERE id = :id"
+        ),
+        {"id": client_id},
+    )
+    is_dup, ghl_candidate, client_candidate = flagged.one()
+    assert is_dup is True
+    assert ghl_candidate == "loc_legacy"
+    # The collision is with a LOCATION, not a clients row.
+    assert client_candidate is None
+
+
+@pytest.mark.db
+async def test_ghl_hit_with_divergent_name_is_not_reused(async_session: AsyncSession) -> None:
+    """A hit on a shared mailbox whose location name is a different business is
+    not reused even when it carries a postcode."""
+    client_id = await _seed_client(async_session, email="shared@example.com")
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_new"),
+        lookup_result=_ghl_location("loc_other", name="Totally Other Gym", postal_code="E8 1AA"),
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_new"
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_ghl_id FROM clients WHERE id = :id"),
+        {"id": client_id},
+    )
+    is_dup, ghl_candidate = flagged.one()
+    assert is_dup is True
+    assert ghl_candidate == "loc_other"
+
+
+@pytest.mark.db
+async def test_ghl_hit_reads_postcode_nested_under_business(
+    async_session: AsyncSession,
+) -> None:
+    """GHL returns address fields nested under `business` on some payload
+    shapes; a location is not declared uncorroboratable before both are read."""
+    client_id = await _seed_client(async_session, email="nested@example.com")
+    event_id = await _seed_onboarding_event(async_session)
+    nested = GhlLocation(
+        id="loc_nested",
+        name="Sample Gym Ltd",
+        company_id=COMPANY_ID,
+        raw={"id": "loc_nested", "business": {"postalCode": "E8 1AA"}},
+    )
+    ghl = FakeGhlClient(location=_ghl_location("loc_new"), lookup_result=nested)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.skipped is True
+    assert result.ghl_subaccount_id == "loc_nested"
+    assert ghl.calls == []
+
+
+@pytest.mark.db
+async def test_flagged_sibling_collision_is_not_rescued_by_ghl_lookup(
+    async_session: AsyncSession,
+) -> None:
+    """A row flagged by the DB dedup guard must NOT be quietly merged ~130 lines
+    later by the email lookup returning that same sibling's location.
+
+    "Fitness First" and "Fitness Studio" share a key AND a mailbox. The guard
+    flags the collision; the email lookup then finds "Fitness Studio"'s
+    location, whose name diverges, so it is refused too.
+    """
+    await _seed_client(
+        async_session,
+        email="ops@shared.example.com",
+        business_name="Fitness Studio",
+        legal_entity="Fitness Studio",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_studio",
+        created_at_offset_seconds=-60,
+    )
+    new_id = await _seed_client(
+        async_session,
+        email="ops@shared.example.com",
+        business_name="Fitness First",
+        legal_entity="Fitness First",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_own", name="Fitness First"),
+        lookup_result=_ghl_location("loc_studio", name="Fitness Studio", postal_code="E8 1AA"),
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=new_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    assert result.ghl_subaccount_id != "loc_studio"
+
+
+@pytest.mark.db
+async def test_create_payload_carries_postcode(async_session: AsyncSession) -> None:
+    """`postalCode` is sent on create so the location is SELF-IDENTIFYING: it is
+    the second signal a later returning-client lookup corroborates against."""
+    client_id = await _seed_client(async_session, email="payload@example.com")
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_new"))
+
+    await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert ghl.calls[0]["postalCode"] == "E8 1AA"
+
+
+@pytest.mark.db
+async def test_create_payload_omits_postcode_when_absent(async_session: AsyncSession) -> None:
+    """No postcode on the client means the key is omitted entirely rather than
+    sent as an empty string GHL might reject."""
+    client_id = await _seed_client(async_session, email="nopostcode2@example.com", postal_code=None)
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_new"))
+
+    await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert "postalCode" not in ghl.calls[0]
+
+
+@pytest.mark.db
+async def test_ghl_hit_with_divergent_name_and_no_postcode_is_not_flagged(
+    async_session: AsyncSession,
+) -> None:
+    """Name says "different business" and there is no postcode to argue back
+    with: a confident negative, not an ambiguity.
+
+    This is the shared-ops-mailbox shape, which is NORMAL at Bullet. Flagging
+    it would put a review badge on routine signings, and a flag that fires on
+    the happy path is one the team stops reading.
+    """
+    client_id = await _seed_client(async_session, email="ops@shared2.example.com")
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_new"),
+        lookup_result=_ghl_location("loc_other", name="Totally Other Gym", postal_code=None),
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_new"
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :id"), {"id": client_id}
+    )
+    assert flagged.scalar_one() is False
+
+
+@pytest.mark.db
+async def test_ghl_hit_undecidable_when_client_has_no_postcode(
+    async_session: AsyncSession,
+) -> None:
+    """ "Unknown" cuts both ways: the CLIENT can be the side missing a postcode.
+
+    Name agrees and the location carries a postcode, but with nothing to
+    compare it against we cannot conclude "same site", so this is flagged for a
+    human rather than merged on the name alone.
+    """
+    client_id = await _seed_client(
+        async_session, email="clientnopostcode@example.com", postal_code=None
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_new", postal_code=None),
+        lookup_result=_ghl_location("loc_maybe", name="Sample Gym Ltd", postal_code="E8 1AA"),
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_ghl_id FROM clients WHERE id = :id"),
+        {"id": client_id},
+    )
+    is_dup, ghl_candidate = flagged.one()
+    assert is_dup is True
+    assert ghl_candidate == "loc_maybe"
+
+
+@pytest.mark.db
+async def test_sibling_candidate_cap_is_logged_not_silent(
+    async_session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The candidate fetch is bounded, and hitting the bound is LOGGED.
+
+    Pins the known limitation honestly: with more divergent-name rows on one
+    key than the cap, a matching row beyond the cap is missed and the signing
+    provisions a duplicate. That is acceptable (a key realistically holds a
+    handful of rows) but it must never look like "no returning client found" -
+    a silent truncation would read as a clean negative.
+    """
+    for index in range(_SIBLING_CANDIDATE_LIMIT):
+        await _seed_client(
+            async_session,
+            email=f"cap{index}@example.com",
+            business_name=f"Capgym Variant {index}",
+            legal_entity=f"Capgym Variant {index}",
+            postal_code="E8 1AA",
+            ghl_subaccount_id=f"loc_cap_{index}",
+            created_at_offset_seconds=-1000 + index,
+        )
+    # The TRUE match, created last so it sorts past the cap.
+    await _seed_client(
+        async_session,
+        email="realmatch@example.com",
+        business_name="Capgym",
+        legal_entity="Capgym",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_real_match",
+        created_at_offset_seconds=-1,
+    )
+    returning_id = await _seed_client(
+        async_session,
+        email="returning@example.com",
+        business_name="Capgym",
+        legal_entity="Capgym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own", name="Capgym"))
+
+    with caplog.at_level("WARNING"):
+        result = await create_ghl_subaccount_core(
+            async_session,
+            ghl,
+            client_id=returning_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    # The match beyond the cap was missed - the documented limitation...
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    # ...but it was NOT silent.
+    assert any("candidate cap" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Reviewer finding 4: name + postcode alone is NOT enough to auto-link.
+#
+# `Company.Zip` is the COMPANY postcode, not the studio's, so a franchisee with
+# two studios who enters only the brand plus a head-office postcode produces an
+# identical identity key AND identical normalized names. A second signal (phone
+# or address line) must also agree, and absence is not agreement.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.db
+async def test_franchisee_two_studios_one_head_office_is_not_auto_linked(
+    async_session: AsyncSession,
+) -> None:
+    """THE scenario from the review: same brand, same head-office postcode, two
+    different studios. Identity key matches, names match - and before this fix
+    studio 2 was silently linked into studio 1's sub-account."""
+    studio_one = await _seed_client(
+        async_session,
+        email="owner@f45franchise.com",
+        business_name="F45 Training",
+        legal_entity="F45 Training",
+        postal_code="E8 1AA",  # head office, not the studio
+        phone="+44 7700 900111",
+        address="Studio One, 1 Mare Street",
+        ghl_subaccount_id="loc_studio_one",
+        created_at_offset_seconds=-60,
+    )
+    studio_two = await _seed_client(
+        async_session,
+        email="owner@f45franchise.com",
+        business_name="F45 Training",
+        legal_entity="F45 Training",
+        postal_code="E8 1AA",
+        phone="+44 7700 900222",  # different studio, different line
+        address="Studio Two, 99 Kingsland Road",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_studio_two", name="F45 Training"))
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=studio_two,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # Its OWN sub-account, NOT studio one's.
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_studio_two"
+    assert result.parent_client_id is None
+
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": studio_two},
+    )
+    is_dup, dup_of = flagged.one()
+    assert is_dup is True
+    assert dup_of == studio_one
+
+
+@pytest.mark.db
+async def test_name_and_postcode_alone_with_no_second_signal_is_flagged(
+    async_session: AsyncSession,
+) -> None:
+    """Absence is not agreement: with no phone and no address on either side,
+    only name + postcode agree, so this flags rather than merging."""
+    existing = await _seed_client(
+        async_session,
+        email="a@example.com",
+        phone=None,
+        address=None,
+        ghl_subaccount_id="loc_existing",
+        created_at_offset_seconds=-60,
+    )
+    new_id = await _seed_client(async_session, email="b@example.com", phone=None, address=None)
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own"))
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=new_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    assert result.parent_client_id is None
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": new_id},
+    )
+    is_dup, dup_of = flagged.one()
+    assert is_dup is True
+    assert dup_of == existing
+
+
+@pytest.mark.db
+async def test_matching_phone_corroborates_and_links(async_session: AsyncSession) -> None:
+    """A genuine returning client under a DIFFERENT email still links, because
+    the phone corroborates - including across formatting differences, which
+    must not be mistaken for a different business."""
+    parent_id = await _seed_client(
+        async_session,
+        email="old@example.com",
+        phone="+44 7700 900123",
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    returning_id = await _seed_client(
+        async_session,
+        email="new@example.com",  # different email, same business
+        phone="07700 900123",  # same number, typed differently
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"))
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=returning_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.skipped is True
+    assert result.ghl_subaccount_id == "loc_parent"
+    assert result.parent_client_id == parent_id
+    assert ghl.calls == []
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :id"), {"id": returning_id}
+    )
+    assert flagged.scalar_one() is False
+
+
+@pytest.mark.db
+async def test_matching_address_corroborates_when_the_phone_changed(
+    async_session: AsyncSession,
+) -> None:
+    """Either signal satisfies the bar - a changed contact number must not veto
+    an otherwise solid match on the premises."""
+    parent_id = await _seed_client(
+        async_session,
+        email="old2@example.com",
+        phone="+447700900123",
+        address="12 Mare Street, London",
+        ghl_subaccount_id="loc_parent2",
+        created_at_offset_seconds=-60,
+    )
+    returning_id = await _seed_client(
+        async_session,
+        email="new2@example.com",
+        phone="+447700900999",  # new number
+        address="12 Mare Street,  London",  # same premises
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"))
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=returning_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.skipped is True
+    assert result.ghl_subaccount_id == "loc_parent2"
+    assert result.parent_client_id == parent_id
+
+
+@pytest.mark.db
+async def test_uncorroborated_candidate_does_not_hide_a_corroborated_one(
+    async_session: AsyncSession,
+) -> None:
+    """Scanning continues past a name-matching-but-uncorroborated row: an
+    earlier franchise sibling must not shadow the real returning client."""
+    await _seed_client(
+        async_session,
+        email="franchise@example.com",
+        phone="+447700900111",
+        address="Other Studio",
+        ghl_subaccount_id="loc_other_studio",
+        created_at_offset_seconds=-120,
+    )
+    real_parent = await _seed_client(
+        async_session,
+        email="real@example.com",
+        phone="+447700900123",
+        address="Real Premises",
+        ghl_subaccount_id="loc_real",
+        created_at_offset_seconds=-60,
+    )
+    returning_id = await _seed_client(
+        async_session,
+        email="returning@example.com",
+        phone="+44 7700 900123",
+        address="Real Premises",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"))
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=returning_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.skipped is True
+    assert result.ghl_subaccount_id == "loc_real"
+    assert result.parent_client_id == real_parent

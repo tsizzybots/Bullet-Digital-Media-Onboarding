@@ -161,6 +161,17 @@
             ],
             "title": "Pandadoc Document Id"
           },
+          "parent_client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Client Id"
+          },
           "phone": {
             "anyOf": [
               {
@@ -175,6 +186,17 @@
           "possible_duplicate": {
             "title": "Possible Duplicate",
             "type": "boolean"
+          },
+          "possible_duplicate_ghl_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Possible Duplicate Ghl Id"
           },
           "possible_duplicate_of": {
             "anyOf": [
@@ -289,6 +311,8 @@
           "created_at",
           "possible_duplicate",
           "possible_duplicate_of",
+          "possible_duplicate_ghl_id",
+          "parent_client_id",
           "sales_summary",
           "actions",
           "hubspot_contact_id",

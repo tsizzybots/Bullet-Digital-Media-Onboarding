@@ -28,23 +28,51 @@ Correctness rules:
   of creating a duplicate: (1) a prior `clients` row with the same IDENTITY
   KEY (S1-26c: `first6(normalized business name) + "|" + normalized postcode`)
   that already holds a `ghl_subaccount_id` - the new row is linked via
-  `parent_client_id` to the original root and the id is reused; this now
-  unites the same business signing under DIFFERENT emails and separates
-  franchises (same brand, different postcode) that email-keying conflated;
-  (2) no DB sibling, so a live GHL lookup-by-email runs on EVERY create
-  attempt before the POST - this catches a client that exists in GHL but not
-  our DB AND closes S1-25's at-least-once duplicate-create window (a retry
-  after a lost create response finds the orphaned location rather than
-  creating a second one). Either reuse is recorded as a `success` action
-  carrying a `response.skipped_existing` + `response.reason` marker (no new
-  enum value; see plan). Dedup guard (S1-26c): the key truncates the name to
-  6 chars, so two DIFFERENT businesses sharing a name prefix AND a postcode
-  collide on it; when the key matches but the FULL normalized names diverge,
-  the row is flagged `possible_duplicate` (+ `possible_duplicate_of`) and
-  provisioned as its OWN client rather than auto-merged. A NULL identity_key
-  (no usable name/postcode) matches nothing and falls through to CREATE
-  (fail-safe). A per-identity concurrency cap serialises same-identity
-  processing so two returning signings cannot both pass the check
+  `parent_client_id` to the original root and the id is reused; this unites
+  the same business signing under DIFFERENT emails and separates franchises
+  (same brand, different postcode) that email-keying conflated. When the
+  identity key is NULL (no usable name or postcode) the sibling query falls
+  back to EMAIL, S1-26's original key, so those documents keep a DB-side dedup
+  path instead of losing it entirely. (2) no DB sibling, so a live GHL
+  lookup-by-email runs on EVERY create attempt before the POST - this catches
+  a client that exists in GHL but not our DB AND closes S1-25's at-least-once
+  duplicate-create window (a retry after a lost create response finds the
+  orphaned location rather than creating a second one). Either reuse is
+  recorded as a `success` action carrying a `response.skipped_existing` +
+  `response.reason` marker (no new enum value; see plan).
+
+  **Corroboration, both ways (S1-26c review fix).** Neither check reuses on
+  its lookup key alone, because both keys are lossy: the identity key
+  truncates the name to 6 chars (so "Fitness First" and "Fitness Studio" at
+  one postcode collide), and email is shared across a brand's franchises (so
+  "Brand Gym" Hackney and Croydon collide). A DB sibling must clear TWO bars:
+  the FULL normalized names agree - and every candidate at the key is scanned
+  for that match, not just the earliest, so an unrelated business reaching the
+  key first cannot hide a genuine returning client behind it - AND a SECOND
+  signal, phone or address line, also agrees. The second bar exists because
+  `Company.Zip` is the COMPANY postcode rather than the studio's, so a
+  franchisee running two studios who enters only the brand ("F45 Training")
+  plus their head-office postcode produces an identical key AND identical
+  names; without it, studio 2 is silently linked into studio 1's sub-account.
+  Absence is NOT agreement - when only name and postcode agree, that flags.
+  A GHL hit is accepted only when the location's name AND postcode both agree,
+  which is why `postalCode` is now sent on create: it makes our own locations
+  self-identifying, so a later signing can prove a hit is the same site.
+  Anything short of full corroboration is NOT merged - the signing is
+  provisioned its OWN sub-account. That direction is deliberate: a spare empty
+  sub-account is visible in the dashboard and deletes cleanly, whereas a wrong
+  reuse puts one client's assets, contacts and workflows inside another
+  client's account and is not realistically undoable.
+
+  **Flagging is for ambiguity, not for every non-reuse.** `possible_duplicate`
+  (+ `possible_duplicate_of` for a client collision, `possible_duplicate_ghl_id`
+  for a location one) is raised only when the evidence is INCONCLUSIVE - an
+  identity-key collision whose names diverge, or a GHL hit we cannot decide
+  because a postcode is missing on either side. A confident negative (the
+  postcode is present and different: a franchise at another site) is the normal
+  path and raises nothing, because a flag that fires on every franchise signing
+  is a flag the team stops reading. A per-identity concurrency cap serialises
+  same-identity processing so two returning signings cannot both pass the check
   concurrently.
 - **Commit the `in_progress` row BEFORE the GHL call**, then commit the
   terminal (`success`/`failed`) state after. A crash mid-call therefore
@@ -53,9 +81,12 @@ Correctness rules:
 - **Concurrency.** Two guards (Inngest's per-function max): a per-client cap
   of 1 eliminates a concurrent double-create for the same client, and a
   per-identity cap of 1 (`event.data.dedup_key` = identity_key when present,
-  else the unique client_id) serialises rows for the same business so two
-  returning signings (even under different emails) cannot both pass the
-  returning-client check concurrently. The former global in-flight cap was
+  else `email:<normalized>`, else the unique client_id) serialises rows for
+  the same business so two returning signings (even under different emails)
+  cannot both pass the returning-client check concurrently. The email tier
+  matters because a NULL identity_key still has a DB-side dedup path, so those
+  rows must contend with each other rather than each taking a private bucket.
+  The former global in-flight cap was
   dropped (S1-26a) - it made THREE constraints, exceeding Inngest's 2-per-
   function limit, which failed the whole `/fn/register` sync (verified live:
   the sync 400s with 3, returns 200 with 2). The DB idempotency key +
@@ -81,19 +112,25 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
 import inngest
-from sqlalchemy import text
+from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.config import get_settings
 from bullet_api.db.session import AsyncSessionLocal
-from bullet_api.ghl.client import GhlClient, GhlClientError, HttpGhlClient
+from bullet_api.ghl.client import GhlClient, GhlClientError, GhlLocation, HttpGhlClient
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.events import CLIENT_CREATED_EVENT
-from bullet_api.worker.identity_key import names_materially_diverge
+from bullet_api.worker.identity_key import (
+    corroborating_signal_agrees,
+    identity_name,
+    names_materially_diverge,
+    normalize_postcode,
+)
 from bullet_api.worker.platform_actions import (
     begin_action,
     build_idempotency_key,
@@ -158,20 +195,33 @@ def _build_location_payload(
     contact_last_name: str | None,
     email: str,
     phone: str | None,
+    postal_code: str | None,
 ) -> dict:
     """Build the GHL create-location body from the client row.
 
-    `name` prefers the trading `business_name` and falls back to the
-    NOT-NULL `legal_entity`. Optional keys are omitted entirely when their
-    source value is missing so we never send empty strings GHL might
-    reject. `snapshotId` is included only when a snapshot is configured.
+    `name` is `identity_name(...)` and falls back to the NOT-NULL
+    `legal_entity`, so the name GHL holds is the same string the identity key
+    and the divergence guard are computed from. Optional keys are omitted
+    entirely when their source value is missing so we never send empty strings
+    GHL might reject. `snapshotId` is included only when a snapshot is
+    configured.
+
+    `postalCode` (S1-26c review fix) makes the locations we create
+    SELF-IDENTIFYING. The returning-client GHL lookup finds locations by email
+    alone, which cannot tell two franchises of one brand apart; sending the
+    postcode gives that lookup a second signal to corroborate against, so a
+    later signing can prove a hit is the same site rather than assuming it.
+    Locations created before this change carry no postcode and therefore
+    cannot be corroborated - see `_classify_ghl_hit`.
     """
     payload: dict = {
-        "name": business_name or legal_entity,
+        "name": identity_name(business_name, legal_entity) or legal_entity,
         "companyId": company_id,
     }
     if phone:
         payload["phone"] = phone
+    if postal_code:
+        payload["postalCode"] = postal_code
 
     prospect: dict = {}
     if contact_first_name:
@@ -189,6 +239,204 @@ def _build_location_payload(
     return payload
 
 
+# Bound on the candidate sibling fetch. A key realistically has a handful of
+# rows (a business signing for its second/third site); the cap only exists so a
+# pathological key cannot pull an unbounded result set into memory. Hitting it
+# is logged rather than silently truncated - a silent cap would read as "no
+# match found" when the match was simply past the cap.
+_SIBLING_CANDIDATE_LIMIT = 50
+
+# Candidate returning-client siblings: prior clients rows that already hold a
+# sub-account and match on the given predicate. ALL candidates are fetched (not
+# `LIMIT 1`) because the caller must pick the one whose FULL normalized name
+# matches, which SQL cannot evaluate - the identity key is a 6-char prefix, so
+# the earliest row at a key is not necessarily the right business. `created_at
+# ASC, id ASC` makes both the pick and the flagged-against candidate
+# deterministic (`created_at` alone ties under the savepoint test fixture, and
+# in any same-transaction batch).
+_SIBLING_SELECT = (
+    "SELECT id, COALESCE(parent_client_id, id) AS root_id, "
+    "       ghl_subaccount_id, business_name, legal_entity, phone, address "
+    "FROM clients "
+    "WHERE {predicate} AND id <> :client_id "
+    "      AND ghl_subaccount_id IS NOT NULL "
+    "ORDER BY created_at ASC, id ASC "
+    f"LIMIT {_SIBLING_CANDIDATE_LIMIT}"
+)
+
+_SIBLING_BY_IDENTITY_KEY_SQL = text(
+    _SIBLING_SELECT.format(predicate="identity_key = :identity_key")
+)
+
+# Fallback for a NULL identity_key (S1-26c review fix, finding 5). Without it,
+# a document with no usable business name or postcode has NO DB-side dedup at
+# all - a regression against S1-26, where email WAS the sibling key. It runs
+# only when the identity key is NULL, so it cannot reintroduce the email
+# conflation that keyed clients were moved off. Same divergence guard applies.
+_SIBLING_BY_EMAIL_SQL = text(_SIBLING_SELECT.format(predicate="lower(email) = lower(:email)"))
+
+
+def _pick_sibling(
+    candidates: Sequence[Row],
+    *,
+    client_name: str | None,
+    client_phone: str | None,
+    client_address: str | None,
+) -> tuple[Row | None, Row | None]:
+    """Split candidates into (matched, collided).
+
+    `matched` is the EARLIEST candidate that clears BOTH bars - the genuine
+    returning-client link. `collided` is the best near-miss, returned only when
+    nothing matched, so the possible-duplicate flag points at something
+    concrete: a name-matching-but-uncorroborated candidate is preferred over an
+    unrelated one, because that is the row a human most likely wants to compare.
+
+    **Bar 1 - the full normalized name agrees.** Every candidate is scanned,
+    not just the earliest, so a real returning client is still findable when an
+    unrelated business got to the shared key first: "Fitness Studio" and
+    "Fitness First" both key `fitnes|E81AA`, so a second "Fitness First"
+    signing must see past the earlier "Fitness Studio" row.
+
+    **Bar 2 - a SECOND signal (phone or address) agrees** (reviewer finding 4).
+    Name + postcode is not proof of one business: `Company.Zip` is the COMPANY
+    address, not the studio's, so a franchisee running two studios who enters
+    only the brand ("F45 Training", "BFT") plus their head-office postcode
+    produces an identical key AND identical names. Without this bar, studio 2
+    is silently linked into studio 1's sub-account. When only name and postcode
+    agree, we flag rather than merge - absence of a second signal is not
+    agreement.
+    """
+    collided: Row | None = None
+    for candidate in candidates:
+        candidate_name = identity_name(candidate.business_name, candidate.legal_entity)
+        if names_materially_diverge(client_name, candidate_name):
+            continue
+        if corroborating_signal_agrees(
+            phone_a=client_phone,
+            address_a=client_address,
+            phone_b=candidate.phone,
+            address_b=candidate.address,
+        ):
+            return candidate, None
+        # Name matches but nothing corroborates it. Remember the FIRST such
+        # candidate as the flag target - it is a closer call for a human than
+        # an unrelated prefix collision - and keep scanning, since a later
+        # candidate may still corroborate properly.
+        if collided is None:
+            collided = candidate
+    if collided is None:
+        collided = candidates[0] if candidates else None
+    return None, collided
+
+
+def _location_postcode(location: GhlLocation) -> str:
+    """The normalized postcode a GHL location carries, or "" if it has none.
+
+    GHL returns address fields at the top level on some payload shapes and
+    nested under `business` on others (the 21/07 live create response carried a
+    `business` object), so both are read before concluding the location is
+    uncorroboratable.
+    """
+    raw = location.raw or {}
+    candidate = raw.get("postalCode")
+    if not candidate:
+        business = raw.get("business")
+        if isinstance(business, dict):
+            candidate = business.get("postalCode")
+    if candidate is None or isinstance(candidate, bool):
+        # `bool` is an `int` subclass, so it would otherwise stringify to
+        # "True"/"False" and be treated as a postcode.
+        return ""
+    if isinstance(candidate, int):
+        # A numeric postcode (75008) can arrive unquoted from JSON, where it
+        # parses as int. Treating that as "no postcode" would send a perfectly
+        # corroboratable INT location down the undecidable path and flag it for
+        # no reason. Only `int` - a float is not a postcode in any format, and
+        # str(75008.0) would normalize to the wrong digits.
+        candidate = str(candidate)
+    return normalize_postcode(candidate if isinstance(candidate, str) else None)
+
+
+# Verdicts on a location returned by the email lookup. Three states, not two,
+# because "this is a different business" and "I cannot tell" call for different
+# handling: both provision their own sub-account, but only the ambiguous one is
+# worth a human's time. Flagging the confident negatives too would put a review
+# badge on every franchise signing - Bullet has many - and a flag that fires on
+# the normal path is a flag people learn to ignore.
+_GHL_HIT_SAME_BUSINESS = "same_business"
+_GHL_HIT_DIFFERENT_BUSINESS = "different_business"
+_GHL_HIT_UNDECIDABLE = "undecidable"
+
+
+def _classify_ghl_hit(
+    location: GhlLocation, *, client_name: str | None, client_postcode: str | None
+) -> str:
+    """Decide whether a location found by email is the SAME business.
+
+    The email lookup alone cannot distinguish franchises: "Brand Gym" Hackney
+    and "Brand Gym" Croydon are one brand under one `ops@` mailbox but two
+    clients, and reusing the first for the second puts one client's assets in
+    the other's account. So a hit is judged on two signals - the full
+    normalized name, and the normalized postcode - which resolve as:
+
+    | name    | postcode | verdict            |
+    |---------|----------|--------------------|
+    | agrees  | agrees   | same business      | -> reuse
+    | agrees  | differs  | different business | -> own sub-account (a franchise)
+    | agrees  | unknown  | undecidable        | -> own sub-account + flag
+    | differs | agrees   | undecidable        | -> own sub-account + flag
+    | differs | differs  | different business | -> own sub-account
+    | differs | unknown  | different business | -> own sub-account
+
+    "unknown" means EITHER side lacks a postcode - the location (every
+    sub-account created before we started sending one) or the client. Absence
+    of evidence is not evidence, so those go to a human rather than being
+    guessed either way. Where a signal actively points at "different", we take
+    it: name-differs + no postcode is a shared ops mailbox across two real
+    clients, which is normal at Bullet, not an anomaly.
+
+    Note this preserves the at-least-once backstop: a location WE created and
+    then lost the response for carries both the name and the postcode we sent,
+    so it lands in row 1 and is reused rather than duplicated.
+    """
+    name_agrees = not names_materially_diverge(client_name, location.name)
+    location_postcode = _location_postcode(location)
+    client_postcode_norm = normalize_postcode(client_postcode)
+
+    if not location_postcode or not client_postcode_norm:
+        return _GHL_HIT_UNDECIDABLE if name_agrees else _GHL_HIT_DIFFERENT_BUSINESS
+    if location_postcode == client_postcode_norm:
+        return _GHL_HIT_SAME_BUSINESS if name_agrees else _GHL_HIT_UNDECIDABLE
+    return _GHL_HIT_DIFFERENT_BUSINESS
+
+
+async def _flag_possible_duplicate(
+    session: AsyncSession,
+    *,
+    client_id: uuid.UUID,
+    sibling_id: uuid.UUID | None = None,
+    ghl_location_id: str | None = None,
+) -> None:
+    """Mark this client for human review and record what it collided with.
+
+    Set on either kind of near-miss: an identity-key collision whose names
+    diverge (`sibling_id`), or a GHL location found by email that could not be
+    corroborated (`ghl_location_id`). The row is still provisioned its own
+    sub-account - the flag exists so the dashboard can show the candidate and a
+    human can merge deliberately, never so the automation merges for them.
+    """
+    await session.execute(
+        text(
+            "UPDATE clients "
+            "SET possible_duplicate = true, "
+            "    possible_duplicate_of = COALESCE(:sibling_id, possible_duplicate_of), "
+            "    possible_duplicate_ghl_id = COALESCE(:ghl_id, possible_duplicate_ghl_id) "
+            "WHERE id = :client_id"
+        ),
+        {"sibling_id": sibling_id, "ghl_id": ghl_location_id, "client_id": client_id},
+    )
+
+
 async def create_ghl_subaccount_core(
     session: AsyncSession,
     ghl_client: GhlClient,
@@ -202,11 +450,13 @@ async def create_ghl_subaccount_core(
     """Create (or resume / reuse / skip) the GHL sub-account for one client.
 
     Steps: load the client; short-circuit if already provisioned; reuse a
-    DB sibling's sub-account if this is a returning client (link
-    `parent_client_id`); else record an `in_progress` action + COMMIT, look
-    GHL up by email, reuse if found, else POST create; on success record
-    `success` + write `ghl_subaccount_id` back + COMMIT, or on error record
-    `failed` + COMMIT and re-raise.
+    DB sibling's sub-account if this is a returning client whose full name
+    matches (link `parent_client_id`); else record an `in_progress` action +
+    COMMIT, look GHL up by email, reuse only a hit corroborated on name AND
+    postcode, else POST create; on success record `success` + write
+    `ghl_subaccount_id` back + COMMIT, or on error record `failed` + COMMIT and
+    re-raise. An uncorroborated match at either step flags `possible_duplicate`
+    and provisions its own sub-account rather than merging.
 
     Raises:
         ClientNotFoundError: no `clients` row for `client_id`. Rolls back.
@@ -221,7 +471,7 @@ async def create_ghl_subaccount_core(
             text(
                 "SELECT email, business_name, legal_entity, "
                 "       contact_first_name, contact_last_name, phone, "
-                "       ghl_subaccount_id, identity_key "
+                "       ghl_subaccount_id, identity_key, postal_code, address "
                 "FROM clients WHERE id = :client_id"
             ),
             {"client_id": client_id},
@@ -266,61 +516,77 @@ async def create_ghl_subaccount_core(
             ghl_subaccount_id=client.ghl_subaccount_id, created=False, skipped=True
         )
 
-    # S1-26 returning-client check (1/2): local DB sibling. If a PRIOR
-    # clients row with the same IDENTITY KEY (S1-26c: first6(normalized name)
-    # + postcode) already holds a ghl_subaccount_id, this is a returning
-    # client (e.g. signing for a second gym/site, or the same business under a
+    client_name = identity_name(client.business_name, client.legal_entity)
+
+    # S1-26 returning-client check (1/2): local DB sibling. If a PRIOR clients
+    # row with the same IDENTITY KEY (S1-26c: first6(normalized name) +
+    # postcode) already holds a ghl_subaccount_id, this is a returning client
+    # (e.g. signing for a second gym/site, or the same business under a
     # different email). Link this row to the original ROOT
     # (`COALESCE(parent_client_id, id)`, which keeps a flat two-level tree
     # rather than chains) and reuse the existing sub-account id - never
-    # provision a second location for the same client. Earliest row wins so
-    # the root is stable across multiple returning signings.
+    # provision a second location for the same client. The earliest NAME-MATCHING
+    # row wins so the root is stable across multiple returning signings.
     #
-    # A NULL identity_key (no usable name/postcode) matches nothing and skips
-    # the branch entirely - fail-safe to CREATE rather than mis-merge.
-    sibling = None
+    # A NULL identity_key (no usable name/postcode) cannot match on identity, so
+    # it falls back to the EMAIL sibling query - S1-26's original key. Without
+    # that fallback those documents would have no DB-side dedup at all, which is
+    # strictly worse than before this ticket.
     if client.identity_key is not None:
-        sibling = (
+        candidates = (
             await session.execute(
-                text(
-                    "SELECT id, COALESCE(parent_client_id, id) AS root_id, "
-                    "       ghl_subaccount_id, business_name "
-                    "FROM clients "
-                    "WHERE identity_key = :identity_key AND id <> :client_id "
-                    "      AND ghl_subaccount_id IS NOT NULL "
-                    "ORDER BY created_at ASC "
-                    "LIMIT 1"
-                ),
+                _SIBLING_BY_IDENTITY_KEY_SQL,
                 {"identity_key": client.identity_key, "client_id": client_id},
             )
-        ).one_or_none()
+        ).all()
+    else:
+        candidates = (
+            await session.execute(
+                _SIBLING_BY_EMAIL_SQL,
+                {"email": client.email, "client_id": client_id},
+            )
+        ).all()
 
-    # S1-26c dedup guard: the identity key truncates the name to 6 chars, so
-    # two DIFFERENT businesses that share a name prefix AND a postcode collide
-    # on it (e.g. "Fitness First" vs "Fitness Studio" at the same postcode).
-    # When the key matches but the FULL normalized names diverge, do NOT merge
-    # - flag a possible duplicate for a human and provision this signing as its
-    # own client (never auto-merge; merges are hard to undo).
-    if sibling is not None and names_materially_diverge(
-        client.business_name, sibling.business_name
-    ):
-        await session.execute(
-            text(
-                "UPDATE clients "
-                "SET possible_duplicate = true, possible_duplicate_of = :sibling_id "
-                "WHERE id = :client_id"
-            ),
-            {"sibling_id": sibling.id, "client_id": client_id},
-        )
+    if len(candidates) == _SIBLING_CANDIDATE_LIMIT:
+        # Never silently truncate: a match past the cap would look identical to
+        # "no returning client found" and quietly provision a duplicate.
         log.warning(
-            "S1-26c possible duplicate: identity_key collision with divergent names",
+            "S1-26c sibling candidate cap hit; a match beyond the cap would be missed",
             extra={
                 "client_id": str(client_id),
-                "sibling_client_id": str(sibling.id),
                 "identity_key": client.identity_key,
+                "limit": _SIBLING_CANDIDATE_LIMIT,
             },
         )
-        sibling = None  # fall through to normal provisioning (own root)
+
+    # S1-26c dedup guard, TWO bars (see `_pick_sibling`). (1) The identity key
+    # truncates the name to 6 chars, so two DIFFERENT businesses sharing a name
+    # prefix AND a postcode collide on it ("Fitness First" vs "Fitness Studio");
+    # every candidate is scanned for a full-name match, not just the earliest.
+    # (2) A second signal - phone or address - must also agree, because
+    # `Company.Zip` is the COMPANY postcode rather than the studio's, so a
+    # franchisee entering their brand plus a head-office postcode produces an
+    # identical key AND identical names for two different studios. Failing
+    # either bar flags a possible duplicate and provisions this signing as its
+    # own client (never auto-merge; merges are hard to undo).
+    sibling, collision = _pick_sibling(
+        candidates,
+        client_name=client_name,
+        client_phone=client.phone,
+        client_address=client.address,
+    )
+
+    if collision is not None:
+        await _flag_possible_duplicate(session, client_id=client_id, sibling_id=collision.id)
+        log.warning(
+            "S1-26c possible duplicate: sibling collision with divergent names",
+            extra={
+                "client_id": str(client_id),
+                "sibling_client_id": str(collision.id),
+                "identity_key": client.identity_key,
+                "candidate_count": len(candidates),
+            },
+        )
 
     if sibling is not None:
         begun = await begin_action(
@@ -386,6 +652,7 @@ async def create_ghl_subaccount_core(
         contact_last_name=client.contact_last_name,
         email=client.email,
         phone=client.phone,
+        postal_code=client.postal_code,
     )
 
     begun = await begin_action(
@@ -432,15 +699,57 @@ async def create_ghl_subaccount_core(
 
     # S1-26 returning-client check (2/2): no DB sibling, so look GHL up
     # directly by email BEFORE POSTing. This catches a client that exists in
-    # GHL but not in our DB, and - critically - closes S1-25's at-least-once
-    # duplicate-create window: a retry after a lost create response finds the
-    # orphaned location here instead of creating a second one. The lookup
-    # runs on EVERY create attempt (rider a).
+    # GHL but not in our DB, and closes S1-25's at-least-once duplicate-create
+    # window: a retry after a lost create response finds the orphaned location
+    # here instead of creating a second one. The lookup runs on EVERY create
+    # attempt (rider a).
+    #
+    # S1-26c review fix (finding 1): a hit is NOT reused on the strength of the
+    # email alone. Email is the identity we deliberately moved OFF one branch
+    # earlier - reusing on it here re-conflated exactly the franchises the
+    # identity key separates, and would also rescue a row the dedup guard above
+    # had just flagged. `_classify_ghl_hit` demands the name AND the postcode;
+    # anything less provisions its own sub-account, and an UNDECIDABLE verdict
+    # also records the suspected location for a human to merge deliberately.
     try:
         existing = await ghl_client.find_location_by_email(client.email, company_id=company_id)
     except Exception as exc:
         await _record_failure(exc)
         raise
+
+    if existing is not None:
+        verdict = _classify_ghl_hit(
+            existing, client_name=client_name, client_postcode=client.postal_code
+        )
+        if verdict != _GHL_HIT_SAME_BUSINESS:
+            # Only the ambiguous verdict is a human's problem. A confident
+            # "different business" is the normal franchise / shared-mailbox
+            # path, and flagging it would bury the real cases in noise.
+            #
+            # NOT committed here: the flag rides the terminal commit below
+            # (complete_action on create success, or fail_action on failure),
+            # exactly as the DB-sibling collision flag does. An extra commit in
+            # this gap would be one more thing that can raise between the
+            # already-committed `in_progress` row and its terminal state, and
+            # anything that raises here bypasses `_record_failure` and strands
+            # the action `in_progress` forever - a silent zombie. Riding the
+            # terminal commit also makes the flag atomic with the outcome, so
+            # "flagged but no action row" is unreachable.
+            if verdict == _GHL_HIT_UNDECIDABLE:
+                await _flag_possible_duplicate(
+                    session, client_id=client_id, ghl_location_id=existing.id
+                )
+            log.info(
+                "S1-26c GHL lookup hit not reused; provisioning own sub-account",
+                extra={
+                    "client_id": str(client_id),
+                    "ghl_location_id": existing.id,
+                    "ghl_location_name": existing.name,
+                    "verdict": verdict,
+                    "has_location_postcode": bool(_location_postcode(existing)),
+                },
+            )
+            existing = None
 
     if existing is not None:
         await complete_action(
@@ -544,18 +853,33 @@ async def create_ghl_subaccount_core(
         # location before either commits its `ghl_subaccount_id`.
         inngest.Concurrency(key="event.data.client_id", limit=1, scope="fn"),
         # Per-identity cap (S1-26c): serialise processing for the same identity
-        # key so two DIFFERENT client rows for the same business (two
+        # so two DIFFERENT client rows for the same business (two
         # near-simultaneous returning signings, possibly under different emails)
         # cannot both pass the returning-client check and create duplicate
         # locations - the second waits, then finds the first as a committed DB
         # sibling. `dedup_key` (event payload) = the identity_key when present,
-        # else the unique client_id, so unidentifiable signings (NULL
-        # identity_key) each get their own bucket instead of contending on a
-        # shared empty key. The identity_key is already normalized (lowercased,
-        # punctuation-stripped), so this also closes the old S1-26 residual
+        # else `email:<normalized>`, else the unique client_id. The email tier
+        # matters: a NULL identity_key still has a DB-side dedup path (the email
+        # sibling query), so those rows must serialise with each other rather
+        # than each getting a private bucket. The identity_key is already
+        # normalized (lowercased, punctuation-stripped) and the email tier is
+        # lowercased at the producer, so this also closes the old S1-26 residual
         # where the raw-string email key failed to serialise case-only email
         # differences.
-        inngest.Concurrency(key="event.data.dedup_key", limit=1, scope="fn"),
+        #
+        # The CEL ternary is back-compat for events already QUEUED when this
+        # deploys: they predate `dedup_key` and would otherwise all land in one
+        # null bucket, letting a legacy and a fresh event for the same business
+        # run concurrently. CEL has no `??`, and Inngest's docs do not document
+        # one, so `has()` + ternary is used rather than an operator that might
+        # not exist - a rejected expression fails the ALL-OR-NOTHING function
+        # registration, which is precisely the S1-26a outage. Verified against a
+        # live registration before merge; still 2 constraints either way.
+        inngest.Concurrency(
+            key="has(event.data.dedup_key) ? event.data.dedup_key : event.data.client_id",
+            limit=1,
+            scope="fn",
+        ),
     ],
 )
 async def create_ghl_subaccount(ctx: inngest.Context) -> dict:

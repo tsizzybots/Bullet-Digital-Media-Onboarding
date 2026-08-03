@@ -31,9 +31,19 @@ PANDADOC_SIGNED_EVENT = "pandadoc.signed"
 # signed-PDF storage in R2, ...) keys off this event rather than
 # `pandadoc.signed` directly, so `client_id` is guaranteed to exist in the
 # payload they receive. Data payload: {client_id, onboarding_event_id,
-# document_id, email, account}. `account` (S1-25c) is propagated from
+# document_id, email, account, dedup_key}. `account` (S1-25c) is propagated from
 # `pandadoc.signed` so the signed-PDF worker downloads with the matching
 # PandaDoc API key.
+#
+# `dedup_key` (S1-26c) is a CONCURRENCY CONTRACT, not informational: the GHL
+# sub-account worker declares a per-key `Concurrency(limit=1)` on it, so two
+# signings for the same business serialise through the returning-client check
+# instead of both seeing "no sibling" and both provisioning. Producers MUST set
+# it - `identity_key` when computable, else `email:<lowercased>`, else the
+# client_id. The consumer's key expression falls back to `client_id` when the
+# field is absent, which stops events emitted BEFORE S1-26c (already queued when
+# it deploys) from all colliding in one null bucket; that fallback is
+# back-compat only, not a licence to omit the field.
 CLIENT_CREATED_EVENT = "client.created"
 
 # Emitted by the S1-27 Google Meet webhook (`/webhooks/google-meet`) once a

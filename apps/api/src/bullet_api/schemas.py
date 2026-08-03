@@ -160,11 +160,21 @@ class ClientDetailResponse(BaseModel):
     current_step: str
     step_entered_at: datetime
     created_at: datetime
-    # S1-26c: raised when this client's identity key collided with an existing
-    # client's but the full business names diverged (a possible duplicate for a
-    # human to review/merge). `possible_duplicate_of` points at the candidate.
+    # S1-26c: raised when a returning-client match was found but could not be
+    # corroborated - an identity-key collision whose full business names
+    # diverged, or a GHL location found by email that we could not prove is the
+    # same site. The client is provisioned its OWN sub-account either way; the
+    # flag is the human-review signal. Exactly one candidate field is populated:
+    # `possible_duplicate_of` for a clients-row collision,
+    # `possible_duplicate_ghl_id` for a GHL-location one, so the dashboard can
+    # name what to merge into rather than sending someone hunting for it.
     possible_duplicate: bool
     possible_duplicate_of: str | None
+    possible_duplicate_ghl_id: str | None
+    # Set when this signing was linked into an EXISTING client's sub-account as
+    # a returning client. Surfaced so an auto-link is visible and reviewable,
+    # not just an id silently shared between two rows.
+    parent_client_id: str | None
     sales_summary: list[KnowledgeEntry]
     actions: list[PlatformActionItem]
     hubspot_contact_id: str | None

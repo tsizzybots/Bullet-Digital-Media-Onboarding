@@ -357,10 +357,14 @@ export interface components {
             meta_ad_account_id: string | null;
             /** Pandadoc Document Id */
             pandadoc_document_id: string | null;
+            /** Parent Client Id */
+            parent_client_id: string | null;
             /** Phone */
             phone: string | null;
             /** Possible Duplicate */
             possible_duplicate: boolean;
+            /** Possible Duplicate Ghl Id */
+            possible_duplicate_ghl_id: string | null;
             /** Possible Duplicate Of */
             possible_duplicate_of: string | null;
             /** Sales Summary */
