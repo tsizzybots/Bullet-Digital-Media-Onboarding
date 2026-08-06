@@ -514,7 +514,7 @@ async def _invoke_wrapper(monkeypatch, *, data=None, core_exc=None):
     monkeypatch.setattr(sales_knowledge_module, "store_sales_knowledge_core", _core)
     monkeypatch.setattr(sales_knowledge_module, "get_embedding_client", lambda: object())
     monkeypatch.setattr(sales_knowledge_module, "AsyncSessionLocal", lambda: _FakeSession())
-    return await store_sales_knowledge._handler(_ctx(data), None)
+    return await store_sales_knowledge._handler(_ctx(data))
 
 
 async def test_malformed_event_missing_field_dead_letters(monkeypatch) -> None:

@@ -314,7 +314,7 @@ async def summarise_sales_call_core(
         inngest.Concurrency(key="event.data.transcript_id", limit=1, scope="fn"),
     ],
 )
-async def summarise_sales_call(ctx: inngest.Context, step: inngest.Step) -> dict:
+async def summarise_sales_call(ctx: inngest.Context) -> dict:
     """Inngest wrapper: build production deps, run the core, classify failures.
 
     Raises:

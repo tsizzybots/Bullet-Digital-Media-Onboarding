@@ -398,7 +398,7 @@ async def _wrapper_pandadoc_client(monkeypatch: pytest.MonkeyPatch, event_data: 
         ),
         run_id="run_test",
     )
-    await store_signed_pdf._handler(ctx, None)
+    await store_signed_pdf._handler(ctx)
     return captured["client"]
 
 
