@@ -237,13 +237,6 @@ def main() -> None:
     safe no-op rather than a crash. (S1-25c: checks every configured account,
     not just a single key.)
     """
-    # These four are imported HERE rather than at module top, matching the
-    # pre-existing pattern in this CLI entrypoint: the module is also imported
-    # by the test suite and by `_run`, and keeping settings/logging/Sentry
-    # wiring inside `main()` means importing the module never has the side
-    # effect of reading config. Hoisting all four is a separate cleanup, not a
-    # review-fix; the project rule against deferred imports is noted and this
-    # is a deliberate local-consistency exception, not an oversight.
     from bullet_api.config import get_settings
     from bullet_api.logging_config import configure_logging
     from bullet_api.observability.sentry import init_sentry
@@ -254,8 +247,11 @@ def main() -> None:
     # This process is the SAFETY NET for missed signings, and until now it was
     # the one process that reported nothing: `init_sentry` was never called
     # here, so a reconciliation crash was invisible outside the Render cron log
-    # (review round 4). It is still a no-op unless SENTRY_DSN is set on the
-    # cron's own env group - that is an ops step, not a code one.
+    # (review round 4). `render.yaml` gives this service its OWN `SENTRY_DSN`
+    # (`sync: false`) because it SHARES `bullet-staging-env`, which declares no
+    # DSN - without that entry this call would return at its first line forever
+    # and the fix would be cosmetic (review round 5). Setting the value is
+    # still an ops step, not a code one.
     #
     # GUARDED, for the same reason the Inngest middleware hooks are: telemetry
     # must never be able to stop the work. `sentry_sdk.init` can raise on a

@@ -58,7 +58,10 @@ FILTERED = "[Filtered]"
 
 # Denylisted keys (lowercased). Any mapping key whose `.lower()` is in this
 # set has its value replaced wholesale with FILTERED, no matter what the
-# value is. Mirrors the dashboard denylist exactly.
+# value is. Mirrors the dashboard denylist (`sentry-scrub.ts`) EXCEPT for
+# `x-inngest-signature`, which is deliberately server-only: the dashboard
+# never sees that header, and the divergence is recorded here rather than
+# left for someone to discover by diffing the two lists (review round 5).
 DENYLIST_KEYS: frozenset[str] = frozenset(
     {
         # The Inngest request signature, logged on the SAME event as the body
@@ -190,7 +193,7 @@ def init_sentry(settings: Any) -> None:
 
     When `sentry_dsn` is empty this returns immediately and Sentry is never
     INITIALISED, so local / CI / test runs send nothing. Note the module is
-    still IMPORTED regardless: `worker/inngest_sentry.py` imports `sentry_sdk`
+    still IMPORTED regardless: `observability/inngest_sentry.py` imports `sentry_sdk`
     at module top and `worker/_inngest.py` imports that unconditionally (only
     the middleware REGISTRATION is DSN-gated). The deferred import below is
     therefore about init cost, not about avoiding the dependency.
@@ -231,6 +234,15 @@ def init_sentry(settings: Any) -> None:
         # `pain_points` and `red_flags`. None of those are denylisted keys, and
         # scrubbing works on key names rather than nested payload shapes.
         max_request_body_size="never",
+        # Cap every string BEFORE `scrub_event` regex-walks it. The default is
+        # None in sentry-sdk 2.61.1, so nothing truncates - and `_EMAIL_RE` is
+        # quadratic on a long unbroken `[\w.+-]` run with no `@`. Review round 5
+        # measured it: a realistic 15.7 KB JSON error body costs ~1.07 ms
+        # (punctuation breaks the run), but a 20 KB body containing one
+        # unbroken token costs ~1,911 ms - inline, on the event loop shared
+        # with the webhook and the dashboard API. Reachable rather than
+        # typical, and a one-line cap removes the pathological case.
+        max_value_length=2048,
         before_send=scrub_event,
         before_send_transaction=scrub_event,
     )

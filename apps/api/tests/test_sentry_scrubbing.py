@@ -277,6 +277,23 @@ def test_request_bodies_are_never_attached(monkeypatch: pytest.MonkeyPatch) -> N
     assert _init_kwargs(monkeypatch)["max_request_body_size"] == "never"
 
 
+def test_pii_and_scrub_hooks_are_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 5: the round-4 CHANGELOG claimed these were pinned. They were not -
+    the assertion was dropped as out-of-scope and the claim was not updated, so
+    the docs described coverage that did not exist. Asserted now."""
+    kwargs = _init_kwargs(monkeypatch)
+    assert kwargs["send_default_pii"] is False
+    assert kwargs["before_send"] is scrub_event
+    assert kwargs["before_send_transaction"] is scrub_event
+
+
+def test_exception_message_length_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_EMAIL_RE` is quadratic on a long unbroken token run, and nothing
+    truncates by default in 2.61.1, so an uncapped GHL error body would be
+    regex-walked inline on the event loop."""
+    assert _init_kwargs(monkeypatch)["max_value_length"] == 2048
+
+
 def test_inngest_signature_header_is_denylisted() -> None:
     """The signature is logged on the same event as the body it authenticates,
     there is no freshness check in 0.5.18, and the body is JCS-canonicalised

@@ -27,61 +27,40 @@ our error reporting.
 PROVENANCE (keep this current - it is what makes an SDK bump diffable)
     upstream: inngest/experimental/sentry_middleware.py
     version:  inngest 0.5.18
-    vendored: 29/07/2026, hardened 06/08/2026
-The 06/08 hardening deliberately DIVERGES from upstream (see below); upstream
-is no longer a byte-for-byte reference, so diff behaviour, not text.
+    vendored: 29/07/2026, hardened 06/08/2026 and 07/08/2026
+This file deliberately DIVERGES from upstream - see the DIVERGENCES list
+below. Upstream is no longer a byte-for-byte reference, so diff BEHAVIOUR
+against that list, not text.
 
 `MiddlewareSync` (not the async `Middleware`) is correct even though every
 function here is async: the middleware manager holds
 `list[Middleware | MiddlewareSync]` and awaits/calls each hook appropriately,
 and none of these hooks do I/O worth making async.
 
-THE HARDENING, AND WHY IT IS NOT OPTIONAL
------------------------------------------
-Upstream lets a hook raise. That is not merely "lost telemetry" - it CHANGES
-THE OUTCOME OF THE JOB. Verified in the installed SDK:
+THE TWO RULES, AND WHY THEY ARE NOT OPTIONAL
+--------------------------------------------
+**No hook may RAISE.** The SDK returns `CallResult(err)` OVER an
+already-successful result when a hook raises (`function.py:181-186`), and any
+non-Inngest exception is retriable (`errors.py:266-269`). Nothing here uses
+`ctx.step.run`, so the retry re-executes every side effect - the GHL location
+POST, the R2 upload, the emit - and with the S1-26d indexing lag that can mint
+a duplicate sub-account in the live agency. Hence every hook body is wrapped.
 
-    inngest/_internal/function.py:181-186
-        err = await middleware.transform_output(call_res)
-        if isinstance(err, Exception):
-            return execution_lib.CallResult(err)   # <- REPLACES the success
+**No hook may BLOCK.** Hooks are called inline on the event loop, so a
+`sentry_sdk.flush()` here waited on the process-wide transport queue and
+reached the same duplicate-sub-account outcome via httpx timeouts. The flush
+and the whole `before_response` override were therefore DELETED, not tuned: on
+a long-lived Render web service the BackgroundWorker drains continuously, so it
+bought nothing. `flush_async` exists if that ever changes.
 
-    inngest/_internal/errors.py:266-269
-        def is_retriable(err): return True for any non-Inngest exception
+Full reasoning: CHANGELOG entries for 06/08 and 07/08.
 
-So a Sentry blip during `transform_output` converts an ALREADY-SUCCESSFUL run
-into a retriable failure. None of our handlers use `ctx.step.run`, so nothing
-is memoised and the retry re-executes every side effect: the GHL location
-POST, the R2 upload, the `client.created` emit. Combined with the GHL search
-indexing lag (S1-26d), that can mint a DUPLICATE SUB-ACCOUNT IN BULLET'S LIVE
-AGENCY.
-
-Hence the rule enforced below: **no hook may ever raise.** Telemetry is not
-allowed to corrupt the thing it observes. Every hook body is wrapped, and a
-failure inside one is logged and swallowed.
-
-AND NO HOOK MAY BLOCK, EITHER (round 4)
----------------------------------------
-The first fix bounded a `sentry_sdk.flush()` in `before_response` to 0.5s. That
-stopped it RAISING but not BLOCKING, which reaches the same duplicate-sub-account
-outcome by a different door. `before_response` is a SYNC `MiddlewareSync` hook
-invoked inline (`await transforms.maybe_await(m.before_response())`), so the
-coroutine never yields, and `flush` waits on the PROCESS-WIDE transport queue
-(`BackgroundWorker.flush` -> `_wait_flush` -> `_timed_queue_join` ->
-`queue.all_tasks_done.wait(...)`), not on this run's event.
-
-Under a GHL or R2 outage burst every failing run pays that wait, serialised on
-one transport thread - and the stall does NOT pause httpx timers. A GHL POST the
-server already ACCEPTED can therefore blow its 10s read deadline, raise a
-transient error and be retried; nothing is memoised, so the retry re-POSTs the
-location, and the S1-26d indexing lag means the returning-client check cannot see
-the orphan. It also stalls `/healthz`, the PandaDoc webhook and the dashboard API
-on the same dyno.
-
-So the flush is GONE, along with the whole `before_response` override. On a
-long-lived Render web service the BackgroundWorker drains continuously, so
-flushing bought nothing to begin with. `sentry_sdk.flush_async` exists if this
-ever needs revisiting - but "nothing to flush" beats "flush cheaply".
+DIVERGENCES FROM UPSTREAM (keep this list current - it is what a bump diffs against)
+    1. every hook body wrapped in try/except
+    2. `__init__` wrapped
+    3. `before_response` override removed entirely
+    4. `_captured` flag removed (it only gated the deleted flush)
+    5. `ctx.attempt` tagged
 """
 
 from __future__ import annotations

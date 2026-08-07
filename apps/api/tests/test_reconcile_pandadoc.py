@@ -331,34 +331,43 @@ async def test_run_isolates_accounts_a_later_failure_does_not_undo_an_earlier_on
     assert completed == ["uk"]
 
 
-def test_main_initialises_sentry_and_survives_it_failing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_initialises_sentry_and_reconciles_even_if_sentry_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The reconcile cron is the SAFETY NET for missed signings.
 
-    Two properties, both load-bearing:
+    Two properties, and BOTH must be proven against a run that actually reaches
+    the reconciliation:
 
-    1. It must initialise Sentry - it was the one process reporting nothing, so
-       a crash in the recovery job was invisible outside the Render cron log
-       (review round 4).
-    2. Sentry failing must NOT stop the reconciliation. `sentry_sdk.init` can
-       raise on a malformed DSN, and before this the cron ran regardless - so an
-       unguarded call would let a typo'd env var silently disable recovery.
-       That is the same "telemetry must never break the job" rule the Inngest
-       middleware hooks follow.
+    1. It initialises Sentry - it was the one process reporting nothing.
+    2. Sentry failing does NOT stop the reconciliation.
+
+    The round-4 version of this test stubbed `api_accounts` to `[]`, so `main()`
+    early-returned two lines after `init_sentry` and `_run()` was never reached
+    - there was no reconciliation to be stopped, and moving `asyncio.run(_run())`
+    inside the `try` still passed. It proved neither property while being
+    recorded as mutation-verified (caught in review round 5). This version
+    configures an account so `_run()` genuinely executes.
     """
     from bullet_api.crons import reconcile_pandadoc as mod
 
-    called: list[str] = []
+    calls: list[str] = []
 
     def _boom(_settings: object) -> None:
-        called.append("init_sentry")
+        calls.append("init_sentry")
         raise RuntimeError("malformed DSN")
 
+    async def _fake_run() -> mod.ReconcileResult:
+        calls.append("_run")
+        return mod.ReconcileResult(checked=0, created=0)
+
     monkeypatch.setattr("bullet_api.observability.sentry.init_sentry", _boom)
-    # No PandaDoc account configured -> main() exits early AFTER init_sentry,
-    # so this isolates the wiring without touching the network.
-    monkeypatch.setattr(mod, "api_accounts", lambda _s: [], raising=False)
-    monkeypatch.setattr("bullet_api.pandadoc.accounts.api_accounts", lambda _s: [])
+    monkeypatch.setattr("bullet_api.pandadoc.accounts.api_accounts", lambda _s: ["uk"])
+    monkeypatch.setattr(mod, "_run", _fake_run)
 
     mod.main()
 
-    assert called == ["init_sentry"], "main() must initialise Sentry"
+    # Sentry was initialised AND the reconciliation still ran despite it raising.
+    assert calls == ["init_sentry", "_run"], (
+        "telemetry must never stop the recovery job - got " + repr(calls)
+    )

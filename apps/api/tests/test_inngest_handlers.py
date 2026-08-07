@@ -278,7 +278,6 @@ def test_no_hook_can_ever_raise(hook: str, args: object) -> None:
     with (
         patch.object(inngest_sentry.sentry_sdk, "set_tag", side_effect=boom),
         patch.object(inngest_sentry.sentry_sdk, "capture_exception", side_effect=boom),
-        patch.object(inngest_sentry.sentry_sdk, "flush", side_effect=boom),
     ):
         if args == "INPUT":
             mw.transform_input(_ctx(), _function(), Mock())
@@ -318,6 +317,12 @@ def test_vendored_hooks_still_match_the_sdk_contract() -> None:
     makes the next bump fail loudly instead of silently.
     """
     for hook in ("transform_input", "transform_output", "__init__"):
+        assert hook in SentryMiddleware.__dict__, (
+            f"SentryMiddleware no longer OVERRIDES {hook!r}. `getattr` resolves "
+            "through inheritance, so without this the comparison below would "
+            "silently compare the SDK base against itself and pass - which is "
+            "exactly what happened when `before_response` was deleted."
+        )
         base = getattr(inngest.MiddlewareSync, hook, None)
         assert base is not None, (
             f"inngest.MiddlewareSync no longer defines {hook!r}, so our vendored "
