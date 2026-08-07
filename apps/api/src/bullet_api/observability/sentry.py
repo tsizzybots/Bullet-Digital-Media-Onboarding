@@ -194,6 +194,19 @@ def init_sentry(settings: Any) -> None:
         traces_sample_rate=settings.sentry_traces_sample_rate,
         # Belt-and-braces with the EventScrubber + scrub_event hook below.
         send_default_pii=False,
+        # Do NOT serialise frame locals into events. This defaults to True, and
+        # `Settings` holds its secrets as plain `str` (no `SecretStr`), while
+        # SEVEN modules bind `settings = get_settings()` as a frame local -
+        # `worker/_inngest.py`, `client_record.py`, `ghl_subaccount.py`,
+        # `signed_pdf.py`, `meet_transcript.py`, `embedding_client.py`,
+        # `summary_client.py`. So the FIRST captured exception in any of those
+        # frames would ship `ghl_agency_api_key`, `inngest_signing_key`,
+        # `resend_api_key` and `email_token_secret` to Sentry in plaintext.
+        # `scrub_event` cannot save us: it matches on KEY names, and these
+        # arrive nested inside a `settings` repr rather than as top-level keys.
+        # Turning this off is the one-line containment; making the secrets
+        # `SecretStr` is the structural fix and has its own ticket.
+        include_local_variables=False,
         before_send=scrub_event,
         before_send_transaction=scrub_event,
     )
