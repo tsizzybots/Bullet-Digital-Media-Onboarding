@@ -329,3 +329,36 @@ async def test_run_isolates_accounts_a_later_failure_does_not_undo_an_earlier_on
     # UK ran to completion (its core committed) BEFORE int raised; the int
     # failure was neither swallowed nor allowed to undo UK's pass.
     assert completed == ["uk"]
+
+
+def test_main_initialises_sentry_and_survives_it_failing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reconcile cron is the SAFETY NET for missed signings.
+
+    Two properties, both load-bearing:
+
+    1. It must initialise Sentry - it was the one process reporting nothing, so
+       a crash in the recovery job was invisible outside the Render cron log
+       (review round 4).
+    2. Sentry failing must NOT stop the reconciliation. `sentry_sdk.init` can
+       raise on a malformed DSN, and before this the cron ran regardless - so an
+       unguarded call would let a typo'd env var silently disable recovery.
+       That is the same "telemetry must never break the job" rule the Inngest
+       middleware hooks follow.
+    """
+    from bullet_api.crons import reconcile_pandadoc as mod
+
+    called: list[str] = []
+
+    def _boom(_settings: object) -> None:
+        called.append("init_sentry")
+        raise RuntimeError("malformed DSN")
+
+    monkeypatch.setattr("bullet_api.observability.sentry.init_sentry", _boom)
+    # No PandaDoc account configured -> main() exits early AFTER init_sentry,
+    # so this isolates the wiring without touching the network.
+    monkeypatch.setattr(mod, "api_accounts", lambda _s: [], raising=False)
+    monkeypatch.setattr("bullet_api.pandadoc.accounts.api_accounts", lambda _s: [])
+
+    mod.main()
+
+    assert called == ["init_sentry"], "main() must initialise Sentry"

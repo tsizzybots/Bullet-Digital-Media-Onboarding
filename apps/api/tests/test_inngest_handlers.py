@@ -10,7 +10,7 @@ invocation therefore raised
 
 so NO function ever executed - in any environment - for weeks.
 
-The suite had 279 passing tests and caught none of it, because every existing
+The suite was green and caught none of it, because every existing
 test either calls the pure `*_core` helper directly or asserts declarations
 via `fn.get_config("")`. Nothing exercised the path Inngest actually uses.
 These tests close that hole: they assert the registered handlers are callable
@@ -94,8 +94,12 @@ def test_handler_takes_exactly_one_positional_arg(fn: object) -> None:
 def test_handler_binds_to_the_sdk_call_shape(fn: object) -> None:
     """The handler must BIND to `handler(ctx)` - the exact call the SDK makes.
 
-    Strictly stronger than counting positional parameters above, and it closes
-    two holes that count leaves open:
+    COMPLEMENTARY to the arity count above, NOT stronger than it - an earlier
+    version of this docstring claimed "strictly stronger", which is false and
+    would invite someone to delete the arity test. `(ctx, step=None)` BINDS
+    fine here but has two positional params, so only the arity test catches it;
+    `(ctx, *, step)` has one positional param, so only this test catches it.
+    Both are required. This one closes two holes the count leaves open:
 
     1. A REQUIRED KEYWORD-ONLY parameter (`async def h(ctx, *, step)`) has one
        positional param, so the count assertion passes - but the SDK's
@@ -249,29 +253,9 @@ def test_transform_output_captures_only_when_there_is_an_error() -> None:
         capture.assert_called_once_with(boom)
 
 
-def test_flush_is_bounded_and_only_runs_when_something_was_captured() -> None:
-    """An unbounded flush blocking-joins the transport for up to 2s ON THE
-    EVENT LOOP shared with the PandaDoc webhook and the dashboard API."""
-    mw, _ = _middleware()
-    with patch.object(inngest_sentry.sentry_sdk, "flush") as flush:
-        mw.before_response()
-        assert flush.call_count == 0, "nothing captured - must not flush at all"
-
-    with patch.object(inngest_sentry.sentry_sdk, "capture_exception"):
-        mw.transform_output(Mock(error=RuntimeError("x")))
-    with patch.object(inngest_sentry.sentry_sdk, "flush") as flush:
-        mw.before_response()
-        flush.assert_called_once()
-        assert flush.call_args.kwargs["timeout"] == pytest.approx(0.5)
-
-
-# --- THE regression guard for P1-1 -----------------------------------------
-
-
 @pytest.mark.parametrize(
     ("hook", "args"),
     [
-        ("before_response", ()),
         ("transform_input", "INPUT"),
         ("transform_output", "OUTPUT"),
     ],
@@ -290,10 +274,6 @@ def test_no_hook_can_ever_raise(hook: str, args: object) -> None:
     So: Sentry blowing up must be survivable, every time.
     """
     mw, client = _middleware()
-    # Make the middleware believe it captured something, so before_response
-    # actually reaches the flush it is supposed to survive.
-    mw._captured = True
-
     boom = RuntimeError("sentry is down")
     with (
         patch.object(inngest_sentry.sentry_sdk, "set_tag", side_effect=boom),
@@ -305,7 +285,7 @@ def test_no_hook_can_ever_raise(hook: str, args: object) -> None:
         elif args == "OUTPUT":
             mw.transform_output(Mock(error=RuntimeError("handler failed")))
         else:
-            mw.before_response()
+            raise AssertionError(f"unhandled hook {hook!r} - add a branch, do not fall through")
 
     # Swallowed, and loudly enough to diagnose.
     assert client.logger.exceptions, f"{hook} swallowed the failure without logging it"
@@ -321,16 +301,42 @@ def test_constructor_survives_sentry_raising() -> None:
     assert client.logger.exceptions
 
 
-def test_vendored_hook_names_still_exist_on_the_sdk_base() -> None:
-    """Vendoring turns what would have been a loud ImportError into a SILENT
-    no-op: if 0.5.19+ renames a hook, our override becomes a dead method that
-    is simply never called, and worker errors quietly stop reaching Sentry.
-    The version pin guards the handler contract; this guards the middleware one.
+def test_vendored_hooks_still_match_the_sdk_contract() -> None:
+    """Vendoring turns what would have been a loud `ImportError` into a SILENT
+    no-op, so the middleware contract needs the same guard the handler contract
+    has.
+
+    `hasattr` alone is not enough. An ARITY change within `>=0.5.18,<0.6` raises
+    `TypeError` at the SDK's call site - which is OUTSIDE each hook's own
+    `try/except`, so the guards inside the hooks cannot catch it. `function.py`
+    then converts that into a retriable `CallResult(err)` over an
+    already-successful result: the same duplicate-side-effect cascade the
+    round-3 P1 was about, arriving through the SDK rather than through us.
+
+    So bind each override against the base's signature. Contained today only
+    because `uv.lock` pins 0.5.18 and Render builds `--frozen`; this is what
+    makes the next bump fail loudly instead of silently.
     """
-    for hook in ("before_response", "transform_input", "transform_output"):
-        assert hasattr(inngest.MiddlewareSync, hook), (
+    for hook in ("transform_input", "transform_output", "__init__"):
+        base = getattr(inngest.MiddlewareSync, hook, None)
+        assert base is not None, (
             f"inngest.MiddlewareSync no longer defines {hook!r}, so our vendored "
             "override is now dead code and worker errors are silently unreported."
+        )
+        ours = getattr(SentryMiddleware, hook)
+        # Compare ARITY and parameter KINDS, not names. The SDK dispatches
+        # positionally (`m.transform_output(result)`), so a name difference is
+        # harmless - ours says `output` because that is what upstream's
+        # experimental middleware says, while the base says `result`. What
+        # would actually break us is the COUNT changing.
+        base_kinds = [p.kind for p in inspect.signature(base).parameters.values()]
+        our_kinds = [p.kind for p in inspect.signature(ours).parameters.values()]
+        assert our_kinds == base_kinds, (
+            f"SentryMiddleware.{hook} takes {len(our_kinds)} params but the SDK "
+            f"base now declares {len(base_kinds)}. The SDK calls hooks "
+            "POSITIONALLY, and an arity mismatch raises TypeError OUTSIDE the "
+            "hook's try/except, which the SDK turns into a retriable failure "
+            "over an already-successful run."
         )
 
 
@@ -345,8 +351,16 @@ def test_every_decorated_function_is_actually_in_the_registry() -> None:
     dead code.
 
     Scans the worker package for every `inngest.Function` object and asserts
-    set-equality with the registry, so the omission fails here instead of in
+    none is MISSING from the registry, so the omission fails here instead of in
     production.
+
+    Deliberately precise about what this does NOT do: it checks ONE direction
+    (decorated -> registered), uses non-recursive `pkgutil.iter_modules`, and
+    does not assert the scan found anything - so it cannot catch a stale entry
+    in `FUNCTIONS`, a handler in a sub-package, or a scan that silently
+    discovered nothing. Tightening it is review-round-4 P2-6, deferred at the
+    reviewer's own recommendation. An earlier version of this docstring called
+    it "set-equality", which it is not.
     """
     import importlib
     import pkgutil
@@ -368,31 +382,3 @@ def test_every_decorated_function_is_actually_in_the_registry() -> None:
         "Add them to bullet_api.worker.client.FUNCTIONS - until then their "
         "trigger events fire and nothing runs, with no error anywhere."
     )
-
-
-def test_captured_flag_does_not_leak_between_concurrent_runs() -> None:
-    """`_captured` is PER-INVOCATION state, and that is load-bearing.
-
-    Several Inngest functions can be in flight in this process at once. If the
-    middleware were a shared singleton, one failing run would set the flag and
-    every later SUCCESSFUL run would then pay the flush - and the flag would
-    never reset, so the cost would be permanent after the first error.
-
-    It is safe because the SDK instantiates the class per invocation:
-    `MiddlewareManager.add()` does `middleware(self.client, self._raw_request)`,
-    and `from_client` is called per incoming request (`comm_lib/handler.py`).
-    This test pins that assumption so it fails loudly if the SDK ever switches
-    to sharing instances.
-    """
-    failing, _ = _middleware()
-    clean, _ = _middleware()
-
-    with patch.object(inngest_sentry.sentry_sdk, "capture_exception"):
-        failing.transform_output(Mock(error=RuntimeError("boom")))
-
-    assert failing._captured is True
-    assert clean._captured is False, "middleware state leaked between instances"
-
-    with patch.object(inngest_sentry.sentry_sdk, "flush") as flush:
-        clean.before_response()
-        assert flush.call_count == 0, "a clean run must not flush because another run failed"

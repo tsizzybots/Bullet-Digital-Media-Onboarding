@@ -237,12 +237,37 @@ def main() -> None:
     safe no-op rather than a crash. (S1-25c: checks every configured account,
     not just a single key.)
     """
+    # These four are imported HERE rather than at module top, matching the
+    # pre-existing pattern in this CLI entrypoint: the module is also imported
+    # by the test suite and by `_run`, and keeping settings/logging/Sentry
+    # wiring inside `main()` means importing the module never has the side
+    # effect of reading config. Hoisting all four is a separate cleanup, not a
+    # review-fix; the project rule against deferred imports is noted and this
+    # is a deliberate local-consistency exception, not an oversight.
     from bullet_api.config import get_settings
     from bullet_api.logging_config import configure_logging
+    from bullet_api.observability.sentry import init_sentry
     from bullet_api.pandadoc.accounts import api_accounts
 
     configure_logging()
-    if not api_accounts(get_settings()):
+    settings = get_settings()
+    # This process is the SAFETY NET for missed signings, and until now it was
+    # the one process that reported nothing: `init_sentry` was never called
+    # here, so a reconciliation crash was invisible outside the Render cron log
+    # (review round 4). It is still a no-op unless SENTRY_DSN is set on the
+    # cron's own env group - that is an ops step, not a code one.
+    #
+    # GUARDED, for the same reason the Inngest middleware hooks are: telemetry
+    # must never be able to stop the work. `sentry_sdk.init` can raise on a
+    # malformed DSN, and before this line existed the cron ran regardless - so
+    # an unguarded call would mean a typo'd env var silently disables the
+    # recovery job for missed signings. Exactly the failure this PR is about,
+    # reached from the other end.
+    try:
+        init_sentry(settings)
+    except Exception:
+        log.exception("Sentry init failed; continuing reconciliation without it")
+    if not api_accounts(settings):
         log.warning("No PandaDoc API key configured; reconciliation disabled, exiting 0.")
         return
     result = asyncio.run(_run())

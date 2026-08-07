@@ -59,6 +59,29 @@ AGENCY.
 Hence the rule enforced below: **no hook may ever raise.** Telemetry is not
 allowed to corrupt the thing it observes. Every hook body is wrapped, and a
 failure inside one is logged and swallowed.
+
+AND NO HOOK MAY BLOCK, EITHER (round 4)
+---------------------------------------
+The first fix bounded a `sentry_sdk.flush()` in `before_response` to 0.5s. That
+stopped it RAISING but not BLOCKING, which reaches the same duplicate-sub-account
+outcome by a different door. `before_response` is a SYNC `MiddlewareSync` hook
+invoked inline (`await transforms.maybe_await(m.before_response())`), so the
+coroutine never yields, and `flush` waits on the PROCESS-WIDE transport queue
+(`BackgroundWorker.flush` -> `_wait_flush` -> `_timed_queue_join` ->
+`queue.all_tasks_done.wait(...)`), not on this run's event.
+
+Under a GHL or R2 outage burst every failing run pays that wait, serialised on
+one transport thread - and the stall does NOT pause httpx timers. A GHL POST the
+server already ACCEPTED can therefore blow its 10s read deadline, raise a
+transient error and be retried; nothing is memoised, so the retry re-POSTs the
+location, and the S1-26d indexing lag means the returning-client check cannot see
+the orphan. It also stalls `/healthz`, the PandaDoc webhook and the dashboard API
+on the same dyno.
+
+So the flush is GONE, along with the whole `before_response` override. On a
+long-lived Render web service the BackgroundWorker drains continuously, so
+flushing bought nothing to begin with. `sentry_sdk.flush_async` exists if this
+ever needs revisiting - but "nothing to flush" beats "flush cheaply".
 """
 
 from __future__ import annotations
@@ -67,14 +90,6 @@ import typing
 
 import inngest
 import sentry_sdk
-
-# Bound the flush so it cannot stall the event loop. `sentry_sdk.flush()` with
-# no argument falls back to `shutdown_timeout` (2.0s by default) and
-# BLOCKING-joins the transport - on the same loop that serves the PandaDoc
-# webhook and the dashboard API. Telemetry does not deserve two seconds of the
-# request loop, so we cap it hard and accept dropping an event under a slow
-# Sentry rather than degrading the app.
-_FLUSH_TIMEOUT_SECONDS = 0.5
 
 
 class SentryMiddleware(inngest.MiddlewareSync):
@@ -100,9 +115,6 @@ class SentryMiddleware(inngest.MiddlewareSync):
         # Kept so the hooks can log without reaching for a module-level logger,
         # and so a hook failure is attributable to the app it came from.
         self._logger = client.logger
-        # Set by `transform_output`; read by `before_response` so a flush only
-        # happens when there is actually something to send.
-        self._captured = False
 
         try:
             if sentry_sdk.is_initialized() is False:
@@ -116,17 +128,6 @@ class SentryMiddleware(inngest.MiddlewareSync):
             # A constructor raise would fail the run before the handler is even
             # called, so this is guarded like every other hook.
             client.logger.exception("Sentry middleware __init__ failed; continuing without it")
-
-    def before_response(self) -> None:
-        try:
-            # Inngest invocations are short-lived HTTP requests, so an event
-            # buffered at return time can be lost when the worker goes idle.
-            # Only flush when something was captured - on the overwhelmingly
-            # common success path this hook then costs nothing.
-            if self._captured:
-                sentry_sdk.flush(timeout=_FLUSH_TIMEOUT_SECONDS)
-        except Exception:
-            self._logger.exception("Sentry middleware before_response failed; run unaffected")
 
     def transform_input(
         self,
@@ -159,7 +160,6 @@ class SentryMiddleware(inngest.MiddlewareSync):
             # report it.
             if output.error:
                 sentry_sdk.capture_exception(output.error)
-                self._captured = True
         except Exception:
             self._logger.exception("Sentry middleware transform_output failed; run unaffected")
 
