@@ -252,7 +252,7 @@ async def store_signed_pdf_core(
         inngest.Concurrency(key="event.data.client_id", limit=1, scope="fn"),
     ],
 )
-async def store_signed_pdf(ctx: inngest.Context, step: inngest.Step) -> dict:
+async def store_signed_pdf(ctx: inngest.Context) -> dict:
     """Inngest wrapper: build production deps, run the core, classify failures.
 
     Raises:

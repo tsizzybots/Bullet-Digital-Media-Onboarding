@@ -522,7 +522,7 @@ async def create_ghl_subaccount_core(
         inngest.Concurrency(key="event.data.email", limit=1, scope="fn"),
     ],
 )
-async def create_ghl_subaccount(ctx: inngest.Context, step: inngest.Step) -> dict:
+async def create_ghl_subaccount(ctx: inngest.Context) -> dict:
     """Inngest wrapper: build production deps, run the core, translate
     NonRetriable failures.
 

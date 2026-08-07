@@ -329,3 +329,45 @@ async def test_run_isolates_accounts_a_later_failure_does_not_undo_an_earlier_on
     # UK ran to completion (its core committed) BEFORE int raised; the int
     # failure was neither swallowed nor allowed to undo UK's pass.
     assert completed == ["uk"]
+
+
+def test_main_initialises_sentry_and_reconciles_even_if_sentry_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reconcile cron is the SAFETY NET for missed signings.
+
+    Two properties, and BOTH must be proven against a run that actually reaches
+    the reconciliation:
+
+    1. It initialises Sentry - it was the one process reporting nothing.
+    2. Sentry failing does NOT stop the reconciliation.
+
+    The round-4 version of this test stubbed `api_accounts` to `[]`, so `main()`
+    early-returned two lines after `init_sentry` and `_run()` was never reached
+    - there was no reconciliation to be stopped, and moving `asyncio.run(_run())`
+    inside the `try` still passed. It proved neither property while being
+    recorded as mutation-verified (caught in review round 5). This version
+    configures an account so `_run()` genuinely executes.
+    """
+    from bullet_api.crons import reconcile_pandadoc as mod
+
+    calls: list[str] = []
+
+    def _boom(_settings: object) -> None:
+        calls.append("init_sentry")
+        raise RuntimeError("malformed DSN")
+
+    async def _fake_run() -> mod.ReconcileResult:
+        calls.append("_run")
+        return mod.ReconcileResult(checked=0, created=0)
+
+    monkeypatch.setattr("bullet_api.observability.sentry.init_sentry", _boom)
+    monkeypatch.setattr("bullet_api.pandadoc.accounts.api_accounts", lambda _s: ["uk"])
+    monkeypatch.setattr(mod, "_run", _fake_run)
+
+    mod.main()
+
+    # Sentry was initialised AND the reconciliation still ran despite it raising.
+    assert calls == ["init_sentry", "_run"], (
+        "telemetry must never stop the recovery job - got " + repr(calls)
+    )

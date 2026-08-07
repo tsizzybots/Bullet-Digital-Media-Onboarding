@@ -48,6 +48,22 @@ class GhlLocation:
     raw: dict
 
 
+# Longest raw response body allowed into an exception MESSAGE. `.body` keeps
+# the full text for callers; only the human-readable message is clipped.
+# Uncapped, a 502 HTML page or a large JSON error becomes a multi-KB exception
+# string that `scrub_event` then regex-walks inline on the event loop - and
+# `_EMAIL_RE` is quadratic on a long unbroken token run (review round 5
+# measured ~1.9s for a 20 KB unbroken body). Sentry's `max_value_length` caps
+# it a second time; this caps it at the source.
+_MAX_ERROR_BODY_CHARS = 512
+
+
+def _clip(body: str) -> str:
+    if len(body) <= _MAX_ERROR_BODY_CHARS:
+        return body
+    return f"{body[:_MAX_ERROR_BODY_CHARS]}... [{len(body)} chars total]"
+
+
 class GhlError(Exception):
     """Base for all GoHighLevel API errors."""
 
@@ -62,7 +78,7 @@ class GhlClientError(GhlError):
     def __init__(self, status_code: int, body: str) -> None:
         self.status_code = status_code
         self.body = body
-        super().__init__(f"GHL returned {status_code}: {body}")
+        super().__init__(f"GHL returned {status_code}: {_clip(body)}")
 
 
 class GhlServerError(GhlError):
@@ -75,7 +91,7 @@ class GhlServerError(GhlError):
     def __init__(self, status_code: int, body: str) -> None:
         self.status_code = status_code
         self.body = body
-        super().__init__(f"GHL returned {status_code}: {body}")
+        super().__init__(f"GHL returned {status_code}: {_clip(body)}")
 
 
 class GhlClient(Protocol):

@@ -275,3 +275,15 @@ services:
     startCommand: uv run python -m bullet_api.crons.reconcile_pandadoc
     envVars:
       - fromGroup: bullet-staging-env
+      # The cron needs its OWN DSN. It shares `bullet-staging-env`, which
+      # declares SENTRY_ENVIRONMENT but NOT SENTRY_DSN - the DSN exists only as
+      # a per-service `sync: false` key on bullet-api-staging. Without this
+      # entry `init_sentry` returns at its first line forever, so the recovery
+      # job for missed signings would still report nothing while the CHANGELOG
+      # recorded it as fixed (caught in review round 5).
+      #
+      # Deliberately per-service rather than added to the shared group: the
+      # group also feeds bullet-worker-staging, and bullet-api-staging already
+      # declares its own key which a group value could shadow.
+      - key: SENTRY_DSN
+        sync: false

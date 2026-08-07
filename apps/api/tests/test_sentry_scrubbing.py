@@ -11,9 +11,14 @@ from __future__ import annotations
 import json
 import types
 
+import pytest
 import sentry_sdk
 
-from bullet_api.observability.sentry import init_sentry, scrub_event
+from bullet_api.observability.sentry import (
+    DENYLIST_KEYS,
+    init_sentry,
+    scrub_event,
+)
 
 FILTERED = "[Filtered]"
 
@@ -216,3 +221,86 @@ def test_init_sentry_noops_with_empty_dsn() -> None:
     client = sentry_sdk.get_client()
     assert not getattr(client, "dsn", None)
     assert not client.is_active()
+
+
+# ---------------------------------------------------------------------------
+# The `sentry_sdk.init` options that ARE the security controls.
+#
+# Review round 4: `include_local_variables=False` had no test, so a silent
+# revert would reopen plaintext secret capture with a fully green suite. These
+# assert the kwargs actually reach `init`, because each one is load-bearing and
+# none of them is observable from a scrubbed event.
+# ---------------------------------------------------------------------------
+
+
+def _init_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Call `init_sentry()` with a DSN and capture what it passed to `init`."""
+    import sentry_sdk
+
+    from bullet_api.observability import sentry as sentry_mod
+
+    captured: dict[str, object] = {}
+
+    def _fake_init(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(sentry_sdk, "init", _fake_init)
+    sentry_mod.init_sentry(
+        types.SimpleNamespace(
+            sentry_dsn="https://abc@o0.ingest.sentry.io/0",
+            sentry_environment="test",
+            sentry_traces_sample_rate=0.0,
+        )
+    )
+    assert captured, "init_sentry() did not call sentry_sdk.init"
+    return captured
+
+
+def test_local_variables_are_never_serialised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FIFTEEN modules bind `settings = get_settings()` as a frame local and
+    `Settings` holds its secrets as plain `str`, so with this option left at its
+    default (True) the first captured exception in any of those frames ships
+    `ghl_agency_api_key`, `inngest_signing_key`, `resend_api_key` and
+    `email_token_secret` to Sentry in plaintext. `scrub_event` cannot save us -
+    it matches KEY names, and these arrive nested inside a `settings` repr.
+    """
+    assert _init_kwargs(monkeypatch)["include_local_variables"] is False
+
+
+def test_request_bodies_are_never_attached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`send_default_pii=False` does NOT gate request bodies on FastAPI -
+    `integrations/fastapi.py` sets `request_info["data"]` unconditionally and
+    this option defaults to "medium" (10 KB). With Inngest failures now
+    captured, the body IS the event payload: for `store_sales_knowledge` that is
+    a whole `SalesCallSummary` including verbatim client speech.
+    """
+    assert _init_kwargs(monkeypatch)["max_request_body_size"] == "never"
+
+
+def test_pii_and_scrub_hooks_are_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 5: the round-4 CHANGELOG claimed these were pinned. They were not -
+    the assertion was dropped as out-of-scope and the claim was not updated, so
+    the docs described coverage that did not exist. Asserted now."""
+    kwargs = _init_kwargs(monkeypatch)
+    assert kwargs["send_default_pii"] is False
+    assert kwargs["before_send"] is scrub_event
+    assert kwargs["before_send_transaction"] is scrub_event
+
+
+def test_exception_message_length_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_EMAIL_RE` is quadratic on a long unbroken token run, and nothing
+    truncates by default in 2.61.1, so an uncapped GHL error body would be
+    regex-walked inline on the event loop."""
+    assert _init_kwargs(monkeypatch)["max_value_length"] == 2048
+
+
+def test_inngest_signature_header_is_denylisted() -> None:
+    """The signature is logged on the same event as the body it authenticates,
+    there is no freshness check in 0.5.18, and the body is JCS-canonicalised
+    before the HMAC - so the pair is REPLAYABLE against the public
+    /api/inngest by anyone with Sentry read access."""
+    assert "x-inngest-signature" in DENYLIST_KEYS
+    scrubbed = scrub_event(
+        {"request": {"headers": {"X-Inngest-Signature": "t=1&s=deadbeef"}}}, None
+    )
+    assert scrubbed["request"]["headers"]["X-Inngest-Signature"] == FILTERED

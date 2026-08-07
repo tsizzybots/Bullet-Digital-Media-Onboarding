@@ -342,7 +342,7 @@ async def _emit_linked_if_documented(
         inngest.Concurrency(key="event.data.transcript_name", limit=1, scope="fn"),
     ],
 )
-async def capture_meet_transcript(ctx: inngest.Context, step: inngest.Step) -> dict:
+async def capture_meet_transcript(ctx: inngest.Context) -> dict:
     """Inngest wrapper: build production deps, run the core, classify failures.
 
     Raises:

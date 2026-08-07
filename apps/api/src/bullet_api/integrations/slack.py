@@ -37,6 +37,18 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+class SlackPostError(RuntimeError):
+    """A non-2xx from the Slack webhook, WITHOUT the URL in the message.
+
+    Carries only the status code, because the webhook URL is itself the
+    credential and this message is captured by Sentry.
+    """
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"Slack webhook returned {status_code}")
+
+
 class SlackNotifier(Protocol):
     """Posts a single line of text to a Slack channel.
 
@@ -85,7 +97,18 @@ class HttpSlackNotifier:
             return
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.post(self._webhook_url, json={"text": text})
-        response.raise_for_status()
+        if response.status_code >= 400:
+            # Deliberately NOT `raise_for_status()`. Its message embeds the full
+            # request URL, and for Slack the URL IS the credential
+            # (hooks.slack.com/services/T.../B.../<secret>). Now that the
+            # reconcile cron initialises Sentry, that message would be captured
+            # - and `scrub_event` cannot save it: the exception message sits in
+            # the STRUCTURAL zone where the denylist deliberately does not
+            # apply, and `_SIGNED_URL_RE` matches neither `pandadoc.com` nor a
+            # token query param, so the secret would land in Sentry verbatim.
+            # Read access to Sentry would then become the ability to post into
+            # the alerting channel (review round 5).
+            raise SlackPostError(response.status_code)
 
 
 @dataclass

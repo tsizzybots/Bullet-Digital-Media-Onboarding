@@ -7,8 +7,10 @@ and `SENTRY_TRACES_SAMPLE_RATE`) to switch it on.
 
 PII scrubbing is layered:
 
-1. `send_default_pii=False` keeps Sentry from attaching request bodies,
-   cookies, and user IP/email by default.
+1. `send_default_pii=False` keeps Sentry from attaching cookies and user
+   IP/email. It does NOT cover request bodies on FastAPI - that is
+   `max_request_body_size="never"`, set separately below; the two are often
+   conflated and only one of them stops the Inngest event payload being sent.
 2. The built-in `EventScrubber` (left at its default, on) strips the
    standard PII denylist.
 3. `scrub_event` (this module) is registered as both `before_send` and
@@ -38,9 +40,11 @@ embedded email or phone is caught by the regexes, but a name or address
 mentioned in passing is not. The rule therefore relies on (a) keeping
 transcript-bearing fields (`transcript`, `transcript_text`, `value_text`,
 `value`, ...) on the denylist within data sub-trees, and (b)
-`send_default_pii=False` keeping transcript bodies out of events in the
-first place. Do not put raw transcript prose into a custom-named string
-field that is not on the denylist.
+`max_request_body_size="never"` keeping request bodies - including the
+Inngest event payload - out of events in the first place. NOTE this is
+deliberately not `send_default_pii=False`, which does not cover bodies.
+Do not put raw transcript prose into a custom-named string field that is
+not on the denylist.
 """
 
 from __future__ import annotations
@@ -54,9 +58,19 @@ FILTERED = "[Filtered]"
 
 # Denylisted keys (lowercased). Any mapping key whose `.lower()` is in this
 # set has its value replaced wholesale with FILTERED, no matter what the
-# value is. Mirrors the dashboard denylist exactly.
+# value is. Mirrors the dashboard denylist (`sentry-scrub.ts`) EXCEPT for
+# `x-inngest-signature`, which is deliberately server-only: the dashboard
+# never sees that header, and the divergence is recorded here rather than
+# left for someone to discover by diffing the two lists (review round 5).
 DENYLIST_KEYS: frozenset[str] = frozenset(
     {
+        # The Inngest request signature, logged on the SAME event as the body
+        # it authenticates. `_validate_sig` performs no freshness check in
+        # 0.5.18 and the body is JCS-canonicalised before the HMAC, so the
+        # (signature, body) pair is REPLAYABLE against the public
+        # /api/inngest by anyone with Sentry read access. It is in neither
+        # SENSITIVE_HEADERS nor sentry's own DEFAULT_DENYLIST.
+        "x-inngest-signature",
         "email",
         "phone",
         "password",
@@ -177,8 +191,12 @@ def init_sentry(settings: Any) -> None:
     `types.SimpleNamespace` works in tests without importing the real
     Settings model.
 
-    When `sentry_dsn` is empty this returns immediately and `sentry_sdk` is
-    never imported or initialised, so local / CI / test runs send nothing.
+    When `sentry_dsn` is empty this returns immediately and Sentry is never
+    INITIALISED, so local / CI / test runs send nothing. Note the module is
+    still IMPORTED regardless: `observability/inngest_sentry.py` imports `sentry_sdk`
+    at module top and `worker/_inngest.py` imports that unconditionally (only
+    the middleware REGISTRATION is DSN-gated). The deferred import below is
+    therefore about init cost, not about avoiding the dependency.
     """
     if not settings.sentry_dsn:
         return
@@ -194,6 +212,37 @@ def init_sentry(settings: Any) -> None:
         traces_sample_rate=settings.sentry_traces_sample_rate,
         # Belt-and-braces with the EventScrubber + scrub_event hook below.
         send_default_pii=False,
+        # Do NOT serialise frame locals into events. This defaults to True, and
+        # `Settings` holds its secrets as plain `str` (no `SecretStr`), while
+        # FIFTEEN modules bind `settings = get_settings()` as a frame local -
+        # across `worker/`, `ghl/`, `pandadoc/`, `storage/`, `email/`,
+        # `google/`, `crons/`, `webhooks/` and this module itself. So the
+        # FIRST captured exception in any of those
+        # frames would ship `ghl_agency_api_key`, `inngest_signing_key`,
+        # `resend_api_key` and `email_token_secret` to Sentry in plaintext.
+        # `scrub_event` cannot save us: it matches on KEY names, and these
+        # arrive nested inside a `settings` repr rather than as top-level keys.
+        # Turning this off is the one-line containment; making the secrets
+        # `SecretStr` is the structural fix and has its own ticket.
+        include_local_variables=False,
+        # Request bodies are NOT covered by `send_default_pii=False` on
+        # FastAPI - `integrations/fastapi.py` sets `request_info["data"]`
+        # unconditionally, and this option defaults to "medium" (10 KB). Now
+        # that Inngest failures are captured, that body IS the event payload:
+        # for `store_sales_knowledge` it is a whole `SalesCallSummary`, i.e.
+        # `notable_quotes[].quote` (verbatim client speech), `.speaker`,
+        # `pain_points` and `red_flags`. None of those are denylisted keys, and
+        # scrubbing works on key names rather than nested payload shapes.
+        max_request_body_size="never",
+        # Cap every string BEFORE `scrub_event` regex-walks it. The default is
+        # None in sentry-sdk 2.61.1, so nothing truncates - and `_EMAIL_RE` is
+        # quadratic on a long unbroken `[\w.+-]` run with no `@`. Review round 5
+        # measured it: a realistic 15.7 KB JSON error body costs ~1.07 ms
+        # (punctuation breaks the run), but a 20 KB body containing one
+        # unbroken token costs ~1,911 ms - inline, on the event loop shared
+        # with the webhook and the dashboard API. Reachable rather than
+        # typical, and a one-line cap removes the pathological case.
+        max_value_length=2048,
         before_send=scrub_event,
         before_send_transaction=scrub_event,
     )

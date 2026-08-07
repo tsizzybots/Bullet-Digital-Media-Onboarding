@@ -451,7 +451,7 @@ async def create_client_record_core(
         ),
     ],
 )
-async def create_client_record(ctx: inngest.Context, step: inngest.Step) -> dict:
+async def create_client_record(ctx: inngest.Context) -> dict:
     """Inngest wrapper: build production deps, fetch document, run the
     core, translate NonRetriable failures.
 

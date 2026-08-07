@@ -348,7 +348,7 @@ async def store_sales_knowledge_core(
         inngest.Concurrency(key="event.data.transcript_id", limit=1, scope="fn"),
     ],
 )
-async def store_sales_knowledge(ctx: inngest.Context, step: inngest.Step) -> dict:
+async def store_sales_knowledge(ctx: inngest.Context) -> dict:
     """Inngest wrapper: build production deps, run the core, classify failures.
 
     Raises:

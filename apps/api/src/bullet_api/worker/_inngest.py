@@ -15,6 +15,7 @@ from __future__ import annotations
 import inngest
 
 from bullet_api.config import get_settings
+from bullet_api.observability.inngest_sentry import SentryMiddleware
 
 
 def _make_client() -> inngest.Inngest:
@@ -24,6 +25,17 @@ def _make_client() -> inngest.Inngest:
         kwargs["signing_key"] = settings.inngest_signing_key
     if settings.inngest_event_key:
         kwargs["event_key"] = settings.inngest_event_key
+    # S1-34b: report handler failures to Sentry. The Inngest SDK catches
+    # exceptions inside its executor and returns them to Inngest Cloud as a
+    # response body, so they never reach the ASGI stack where Sentry's FastAPI
+    # integration hooks - without this, worker failures are invisible (the
+    # exact gap that hid S1-34b's TypeError for a week).
+    #
+    # Gated on the DSN so local dev / CI / tests do not register a middleware
+    # that would only log "Sentry SDK is not initialized" on every run; this
+    # mirrors `init_sentry()`, which is a no-op without a DSN.
+    if settings.sentry_dsn:
+        kwargs["middleware"] = [SentryMiddleware]
     return inngest.Inngest(**kwargs)
 
 

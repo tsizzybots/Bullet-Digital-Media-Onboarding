@@ -29,7 +29,7 @@ from bullet_api.worker.signed_pdf import store_signed_pdf
     fn_id="noop-test",
     trigger=inngest.TriggerEvent(event="bullet/noop"),
 )
-async def noop_function(ctx: inngest.Context, step: inngest.Step) -> str:
+async def noop_function(ctx: inngest.Context) -> str:
     """No-op function registered to verify Inngest connectivity."""
     return "noop"
 
