@@ -18,6 +18,7 @@ import pytest
 from bullet_api.integrations.slack import (
     FakeSlackNotifier,
     HttpSlackNotifier,
+    format_agreement_gate_alert,
     format_reconciliation_alert,
 )
 
@@ -52,6 +53,19 @@ def test_format_reconciliation_alert_omits_completed_when_absent() -> None:
     assert "doc_y" in text
     assert "Service Agreement" in text
     assert "completed" not in text.lower()
+
+
+def test_format_agreement_gate_alert_includes_account_id_and_reason() -> None:
+    text = format_agreement_gate_alert(
+        "doc_x", "uk", "agreement_type: unrecognised template 'tpl-rebrand'"
+    )
+
+    assert "doc_x" in text
+    assert "uk" in text
+    assert "tpl-rebrand" in text
+    lowered = text.lower()
+    assert "ignored" in lowered
+    assert "no client record" in lowered or "no client" in lowered
 
 
 async def test_fake_notifier_records_posts() -> None:

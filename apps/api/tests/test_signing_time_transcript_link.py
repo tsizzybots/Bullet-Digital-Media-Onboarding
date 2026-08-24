@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bullet_api.integrations.slack import FakeSlackNotifier
 from bullet_api.worker import (
     CLIENT_CREATED_EVENT,
     PANDADOC_SIGNED_EVENT,
@@ -36,6 +37,10 @@ def _detail_body(document_id: str, client_email: str) -> dict:
             {"name": "Client.LastName", "value": "Signer"},
             {"name": "Company.Name", "value": "Sample Gym Ltd"},
         ],
+        # S1-38 agreement-type gate: must be the real allowlisted UK gym
+        # template id, or these tests would trip the gate and never reach
+        # the transcript-linking behaviour under test.
+        "template": {"id": "Kn7vBp56MLSxreXPXwpNWk"},
     }
 
 
@@ -92,6 +97,7 @@ async def test_signing_links_parked_transcript_and_emits(async_session: AsyncSes
         document_id=document_id,
         document=_detail_body(document_id, email),
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     row = await _transcript(async_session, transcript_id)
@@ -130,6 +136,7 @@ async def test_signing_leaves_non_matching_transcript_parked(async_session: Asyn
         document_id=document_id,
         document=_detail_body(document_id, f"signer+{uuid.uuid4().hex[:6]}@gym.com"),
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     row = await _transcript(async_session, transcript_id)
@@ -155,6 +162,7 @@ async def test_signing_replay_no_dup_doc_but_re_emits(async_session: AsyncSessio
         document_id=document_id,
         document=_detail_body(document_id, email),
         emitter=first_emitter,
+        slack=FakeSlackNotifier(),
     )
     # Replay the same signing (simulates an Inngest retry).
     second_emitter = FakeEventEmitter()
@@ -164,6 +172,7 @@ async def test_signing_replay_no_dup_doc_but_re_emits(async_session: AsyncSessio
         document_id=document_id,
         document=_detail_body(document_id, email),
         emitter=second_emitter,
+        slack=FakeSlackNotifier(),
     )
 
     docs = (

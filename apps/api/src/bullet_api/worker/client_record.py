@@ -96,7 +96,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bullet_api.config import get_settings
 from bullet_api.db.enums import CURRENT_STEP_SIGNED, DOCUMENT_KIND_TRANSCRIPT_TEXT
 from bullet_api.db.session import WorkerSessionLocal
+from bullet_api.integrations.slack import (
+    HttpSlackNotifier,
+    SlackNotifier,
+    format_agreement_gate_alert,
+)
 from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, api_key_for
+from bullet_api.pandadoc.agreement_gate import agreement_gate_ignore_reason, is_gym_agreement
 from bullet_api.pandadoc.client import HttpPandaDocClient, PandaDocClient, PandaDocNotFound
 from bullet_api.transcripts.linking import (
     LINK_METHOD_EMAIL_SIGNING,
@@ -167,11 +173,17 @@ class CreateClientResult:
     matched an existing one (replay). `client_id` is the surviving row's
     id in either case. `client_created_emitted` reflects whether
     `client.created` was emitted on this run.
+
+    `client_id` is None and `ignored_reason` is set (S1-38 phase 1) when the
+    agreement-type gate rejected the document: no `clients` row, no emit -
+    the run's only effect is the `onboarding_events.ignored_reason` write and
+    a Slack alert.
     """
 
-    client_id: uuid.UUID
+    client_id: uuid.UUID | None
     created: bool
     client_created_emitted: bool
+    ignored_reason: str | None = None
 
 
 async def fetch_document_for_orchestrator(
@@ -276,6 +288,7 @@ async def create_client_record_core(
     document_id: str,
     document: dict,
     emitter: EventEmitter,
+    slack: SlackNotifier,
     account: str = PANDADOC_ACCOUNT_UK,
 ) -> CreateClientResult:
     """Run the S1-25a orchestrator step against an explicit session +
@@ -285,11 +298,11 @@ async def create_client_record_core(
     pure DB + extraction work so the integration tests inject a
     synthetic `document` dict directly and never touch a PandaDoc client.
 
-    Steps: extract client fields, upsert `clients`, backfill
-    `onboarding_events`, COMMIT, emit `client.created`. The emit happens
-    after the commit so downstream consumers never see a `client.created`
-    for a client that isn't durable. If the emit fails, Inngest retries
-    and the UPSERT is a no-op on the second pass.
+    Steps: extract client fields, run the S1-38 agreement-type gate, upsert
+    `clients`, backfill `onboarding_events`, COMMIT, emit `client.created`.
+    The emit happens after the commit so downstream consumers never see a
+    `client.created` for a client that isn't durable. If the emit fails,
+    Inngest retries and the UPSERT is a no-op on the second pass.
 
     Raises:
         PandaDocPayloadError: the document is missing `Client.Email` or
@@ -302,6 +315,51 @@ async def create_client_record_core(
             visibility race). See the class docstring for details.
     """
     fields = extract_client_fields(document)
+
+    # S1-38 phase 1: agreement-type gate, interim (template-id allowlist -
+    # see `pandadoc.agreement_gate` for the full design note and why UK/INT
+    # each have their own list). Runs BEFORE any client upsert so a
+    # non-gym document (Rebrand, Content Production, an employee contract)
+    # never creates a `clients` row or provisions a GHL sub-account.
+    #
+    # Deliberately does NOT follow this function's "commit before emit"
+    # rule: there is no downstream fan-out relying on this row's durability
+    # the way `client.created` consumers do, so committing AFTER the Slack
+    # post (like `crons/reconcile_pandadoc.py` does for its own alert) means
+    # a Slack failure safely rolls back the `ignored_reason` UPDATE and
+    # Inngest retries the whole gate check - idempotent, since it is a plain
+    # SET rather than an INSERT.
+    if not is_gym_agreement(account, fields.pandadoc_template_id):
+        reason = agreement_gate_ignore_reason(fields.pandadoc_template_id)
+        ignore_result = await session.execute(
+            text(
+                "UPDATE onboarding_events "
+                "SET ignored_reason = :reason, "
+                "    processed_at = COALESCE(processed_at, now()) "
+                "WHERE id = :event_id"
+            ),
+            {"reason": reason, "event_id": onboarding_event_id},
+        )
+        if ignore_result.rowcount == 0:
+            raise OnboardingEventNotFoundError(onboarding_event_id)
+        await slack.post(format_agreement_gate_alert(document_id, account, reason))
+        await session.commit()
+        log.info(
+            "S1-38 agreement-type gate: ignored %s",
+            document_id,
+            extra={
+                "document_id": document_id,
+                "onboarding_event_id": str(onboarding_event_id),
+                "account": account,
+                "ignored_reason": reason,
+            },
+        )
+        return CreateClientResult(
+            client_id=None,
+            created=False,
+            client_created_emitted=False,
+            ignored_reason=reason,
+        )
 
     # business_name is NULL-able in the schema; only legal_entity (NOT NULL)
     # gets the placeholder when missing. Do NOT write the placeholder into
@@ -568,6 +626,7 @@ async def create_client_record(ctx: inngest.Context) -> dict:
         api_key=api_key_for(account, settings),
         base_url=settings.pandadoc_api_base_url,
     )
+    slack = HttpSlackNotifier(settings.slack_webhook_url)
 
     # Fetch OUTSIDE the session so the pooled connection is not held
     # during PandaDoc HTTP latency.
@@ -581,6 +640,7 @@ async def create_client_record(ctx: inngest.Context) -> dict:
                 document_id=document_id,
                 document=document,
                 emitter=InngestEventEmitter(inngest_client),
+                slack=slack,
                 account=account,
             )
         except PandaDocPayloadError as exc:
@@ -628,10 +688,11 @@ async def create_client_record(ctx: inngest.Context) -> dict:
         # dead-letters after retries are exhausted.
 
     return {
-        "client_id": str(result.client_id),
+        "client_id": str(result.client_id) if result.client_id is not None else None,
         "created": result.created,
         "document_id": document_id,
         "account": account,
+        "ignored_reason": result.ignored_reason,
     }
 
 
