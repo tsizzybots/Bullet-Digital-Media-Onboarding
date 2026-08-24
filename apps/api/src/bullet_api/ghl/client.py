@@ -244,7 +244,12 @@ class HttpGhlClient:
         # treat as "no existing location" rather than a hard error.
         if response.status_code == 404:
             return None
-        if response.status_code == 429 or response.status_code >= 500:
+        # Same retriable set as `create_location` (review round 4, finding 1):
+        # this lookup runs before the create on every attempt, so a key blip
+        # here has to be retriable too, or the create-path fix is unreachable
+        # - every in-flight signing dead-letters at the lookup before it ever
+        # gets to the POST that would have survived the blip.
+        if response.status_code in _RETRIABLE_STATUS or response.status_code >= 500:
             raise GhlServerError(response.status_code, response.text)
         raise GhlClientError(response.status_code, response.text)
 
@@ -274,10 +279,16 @@ class FakeGhlClient:
     set (set exactly one). Records every create payload on `calls` so tests
     can assert on the request body (e.g. that `snapshotId` is present/absent).
 
-    `find_location_by_email` returns `lookup_result` (default None = "no
-    existing location", the common case so existing create-path tests
-    proceed to create unchanged), or raises `lookup_error` when set. Records
-    every lookup on `lookup_calls` as `(email, company_id)`.
+    `find_location_by_email` returns `lookup_result` when set to a value, or
+    raises `lookup_error` when set. Records every lookup on `lookup_calls` as
+    `(email, company_id)`.
+
+    `lookup_result` defaults to `_UNSET` (fixed docstring, review round 4:
+    this used to say it defaulted to `None`, which was true before the
+    `_UNSET` sentinel above replaced that default - see its docstring for
+    why). An unset call raises `AssertionError` rather than silently
+    behaving as "no existing location"; pass `lookup_result=None` explicitly
+    for that case.
     """
 
     location: GhlLocation | None = None

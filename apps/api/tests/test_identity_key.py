@@ -11,6 +11,7 @@ import pytest
 from bullet_api.worker.identity_key import (
     LEGAL_ENTITY_PLACEHOLDER,
     compute_identity_key,
+    contact_name_agrees,
     corroborating_signal_agrees,
     identity_name,
     names_materially_diverge,
@@ -22,7 +23,7 @@ from bullet_api.worker.identity_key import (
 
 class TestNormalizeName:
     def test_lowercases_and_strips_punctuation_whitespace(self) -> None:
-        assert normalize_name("BFT  Hackney!") == "bfthackney"
+        assert normalize_name("Brand Gym  Hackney!") == "brandgymhackney"
 
     def test_drops_leading_the(self) -> None:
         # Otherwise "the gy" would eat the whole 6-char budget.
@@ -143,7 +144,7 @@ class TestComputeIdentityKey:
         assert compute_identity_key("Fitness First", "E8 1AA") == "fitnes|E81AA"
 
     def test_short_name_not_padded(self) -> None:
-        assert compute_identity_key("BFT", "E8 1AA") == "bft|E81AA"
+        assert compute_identity_key("Flex", "E8 1AA") == "flex|E81AA"
 
     def test_the_and_suffix_normalized_before_truncation(self) -> None:
         # "The Gym Group Ltd" -> "gymgroup" -> first6 "gymgro".
@@ -166,8 +167,8 @@ class TestComputeIdentityKey:
         #
         # The original version of this test compared a call to the identical
         # call - `x == x`, which cannot fail whatever the implementation does.
-        assert compute_identity_key("BFT Hackney", "E8 1AA") == compute_identity_key(
-            "bft  hackney!", "e8-1aa"
+        assert compute_identity_key("Brand Gym Hackney", "E8 1AA") == compute_identity_key(
+            "brand gym  hackney!", "e8-1aa"
         )
 
     def test_ltd_suffix_and_case_do_not_split_one_business(self) -> None:
@@ -177,14 +178,14 @@ class TestComputeIdentityKey:
 
     def test_franchise_separation_by_postcode(self) -> None:
         # Same brand, different location -> different key.
-        a = compute_identity_key("BFT Hackney", "E8 1AA")
-        b = compute_identity_key("BFT East Croydon", "CR0 1AA")
+        a = compute_identity_key("Brand Gym Hackney", "E8 1AA")
+        b = compute_identity_key("Brand Gym Croydon", "CR0 1AA")
         assert a != b
 
 
 class TestNamesMateriallyDiverge:
     def test_same_normalized_name_does_not_diverge(self) -> None:
-        assert names_materially_diverge("BFT Hackney", "bft  hackney!") is False
+        assert names_materially_diverge("Brand Gym Hackney", "brand gym  hackney!") is False
 
     def test_suffix_only_difference_does_not_diverge(self) -> None:
         assert names_materially_diverge("Foobar Ltd", "Foobar Limited") is False
@@ -256,6 +257,34 @@ class TestCorroboratingSignalAgrees:
         # Two unrelated clients whose phone field was filled with filler must
         # not corroborate each other into a merge.
         assert corroborating_signal_agrees(phone_a=a, phone_b=b) is False
+
+
+class TestContactNameAgrees:
+    """The THIRD bar (review round 4, finding 4) - used alongside phone, only
+    on the NULL-identity-key email fallback, which has no postcode anchor.
+    """
+
+    def test_matching_full_name_agrees(self) -> None:
+        assert contact_name_agrees("John", "Smith", "John", "Smith") is True
+
+    def test_case_and_whitespace_insensitive(self) -> None:
+        assert contact_name_agrees("  John ", "SMITH", "john", "smith") is True
+
+    def test_different_last_name_does_not_agree(self) -> None:
+        # THE regression case: two franchise sites sharing one ops@ mailbox
+        # and one head-office phone must still be told apart by WHO signed.
+        assert contact_name_agrees("Alice", "Hackney", "Bob", "Croydon") is False
+
+    def test_different_first_name_does_not_agree(self) -> None:
+        assert contact_name_agrees("Alice", "Smith", "Bob", "Smith") is False
+
+    def test_absence_is_not_agreement(self) -> None:
+        assert contact_name_agrees(None, None, None, None) is False
+        assert contact_name_agrees("", "", "", "") is False
+
+    def test_name_present_on_only_one_side_does_not_agree(self) -> None:
+        assert contact_name_agrees("John", "Smith", None, None) is False
+        assert contact_name_agrees(None, None, "John", "Smith") is False
 
 
 class TestPostcodePlaceholderShapes:

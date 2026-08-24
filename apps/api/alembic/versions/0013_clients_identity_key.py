@@ -26,10 +26,16 @@ the dedup guard raises:
   candidate sibling the flag points at, mirroring the `parent_client_id`
   self-FK pattern.
 - `address` TEXT NULL - the extracted `Company.Address` was, like `postal_code`
-  before it, read and then discarded. It is persisted now because it is one of
-  the two CORROBORATING SIGNALS (phone or address line) that a returning-client
-  auto-link requires: name + postcode alone is not proof of one business, since
-  `Company.Zip` is the company address rather than the studio's.
+  before it, read and then discarded. Persisted for audit + for a human
+  resolving a `possible_duplicate` flag, but it is NOT a corroborating signal
+  (fixed docstring, review round 4 - a stale claim here that address counted
+  as one, alongside phone, contradicts `identity_key.corroborating_signal_agrees`,
+  which review round 2 already narrowed to PHONE ONLY: `Company.Address` and
+  `Company.Zip` are read from the same HubSpot company record, so address
+  agrees exactly when the key already agrees and corroborates nothing extra -
+  see that function's own docstring for the full reasoning). The returning-
+  client auto-link requires name + postcode (the key) PLUS phone agreement;
+  address plays no role in that decision.
 - `possible_duplicate_ghl_id` TEXT NULL - the candidate when the collision is
   against a GHL LOCATION rather than a clients row. The live GHL lookup can
   find an existing sub-account we cannot corroborate (a legacy location with

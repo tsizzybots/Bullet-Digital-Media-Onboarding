@@ -48,6 +48,8 @@ async def _seed_client(
     legal_entity: str = "Sample Gym Ltd",
     email: str = "signer@example.com",
     phone: str | None = "+44 7700 900123",
+    contact_first_name: str = "Sample",
+    contact_last_name: str = "Signer",
     ghl_subaccount_id: str | None = None,
     postal_code: str | None = "E8 1AA",
     parent_client_id: uuid.UUID | None = None,
@@ -61,6 +63,11 @@ async def _seed_client(
     check. Two seeds with the same name+postcode share an identity_key (a
     returning client); different name OR postcode -> different key. Passing
     `postal_code=None` yields a NULL identity_key (unidentifiable client).
+
+    `contact_first_name`/`contact_last_name` default to the same value on
+    every seed (as before review round 4) so most tests do not need to think
+    about the third corroborating bar; tests exercising `require_contact_name`
+    (S1-26c review round 4, finding 4) pass explicit, DIFFERING values.
 
     `created_at_offset_seconds` sets an EXPLICIT creation order. Rows seeded in
     one transaction all take the same `now()`, so tests that assert "the
@@ -76,8 +83,9 @@ async def _seed_client(
             "  identity_key, address, parent_client_id, current_step, step_entered_at, "
             "  created_at"
             ") VALUES ("
-            "  :email, :business_name, :legal_entity, 'Sample', 'Signer', "
-            "  :phone, :ghl_subaccount_id, :postal_code, :identity_key, :address, "
+            "  :email, :business_name, :legal_entity, :contact_first_name, "
+            "  :contact_last_name, :phone, :ghl_subaccount_id, :postal_code, "
+            "  :identity_key, :address, "
             "  :parent_client_id, 'signed', now(), "
             "  now() + make_interval(secs => :created_at_offset)"
             ") RETURNING id"
@@ -87,6 +95,8 @@ async def _seed_client(
             "business_name": business_name,
             "legal_entity": legal_entity,
             "phone": phone,
+            "contact_first_name": contact_first_name,
+            "contact_last_name": contact_last_name,
             "ghl_subaccount_id": ghl_subaccount_id,
             "postal_code": postal_code,
             "identity_key": identity_key,
@@ -1150,17 +1160,22 @@ async def test_no_matching_sibling_flags_against_earliest_candidate(
 
 
 @pytest.mark.db
-async def test_null_identity_key_email_fallback_flags_but_never_links(
+async def test_null_identity_key_email_fallback_links_when_phone_corroborates(
     async_session: AsyncSession,
 ) -> None:
-    """A NULL identity_key detects a candidate by email but must NOT merge.
+    """A NULL identity_key still links when email + name + phone + the
+    SIGNING CONTACT's name all agree.
 
-    Round-1 finding 5 restored an email sibling query so these documents kept a
-    DB-side dedup signal. Round-2 finding 5 showed that LINKING on it
-    reintroduces franchise conflation, because the guard leans on the postcode
-    to separate franchises and the postcode is exactly what is missing here.
-    So the path now flags a candidate for review and provisions its own
-    sub-account: detection without merging.
+    Round-1 finding 5 restored an email sibling query so these documents kept
+    a DB-side dedup signal. Round-2 finding 5 made linking on it
+    detection-only, since name+email+phone alone reintroduces franchise
+    conflation with no postcode to anchor it. Review round 4, finding 4:
+    that still left a genuinely corroborated returning client with a
+    GUARANTEED duplicate whenever `Company.Zip` was blank. The fix adds bar 3
+    (`require_contact_name`) rather than dropping the postcode requirement:
+    `_seed_client`'s default contact name is shared here (both rows are
+    "Sample Signer"), matching the "same person signing again" scenario that
+    makes this safe. See `_pick_sibling`'s docstring for the full reasoning.
     """
     parent_id = await _seed_client(
         async_session,
@@ -1170,6 +1185,118 @@ async def test_null_identity_key_email_fallback_flags_but_never_links(
         created_at_offset_seconds=-60,
     )
     child_id = await _seed_client(async_session, email="nopostcode@example.com", postal_code=None)
+    event_id = await _seed_onboarding_event(async_session)
+    # A create location is configured but must NEVER be used on this path.
+    ghl = FakeGhlClient(location=_ghl_location("loc_unused"), lookup_result=None)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=child_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # Linked to the root parent, NOT its own sub-account.
+    assert result.skipped is True
+    assert result.created is False
+    assert result.ghl_subaccount_id == "loc_parent"
+    assert result.parent_client_id == parent_id
+    assert ghl.calls == []
+    assert ghl.lookup_calls == []
+
+    row = await async_session.execute(
+        text(
+            "SELECT parent_client_id, ghl_subaccount_id, possible_duplicate "
+            "FROM clients WHERE id = :id"
+        ),
+        {"id": child_id},
+    )
+    parent_client_id, ghl_id, is_dup = row.one()
+    assert parent_client_id == parent_id
+    assert ghl_id == "loc_parent"
+    assert is_dup is False
+
+
+@pytest.mark.db
+async def test_null_identity_key_email_fallback_flags_when_contact_name_disagrees(
+    async_session: AsyncSession,
+) -> None:
+    """THE regression test for review round 4's actual risk: two franchise
+    sites sharing one `ops@` mailbox and one head-office number must NOT
+    auto-link just because email, business name and phone all agree - bar 3
+    (`require_contact_name`) is what tells them apart when there is no
+    postcode to. This is exactly the "Brand Gym" scenario `_pick_sibling`'s
+    docstring and `_SIBLING_BY_EMAIL_SQL`'s comment describe: without this
+    test, a future edit that weakens bar 3 back to phone-only would silently
+    reopen round 2's finding 5 and no test would catch it.
+    """
+    parent_id = await _seed_client(
+        async_session,
+        email="ops@franchise.example.com",
+        postal_code=None,
+        contact_first_name="Alice",
+        contact_last_name="Hackney",
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    child_id = await _seed_client(
+        async_session,
+        email="ops@franchise.example.com",
+        postal_code=None,
+        contact_first_name="Bob",
+        contact_last_name="Croydon",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=None)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=child_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # Its OWN sub-account - NOT the sibling's - despite matching email, name,
+    # AND phone.
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    assert result.parent_client_id is None
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": child_id},
+    )
+    is_dup, dup_of = flagged.one()
+    assert is_dup is True
+    assert dup_of == parent_id
+
+
+@pytest.mark.db
+async def test_null_identity_key_email_fallback_flags_when_phone_disagrees(
+    async_session: AsyncSession,
+) -> None:
+    """A NULL identity_key detects a candidate by email but must NOT merge
+    without phone corroboration - the flag-only path finding 4 preserves.
+
+    Same business name, same email, but a DIFFERENT phone: bar 2 fails, so
+    this still flags for review and provisions its own sub-account rather
+    than linking on name+email alone.
+    """
+    parent_id = await _seed_client(
+        async_session,
+        email="nopostcode@example.com",
+        phone="+44 7700 900111",
+        postal_code=None,
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    child_id = await _seed_client(
+        async_session,
+        email="nopostcode@example.com",
+        phone="+44 7700 900999",
+        postal_code=None,
+    )
     event_id = await _seed_onboarding_event(async_session)
     ghl = FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=None)
 

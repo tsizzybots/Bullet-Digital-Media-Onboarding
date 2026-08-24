@@ -97,7 +97,14 @@ _PLACEHOLDER_PHONE_TAILS = frozenset({"123456789", "987654321", "012345678"})
 # carries the town too ("London E8 1AA") keys identically to the bare postcode -
 # without this, the same business keys two different ways depending on how the
 # HubSpot `Company.Zip` field happened to be filled in.
-_UK_POSTCODE = re.compile(r"([A-Z]{1,2}[0-9][A-Z0-9]?)\s*([0-9][A-Z]{2})")
+#
+# ANCHORED on both sides with negative lookaround (review round 4, one-line
+# fix): without it the pattern matches a SUBSTRING of a malformed value, so
+# "AB12 3CDE" -> "AB123CD" and "E81AAX" -> "E81AA" both minted a confident,
+# WRONG UK key from a value that is not actually that postcode - worse than
+# falling through to step 2/3 below, which is what a value neither of these
+# lookarounds match now does instead.
+_UK_POSTCODE = re.compile(r"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)\s*([0-9][A-Z]{2})(?![A-Z0-9])")
 
 # Values people type INSTEAD of a postcode. Each is non-empty after stripping,
 # so without this denylist they mint a real-looking key that every other
@@ -195,8 +202,20 @@ def normalize_postcode(postcode: str | None) -> str:
     2. Otherwise strip to alphanumerics and reject placeholders ("N/A", "TBC",
        "00000") and anything shorter than `_MIN_POSTCODE_LEN`. These return ""
        so the key computes to None and the signing fails safe to CREATE.
-    3. Otherwise keep the stripped form, so international postcodes stay usable
-       ("75008", "D02 X285" -> "D02X285") now that the INT account is live.
+    3. Otherwise TOKENIZE on whitespace, strip each token to alphanumerics,
+       and join the tokens back in SORTED order, so international postcodes
+       stay usable ("75008", "D02 X285" -> "D02X285") AND are insensitive to
+       which order the words arrived in - "75008 Paris" and "Paris 75008"
+       both normalize to "75008PARIS" - now that the INT account is live.
+
+    FIXED (review round 4, finding 3): step 3 used to join tokens in
+    WHATEVER ORDER they appeared, so "75008 Paris" and "Paris 75008" - the
+    same French business, entered two different ways - produced two
+    different keys and silently failed to match. Sorting the tokens before
+    joining is order-independent by construction: it only ever collapses a
+    literal reordering of the SAME words, so it cannot create a NEW collision
+    between two postcodes that merely share characters (each token's own
+    internal character sequence is untouched).
 
     KNOWN DEVIATION from the S1-26b/c review, recorded here so it is met stated
     rather than discovered: the review asked to "return None for anything
@@ -213,7 +232,8 @@ def normalize_postcode(postcode: str | None) -> str:
     uk_match = _UK_POSTCODE.search(upper)
     if uk_match is not None:
         return uk_match.group(1) + uk_match.group(2)
-    stripped = _NON_ALNUM.sub("", upper)
+    tokens = [_NON_ALNUM.sub("", token) for token in upper.split()]
+    stripped = "".join(sorted(t for t in tokens if t))
     if len(stripped) < _MIN_POSTCODE_LEN or stripped in _PLACEHOLDER_POSTCODES:
         return ""
     # A denylist is a BLOCKLIST, so it only ever catches the placeholders
@@ -248,6 +268,22 @@ def compute_identity_key(business_name: str | None, postcode: str | None) -> str
     return name_norm[:_NAME_PREFIX_LEN] + _KEY_SEPARATOR + postcode_norm
 
 
+def _is_sequential_digits(digits: str) -> bool:
+    """True when every adjacent pair steps +1 or every pair steps -1 (mod 10).
+
+    Catches "123456789", "234567890", "987654321", "876543210" and every
+    other rotation of the keypad-run filler pattern people type when they
+    have no real number to hand - by FORM, not by enumerating each rotation
+    in a denylist (same reasoning `normalize_postcode` already applies).
+    """
+    if len(digits) < 2:
+        return False
+    pairs = list(zip(digits, digits[1:], strict=False))
+    ascending = all((int(a) + 1) % 10 == int(b) for a, b in pairs)
+    descending = all((int(a) - 1) % 10 == int(b) for a, b in pairs)
+    return ascending or descending
+
+
 def normalize_phone(phone: str | None) -> str:
     """Reduce a phone number to a comparable stem, or "" if unusable.
 
@@ -270,7 +306,19 @@ def normalize_phone(phone: str | None) -> str:
     # the length check, so without this two unrelated clients whose phone field
     # was filled with filler would CORROBORATE each other and auto-link - the
     # exact mis-merge this signal exists to prevent (review round 2, P2).
-    if len(set(tail)) <= _PHONE_MIN_DISTINCT_DIGITS or tail in _PLACEHOLDER_PHONE_TAILS:
+    #
+    # FIXED (review round 4, one-line finding): "1234567890" is 10 digits, so
+    # the LAST 9 are "234567890" - not in `_PLACEHOLDER_PHONE_TAILS` (which
+    # only holds "123456789"), so the most common filler number in existence
+    # was passing as a corroborating signal. `_is_sequential_digits` catches
+    # it (and every other rotation) by SHAPE rather than growing the denylist
+    # one string at a time - same principle already applied to postcodes
+    # above ("a denylist only catches the placeholders somebody thought of").
+    if (
+        len(set(tail)) <= _PHONE_MIN_DISTINCT_DIGITS
+        or tail in _PLACEHOLDER_PHONE_TAILS
+        or _is_sequential_digits(tail)
+    ):
         return ""
     return tail
 
@@ -309,14 +357,49 @@ def corroborating_signal_agrees(*, phone_a: str | None, phone_b: str | None) -> 
     return bool(phone_norm_a) and phone_norm_a == normalize_phone(phone_b)
 
 
+def contact_name_agrees(
+    first_a: str | None, last_a: str | None, first_b: str | None, last_b: str | None
+) -> bool:
+    """True when the SIGNING CONTACT's full name agrees, case/whitespace-insensitive.
+
+    A second corroborating signal, used ALONGSIDE phone (not instead of it) on
+    the NULL-identity-key email fallback (S1-26c review round 4, finding 4):
+    that path has no postcode to anchor the match the way the identity-key
+    path does (`Company.Zip` narrows a shared-brand collision to "same
+    head-office postcode too"), so requiring phone alone there reopens
+    exactly the franchise-merge case round 2 closed (F5) - two sites sharing
+    one `ops@` mailbox and one head-office number, with no postcode present
+    to tell them apart.
+
+    `Client.FirstName`/`Client.LastName` is the person who signed, sourced
+    independently of both the company record (name/postcode/address) and the
+    contact channel (email/phone), so it does not collapse alongside them the
+    way address collapses alongside postcode (see `corroborating_signal_agrees`
+    docstring). Two DIFFERENT franchise sites under one shared mailbox and one
+    shared head-office line are still expected to have DIFFERENT individuals
+    signing for their own site, per the client's "franchisees are separate
+    clients with no shared access" answer - a genuine returning client re-
+    signing without a postcode this time is far more likely to be signed by
+    the SAME person twice.
+
+    Absence is NOT agreement: a name missing (or blank) on either side returns
+    False, same posture as `corroborating_signal_agrees` - a missing signal
+    must never be read as a match.
+    """
+    name_a = f"{(first_a or '').strip()} {(last_a or '').strip()}".strip().lower()
+    name_b = f"{(first_b or '').strip()} {(last_b or '').strip()}".strip().lower()
+    return bool(name_a) and name_a == name_b
+
+
 def names_materially_diverge(name_a: str | None, name_b: str | None) -> bool:
     """True when two names normalize to different stems, OR either is unusable.
 
     Deliberately STRICT (exact equality of the full normalized stems). The
     leniency in this module lives in the KEY - the 6-char truncation - not
     here; this function's whole job is to catch the false matches that
-    leniency creates. So "BFT Hackney Gym" vs "BFT Hackney" diverges and gets
-    flagged rather than merged, which is the safe side of "never auto-merge":
+    leniency creates. So "Brand Gym Hackney Gym" vs "Brand Gym Hackney"
+    diverges and gets flagged rather than merged, which is the safe side of
+    "never auto-merge":
     a missed link creates a spare sub-account (visible, deletable), a wrong
     link puts one client's assets in another client's account.
 

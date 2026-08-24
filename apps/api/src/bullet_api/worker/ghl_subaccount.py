@@ -132,6 +132,7 @@ from bullet_api.ghl.client import GhlClient, GhlClientError, GhlLocation, HttpGh
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.events import CLIENT_CREATED_EVENT
 from bullet_api.worker.identity_key import (
+    contact_name_agrees,
     corroborating_signal_agrees,
     identity_name,
     names_materially_diverge,
@@ -262,7 +263,8 @@ _SIBLING_CANDIDATE_LIMIT = 50
 # in any same-transaction batch).
 _SIBLING_SELECT = (
     "SELECT id, COALESCE(parent_client_id, id) AS root_id, "
-    "       ghl_subaccount_id, business_name, legal_entity, phone "
+    "       ghl_subaccount_id, business_name, legal_entity, phone, "
+    "       contact_first_name, contact_last_name "
     "FROM clients "
     "WHERE {predicate} AND id <> :client_id "
     "      AND ghl_subaccount_id IS NOT NULL "
@@ -274,17 +276,28 @@ _SIBLING_BY_IDENTITY_KEY_SQL = text(
     _SIBLING_SELECT.format(predicate="identity_key = :identity_key")
 )
 
-# DETECTION-ONLY fallback for a NULL identity_key. A document with no usable
-# name or postcode would otherwise have NO DB-side dedup signal at all, which
-# was a regression against S1-26 where email WAS the sibling key.
+# Fallback for a NULL identity_key. A document with no usable name or
+# postcode would otherwise have NO DB-side dedup signal at all, which was a
+# regression against S1-26 where email WAS the sibling key.
 #
-# It DETECTS, it does not MERGE (review round 2, finding 5). The first
-# implementation auto-linked on this path under the same name+corroboration
-# guard as the keyed path, but that guard leans on the postcode to separate
-# franchises - and the postcode is precisely what is absent here. Two "Brand
-# Gym" rows on one `ops@` mailbox sharing a head-office number therefore linked
-# with no flag at all. With no separator available the honest outcome is to
-# flag a candidate for a human and provision this signing its own sub-account.
+# LINKS on a STRONGER bar than the keyed path, not a weaker one (review round
+# 4, finding 4 - supersedes round 2, finding 5). Round 2's first
+# implementation auto-linked here under the SAME bar as the keyed path (name +
+# phone), but that bar leans on the postcode to separate franchises - and the
+# postcode is precisely what is absent here - so two "Brand Gym" rows sharing
+# one `ops@` mailbox and one head-office number would have linked with no
+# flag at all (F5). Round 4 found the opposite failure: refusing to link AT
+# ALL turned a genuinely corroborated returning client into a GUARANTEED
+# duplicate sub-account whenever `Company.Zip` happened to be blank. The fix
+# is not to drop the postcode requirement, it is to REPLACE it: this path now
+# ALSO requires the signing CONTACT's name to agree
+# (`identity_key.contact_name_agrees`), a signal the keyed path does not need
+# because it already has the postcode. Two different franchise sites under
+# one shared mailbox and one shared head-office line are still expected to
+# have DIFFERENT individuals signing for their own site (the client's
+# franchisees have no shared access); the SAME person signing twice, with the
+# same email, name and phone, absent a postcode, is the strongest evidence
+# available that this is one business re-signing, not two.
 _SIBLING_BY_EMAIL_SQL = text(_SIBLING_SELECT.format(predicate="lower(email) = lower(:email)"))
 
 
@@ -293,11 +306,13 @@ def _pick_sibling(
     *,
     client_name: str | None,
     client_phone: str | None,
-    allow_link: bool,
+    client_contact_first_name: str | None,
+    client_contact_last_name: str | None,
+    require_contact_name: bool,
 ) -> tuple[Row | None, Row | None]:
     """Split candidates into (matched, collided).
 
-    `matched` is the EARLIEST candidate that clears BOTH bars - the genuine
+    `matched` is the EARLIEST candidate that clears every bar - the genuine
     returning-client link. `collided` is the best near-miss, returned only when
     nothing matched, so the possible-duplicate flag points at something
     concrete: a name-matching-but-uncorroborated candidate is preferred over an
@@ -314,24 +329,54 @@ def _pick_sibling(
     cannot help because it comes from the same company record as the postcode -
     see `corroborating_signal_agrees`. Absence is not agreement.
 
-    `allow_link=False` makes this DETECTION-ONLY: every name match becomes a
-    flagged collision instead of a link. Used on the NULL-identity-key email
-    fallback, where the postcode that separates franchises is absent entirely,
-    so no combination of the remaining signals can safely justify a merge.
+    **Bar 3 (`require_contact_name=True` only) - the SIGNING CONTACT's name
+    also agrees.** The identity-key path (`require_contact_name=False`) does
+    not need this: its candidates already share a postcode by construction
+    (the SQL filters on `identity_key`), which is the anchor that keeps bars
+    1+2 safe against the franchise case (see `corroborating_signal_agrees`'s
+    docstring). The NULL-identity-key email fallback has no such anchor - its
+    candidates share only a literal email - so review round 4 (finding 4)
+    replaces the missing postcode with `identity_key.contact_name_agrees`
+    instead of dropping the requirement: two franchise sites sharing one
+    `ops@` mailbox and one head-office number are still expected to have
+    DIFFERENT people signing for their own site (the client's franchisees
+    have no shared access), so requiring the SAME signer too is the
+    postcode-shaped anchor this path was missing, not a weaker substitute
+    for one.
+
+    This SUPERSEDES round 2's finding 5, which made the email fallback
+    detection-only after finding that bars 1+2 ALONE (the keyed path's bar,
+    with no postcode anchor under it) reopened exactly the franchise
+    conflation the identity key exists to prevent. Round 4 found the
+    opposite failure: refusing to link AT ALL turned a genuinely corroborated
+    returning client - same business, same `ops@` email, same phone, a
+    second signing with a blank `Company.Zip` - into a GUARANTEED duplicate
+    sub-account. Bar 3 resolves both: it demands MORE evidence than bars 1+2
+    alone (closing round 2's gap) while still linking the genuine case round
+    4 found broken.
     """
     collided: Row | None = None
     for candidate in candidates:
         candidate_name = identity_name(candidate.business_name, candidate.legal_entity)
         if names_materially_diverge(client_name, candidate_name):
             continue
-        if allow_link and corroborating_signal_agrees(
-            phone_a=client_phone, phone_b=candidate.phone
-        ):
+        phone_agrees = corroborating_signal_agrees(phone_a=client_phone, phone_b=candidate.phone)
+        contact_ok = (
+            contact_name_agrees(
+                client_contact_first_name,
+                client_contact_last_name,
+                candidate.contact_first_name,
+                candidate.contact_last_name,
+            )
+            if require_contact_name
+            else True
+        )
+        if phone_agrees and contact_ok:
             return candidate, None
-        # Name matches but nothing corroborates it (or linking is disallowed on
-        # this path). Remember the FIRST such candidate as the flag target - it
-        # is a closer call for a human than an unrelated prefix collision - and
-        # keep scanning, since a later candidate may still corroborate properly.
+        # Name matches but corroboration is incomplete. Remember the FIRST
+        # such candidate as the flag target - it is a closer call for a human
+        # than an unrelated prefix collision - and keep scanning, since a
+        # later candidate may still corroborate properly.
         if collided is None:
             collided = candidate
     if collided is None:
@@ -607,13 +652,18 @@ async def create_ghl_subaccount_core(
     # for two different studios. Failing either bar flags a possible duplicate
     # and provisions this signing as its own client (never auto-merge).
     #
-    # `allow_link=keyed`: the email fallback DETECTS but never merges, because
-    # the postcode that separates franchises is exactly what is missing there.
+    # The email fallback (unkeyed) now links too, on a STRONGER bar than the
+    # keyed path (review round 4, finding 4 - supersedes round 2, finding 5):
+    # it lacks the postcode anchor bars 1+2 lean on, so `require_contact_name`
+    # replaces it with the signing contact's name instead of dropping the
+    # requirement. See `_pick_sibling`'s docstring for the full reasoning.
     sibling, collision = _pick_sibling(
         candidates,
         client_name=client_name,
         client_phone=client.phone,
-        allow_link=keyed,
+        client_contact_first_name=client.contact_first_name,
+        client_contact_last_name=client.contact_last_name,
+        require_contact_name=not keyed,
     )
 
     if collision is not None:

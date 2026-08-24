@@ -360,10 +360,10 @@ def test_hubspot_deal_id_from_linked_objects() -> None:
     (only the deal - no company, no contact) and near-empty metadata."""
     document = _document(
         metadata={"document__creation_source": "template"},
-        linked_objects=[_linked("hubspot", "deal", "62950540639")],
+        linked_objects=[_linked("hubspot", "deal", "11111111111")],
     )
     out = extract_client_fields(document)
-    assert out.hubspot_deal_id == "62950540639"
+    assert out.hubspot_deal_id == "11111111111"
     assert out.hubspot_company_id is None
     assert out.hubspot_contact_id is None
     assert out.document_creation_source == "template"

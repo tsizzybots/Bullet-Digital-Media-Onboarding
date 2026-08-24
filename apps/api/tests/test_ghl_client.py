@@ -157,9 +157,13 @@ async def test_find_location_by_email_empty_api_key_raises_runtime_error() -> No
     assert "GHL_AGENCY_API_KEY" in str(exc.value)
 
 
-# 401/403 deliberately absent: an agency-key blip is transient, so they are
-# retriable now (see `_RETRIABLE_STATUS`) and are covered by the 5xx-style
-# tests below. Dead-lettering them terminally failed every in-flight signing.
+# 401/403/408 deliberately absent: they are retriable now (see
+# `_RETRIABLE_STATUS`), covered below by
+# `test_transient_4xx_is_retriable_not_dead_lettered`, which is parametrized
+# over BOTH `create_location` and `find_location_by_email` (review round 4,
+# finding 1: an earlier version of this comment claimed that coverage while
+# the parametrized test underneath it only ever called `create_location` -
+# the lookup's own retriable branch was unverified).
 @pytest.mark.parametrize("status_code", [400, 422])
 async def test_find_location_by_email_4xx_raises_client_error(status_code: int) -> None:
     transport = _transport(status_code, "bad request")
@@ -179,7 +183,10 @@ async def test_find_location_by_email_429_and_5xx_raise_server_error(status_code
 
 
 @pytest.mark.parametrize("status_code", [401, 403, 408])
-async def test_transient_4xx_is_retriable_not_dead_lettered(status_code: int) -> None:
+@pytest.mark.parametrize("method_name", ["create_location", "find_location_by_email"])
+async def test_transient_4xx_is_retriable_not_dead_lettered(
+    method_name: str, status_code: int
+) -> None:
     """An auth blip or a request timeout must NOT terminally fail a signing.
 
     These arrive wearing 4xx codes but are transient: a rotated or momentarily
@@ -187,9 +194,21 @@ async def test_transient_4xx_is_retriable_not_dead_lettered(status_code: int) ->
     `GhlClientError` here would dead-letter EVERY signing in flight during the
     blip, each then needing a human to re-drive. A genuinely bad key still
     dead-letters, just via Inngest's retry budget rather than instantly.
+
+    Parametrized over BOTH `create_location` and `find_location_by_email`
+    (review round 4, finding 1): the lookup runs before the create on every
+    attempt, so a key blip has to be retriable there too, or the create-path
+    fix is unreachable - every in-flight signing dead-letters at the lookup
+    before it ever reaches the POST that would have survived the blip. An
+    earlier version of this test only covered `create_location`, while a
+    comment elsewhere in this file claimed the lookup was covered too.
     """
     transport = _transport(status_code, "transient")
     client = HttpGhlClient(api_key="agency-key", transport=transport)
+    calls = {
+        "create_location": lambda: client.create_location({"name": "Gym", "companyId": "c"}),
+        "find_location_by_email": lambda: client.find_location_by_email("a@b.com", company_id="c"),
+    }
     with pytest.raises(GhlServerError) as exc:
-        await client.create_location({"name": "Gym", "companyId": "c"})
+        await calls[method_name]()
     assert exc.value.status_code == status_code
