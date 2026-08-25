@@ -29,11 +29,15 @@ WHAT THIS DOES AND DOES NOT PREVENT - read before trusting it. The bar narrows
 the franchisee case to "same brand, same head-office postcode, same signing
 contact"; it does NOT eliminate it. A franchisee who signs for both studios
 personally presents the same `Client.Phone` both times and will still
-auto-link. Address is deliberately NOT a second signal: `Company.Address` and
-`Company.Zip` come from the same HubSpot company record, so address agrees
-exactly when the key already does and corroborates nothing (review round 2,
-finding 2). `clients.address` is persisted for audit and for whoever resolves a
-flag, but it does not vote.
+auto-link. Address is NOT a CORROBORATOR: `Company.Address` and `Company.Zip`
+come from the same HubSpot company record, so address agrees exactly when the
+key already does and corroborates nothing (review round 2, finding 2). It IS a
+DISQUALIFIER (review round 5, finding 1) - `addresses_materially_diverge` - and
+the two directions are not symmetric: a signal that collapses with the key can
+never GRANT a link it did not already imply, but a DIFFERING address can still
+refuse one, and that refusal is the only thing separating one owner's two sites
+when brand, head-office postcode and phone all match. So address votes to
+REFUSE, never to accept, and its absence abstains rather than failing closed.
 
 Fail-safe to CREATE: `compute_identity_key` returns None whenever it lacks a
 usable signal (no normalized business name, or no usable postcode). A None key
@@ -86,17 +90,24 @@ _NON_DIGIT = re.compile(r"[^0-9]")
 _PHONE_SIGNIFICANT_DIGITS = 9
 _PHONE_MIN_DIGITS = 7
 
-# A number made of one or two repeated digits ("0000000000", "1111122222") is
-# filler, not a contact. Rejecting it stops two unrelated clients corroborating
-# each other purely because both had a placeholder in the phone field.
-_PHONE_MIN_DISTINCT_DIGITS = 2
+# A number made of a single repeated digit ("000000000") or an alternating
+# two-digit block ("121212121") is filler, not a contact. Rejecting it stops
+# two unrelated clients corroborating each other purely because both had a
+# placeholder in the phone field.
+#
+# NARROWED (review round 5): this was "two or fewer DISTINCT digits", which
+# rejects real UK landlines - "+44 20 7700 0000" has the tail "770000000",
+# distinct digits {7, 0}. Bar 2 was therefore permanently unsatisfiable for
+# every client on such a number, so a genuine returning client got a duplicate
+# sub-account on EVERY signing, silently. Filler is a matter of SHAPE (one
+# digit, or a repeating pair) rather than of how few digits happen to appear.
 _PLACEHOLDER_PHONE_TAILS = frozenset({"123456789", "987654321", "012345678"})
 
-# UK postcode: outward (area + district) then inward (sector + unit), with any
-# amount of whitespace between. Searched ANYWHERE in the string so a value that
-# carries the town too ("London E8 1AA") keys identically to the bare postcode -
-# without this, the same business keys two different ways depending on how the
-# HubSpot `Company.Zip` field happened to be filled in.
+# UK postcode: outward (area + district) then inward (sector + unit). Searched
+# ANYWHERE in the string so a value that carries the town too ("London E8 1AA")
+# keys identically to the bare postcode - without this, the same business keys
+# two different ways depending on how the HubSpot `Company.Zip` field happened
+# to be filled in.
 #
 # ANCHORED on both sides with negative lookaround (review round 4, one-line
 # fix): without it the pattern matches a SUBSTRING of a malformed value, so
@@ -104,7 +115,15 @@ _PLACEHOLDER_PHONE_TAILS = frozenset({"123456789", "987654321", "012345678"})
 # WRONG UK key from a value that is not actually that postcode - worse than
 # falling through to step 2/3 below, which is what a value neither of these
 # lookarounds match now does instead.
-_UK_POSTCODE = re.compile(r"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)\s*([0-9][A-Z]{2})(?![A-Z0-9])")
+#
+# SEPARATOR relaxed from `\s*` to `[\s,.\-]*` (review round 5, finding 2): a
+# postcode pasted out of an address line arrives punctuated ("E8, 1AA"), and
+# with a whitespace-only separator it fell past this branch into step 3 and
+# keyed differently from the same business's bare "E8 1AA" - one business, two
+# keys, so no DB candidate and a duplicate sub-account with no flag.
+_UK_POSTCODE = re.compile(
+    r"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\s,.\-]*([0-9][A-Z]{2})(?![A-Z0-9])"
+)
 
 # Values people type INSTEAD of a postcode. Each is non-empty after stripping,
 # so without this denylist they mint a real-looking key that every other
@@ -138,17 +157,70 @@ _PLACEHOLDER_POSTCODES = frozenset(
 # rather than an address.
 _MIN_POSTCODE_LEN = 3
 
+# Typed into the signing-contact fields when the real signer is not known.
+# Compared against the lowercased "first last" form. Without this, two
+# unrelated clients whose documents both name a department rather than a person
+# corroborate each other on bar 3 - the same failure the placeholder postcode
+# and phone denylists exist to prevent.
+_PLACEHOLDER_CONTACT_NAMES = frozenset(
+    {
+        "head office",
+        "the office",
+        "accounts department",
+        "accounts payable",
+        "front desk",
+        "n a",
+        "not applicable",
+        "to be confirmed",
+    }
+)
+
+
+# NFKD decomposes an accented letter into base + combining mark, but a letter
+# whose glyph is not a base-plus-mark composition has nothing to decompose -
+# NFKD leaves o-slash, eszett, l-stroke, ash and thorn untouched, and the
+# ASCII-only tokenizer then DELETES them. So "Bjørn Fitness" keyed as
+# "bjrnfitness" against "Bjorn Fitness" -> "bjornfitness": one business, two
+# keys, no DB candidate, duplicate sub-account, no flag (review round 5).
+# These are the letters the INT PandaDoc account actually introduces.
+_TRANSLITERATIONS = str.maketrans(
+    {
+        "ø": "o",
+        "Ø": "O",
+        "ß": "ss",
+        "ẞ": "SS",
+        "ł": "l",
+        "Ł": "L",
+        "æ": "ae",
+        "Æ": "AE",
+        "œ": "oe",
+        "Œ": "OE",
+        "đ": "d",
+        "Đ": "D",
+        "ð": "d",
+        "Ð": "D",
+        "þ": "th",
+        "Þ": "TH",
+        "ı": "i",
+        "İ": "I",
+    }
+)
+
 
 def _fold_unicode(value: str) -> str:
     """Strip accents so "Café Gym" and "Cafe Gym" normalize identically.
 
-    NFKD splits an accented character into base + combining mark, then the
-    marks are dropped. Without this the ASCII-only tokenizer silently deletes
-    the accented letter entirely ("café" -> "caf"), producing a DIFFERENT key
-    for the same business. Relevant now that the INT PandaDoc account is live.
+    Two passes, because they cover disjoint sets. The explicit transliteration
+    table handles letters NFKD cannot decompose (see `_TRANSLITERATIONS`);
+    NFKD then splits genuinely composed characters into base + combining mark
+    and the marks are dropped. Without either, the ASCII-only tokenizer
+    silently deletes the letter entirely ("café" -> "caf"), producing a
+    DIFFERENT key for the same business. Both matter now that the INT PandaDoc
+    account is live.
     """
+    translated = value.translate(_TRANSLITERATIONS)
     return "".join(
-        ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch)
+        ch for ch in unicodedata.normalize("NFKD", translated) if not unicodedata.combining(ch)
     )
 
 
@@ -199,23 +271,37 @@ def normalize_postcode(postcode: str | None) -> str:
     1. A UK postcode found ANYWHERE in the string wins, returned as
        outward+inward with no space ("London E8 1AA" -> "E81AA", same as
        "E8 1AA"). This is what stops one business keying two ways.
-    2. Otherwise strip to alphanumerics and reject placeholders ("N/A", "TBC",
-       "00000") and anything shorter than `_MIN_POSTCODE_LEN`. These return ""
-       so the key computes to None and the signing fails safe to CREATE.
-    3. Otherwise TOKENIZE on whitespace, strip each token to alphanumerics,
-       and join the tokens back in SORTED order, so international postcodes
-       stay usable ("75008", "D02 X285" -> "D02X285") AND are insensitive to
-       which order the words arrived in - "75008 Paris" and "Paris 75008"
-       both normalize to "75008PARIS" - now that the INT account is live.
+    2. Otherwise TOKENIZE on whitespace, strip each token to alphanumerics,
+       and - when any token carries a digit - DISCARD the purely-alphabetic
+       tokens, joining what remains in ORIGINAL order. International postcodes
+       stay usable ("75008", "D02 X285" -> "D02X285") and a town name attached
+       to one drops out, so "75008 Paris" and "Paris 75008" both key as
+       "75008" now that the INT account is live.
 
-    FIXED (review round 4, finding 3): step 3 used to join tokens in
-    WHATEVER ORDER they appeared, so "75008 Paris" and "Paris 75008" - the
-    same French business, entered two different ways - produced two
-    different keys and silently failed to match. Sorting the tokens before
-    joining is order-independent by construction: it only ever collapses a
-    literal reordering of the SAME words, so it cannot create a NEW collision
-    between two postcodes that merely share characters (each token's own
-    internal character sequence is untouched).
+    3. THEN reject placeholders ("N/A", "TBC", "00000") and anything shorter
+       than `_MIN_POSTCODE_LEN`, returning "" so the key computes to None and
+       the signing fails safe to CREATE. (Renumbered, review round 5: the code
+       has always applied this rejection to the POST-drop joined string, but
+       the docstring listed it as step 2 while insisting "Order matters" -
+       pointing a reader at the wrong sequence. Observable difference:
+       "00000 ABC" is rejected under the real order and accepted as "00000"
+       under the documented one. The code's order is the safer of the two, so
+       the fix is to the docstring.)
+
+    THE INVARIANT, stated so it can be tested rather than assumed: one postal
+    value produces one key regardless of the FORM it arrives in. Four axes
+    vary independently in the wild - token order, separator character, case,
+    and an attached town - and the normalization must be blind to all four.
+
+    FIXED (review round 5, finding 2): round 4 fixed the ORDER axis by sorting
+    tokens, and in doing so broke the SEPARATOR axis - the same class of bug it
+    was fixing. "K1A 0B1" sorted to "0B1K1A" while "K1A0B1" stayed "K1A0B1";
+    "94107 1234" -> "123494107" against "94107-1234" -> "941071234". Both
+    matched BEFORE round 4. Dropping alphabetic tokens instead of sorting
+    achieves order-independence for the case that actually motivated it (a town
+    beside a numeric postcode) without reordering anything, so a value that
+    differs only in punctuation now canonicalizes identically to one that does
+    not.
 
     KNOWN DEVIATION from the S1-26b/c review, recorded here so it is met stated
     rather than discovered: the review asked to "return None for anything
@@ -232,8 +318,15 @@ def normalize_postcode(postcode: str | None) -> str:
     uk_match = _UK_POSTCODE.search(upper)
     if uk_match is not None:
         return uk_match.group(1) + uk_match.group(2)
-    tokens = [_NON_ALNUM.sub("", token) for token in upper.split()]
-    stripped = "".join(sorted(t for t in tokens if t))
+    tokens = [t for t in (_NON_ALNUM.sub("", token) for token in upper.split()) if t]
+    # A digit-bearing token is the postal code itself; a purely-alphabetic one
+    # beside it is a town ("75008 Paris"). Dropping the latter makes the result
+    # order-independent WITHOUT reordering characters, which is what round 4's
+    # sort did at the cost of separator-sensitivity. When nothing carries a
+    # digit, keep every token - the no-digit rejection below then handles it.
+    if any(any(ch.isdigit() for ch in token) for token in tokens):
+        tokens = [token for token in tokens if any(ch.isdigit() for ch in token)]
+    stripped = "".join(tokens)
     if len(stripped) < _MIN_POSTCODE_LEN or stripped in _PLACEHOLDER_POSTCODES:
         return ""
     # A denylist is a BLOCKLIST, so it only ever catches the placeholders
@@ -284,6 +377,19 @@ def _is_sequential_digits(digits: str) -> bool:
     return ascending or descending
 
 
+def _is_repeating_pair(digits: str) -> bool:
+    """True when the whole run is one two-digit block repeated ("121212121").
+
+    Filler by SHAPE. Deliberately narrower than "few distinct digits", which
+    also matched real landlines whose subscriber number is mostly zeroes
+    ("+44 20 7700 0000" -> "770000000"). A repeating pair cannot occur in a
+    real allocated number; a low digit count routinely does.
+    """
+    if len(digits) < 4 or len(set(digits)) != 2:
+        return False
+    return all(ch == digits[index % 2] for index, ch in enumerate(digits))
+
+
 def normalize_phone(phone: str | None) -> str:
     """Reduce a phone number to a comparable stem, or "" if unusable.
 
@@ -315,7 +421,8 @@ def normalize_phone(phone: str | None) -> str:
     # one string at a time - same principle already applied to postcodes
     # above ("a denylist only catches the placeholders somebody thought of").
     if (
-        len(set(tail)) <= _PHONE_MIN_DISTINCT_DIGITS
+        len(set(tail)) == 1
+        or _is_repeating_pair(tail)
         or tail in _PLACEHOLDER_PHONE_TAILS
         or _is_sequential_digits(tail)
     ):
@@ -340,7 +447,8 @@ def corroborating_signal_agrees(*, phone_a: str | None, phone_b: str | None) -> 
     bar exists to block. `Client.Phone` is the signing CONTACT, sourced
     independently of the company record, so it is the only second signal we
     hold that can actually disagree. `clients.address` is still persisted, for
-    audit and for a human resolving a flag, but it does not vote.
+    audit, for a human resolving a flag, and - as a DISQUALIFIER only - by
+    `addresses_materially_diverge`. It never votes to ACCEPT a link.
 
     **This does not make the franchisee case impossible**, and the docstrings
     must not claim it does: a franchisee who signs both studios personally
@@ -385,10 +493,38 @@ def contact_name_agrees(
     Absence is NOT agreement: a name missing (or blank) on either side returns
     False, same posture as `corroborating_signal_agrees` - a missing signal
     must never be read as a match.
+
+    BOTH PARTS REQUIRED (review round 5, finding 4). Concatenate-and-strip made
+    a blank `Client.LastName` on both rows collapse this bar to a FIRST-NAME
+    match: `contact_name_agrees("Sarah", None, "Sarah", None)` returned True.
+    Two different Sarahs at two sites, sharing an `ops@` mailbox and a
+    head-office line, both with a blank `Company.Zip`, linked with no flag -
+    reopening round 2's finding 5 through a different door. A surname is also
+    exactly the field most likely to be absent: `clients_payload` sources it
+    from a merge token pinned to the UK template, so an INT template lacking it
+    yields None on EVERY row.
+
+    Consequence, recorded rather than discovered later: where the surname is
+    never populated, bar 3 is permanently unsatisfiable and the unkeyed path
+    never auto-links there. That is the safe direction - a spare sub-account is
+    visible and deletable, a wrong link puts one client's assets inside
+    another's - and it is the same posture this module takes everywhere else.
+
+    A PLACEHOLDER is not a name either. "Head Office" / "Front Desk" /
+    "Accounts Department" are what gets typed when the real signer is not
+    known, so two unrelated clients would corroborate each other on it - the
+    same reasoning `normalize_postcode` and `normalize_phone` already apply to
+    their own filler values. Only two-word placeholders need listing: a
+    single-word one ("Accounts", "Admin") leaves the surname blank and is
+    already refused by the both-parts rule above.
     """
-    name_a = f"{(first_a or '').strip()} {(last_a or '').strip()}".strip().lower()
-    name_b = f"{(first_b or '').strip()} {(last_b or '').strip()}".strip().lower()
-    return bool(name_a) and name_a == name_b
+    first_norm_a, last_norm_a = (first_a or "").strip().lower(), (last_a or "").strip().lower()
+    first_norm_b, last_norm_b = (first_b or "").strip().lower(), (last_b or "").strip().lower()
+    if not (first_norm_a and last_norm_a and first_norm_b and last_norm_b):
+        return False
+    if f"{first_norm_a} {last_norm_a}" in _PLACEHOLDER_CONTACT_NAMES:
+        return False
+    return (first_norm_a, last_norm_a) == (first_norm_b, last_norm_b)
 
 
 def names_materially_diverge(name_a: str | None, name_b: str | None) -> bool:
@@ -417,9 +553,48 @@ def names_materially_diverge(name_a: str | None, name_b: str | None) -> bool:
     return stem_a != stem_b
 
 
+def addresses_materially_diverge(address_a: str | None, address_b: str | None) -> bool:
+    """True ONLY when both addresses are present and normalize differently.
+
+    A DISQUALIFIER, not a corroborator - and the distinction is the whole
+    point. Round 2 (finding 2) correctly established that address cannot
+    CORROBORATE an identity-key match: `Company.Address` and `Company.Zip` come
+    from the same HubSpot company record, so the address agrees exactly when
+    the key already does, including in the franchisee case the bar exists to
+    block. That argument does not transfer to disqualification. A DIFFERING
+    address can only ever prevent a merge, never cause one, so reading it in
+    this direction adds a separator without adding a false-match risk.
+
+    This is what closes round 5's finding 1: one owner, two sites, the same
+    brand in `Company.Name`, the same head-office `Company.Zip` and the same
+    `Client.Phone` on both documents clears every other bar, and site 2 links
+    into site 1's sub-account with no flag. The street addresses differ, and
+    that is the only signal on the row that does.
+
+    **Note the deliberate ASYMMETRY with `names_materially_diverge`**, where an
+    absent name IS divergence. These read opposite because they do opposite
+    jobs: an absent NAME must not be allowed to satisfy a corroborating bar, so
+    absence fails closed; an absent ADDRESS must not be allowed to veto an
+    otherwise-corroborated link, so absence abstains. Absence is never treated
+    as agreement in either - it simply cannot vote here.
+
+    Comparison is deliberately STRICT (normalized equality): "1 Mare St" and
+    "1 Mare Street" diverge and the link is refused and flagged. That is the
+    safe direction - a refusal costs a spare sub-account a human can merge via
+    S1-26e, a wrong merge puts one client's assets in another's account.
+    """
+    stem_a = normalize_name(address_a)
+    stem_b = normalize_name(address_b)
+    if not stem_a or not stem_b:
+        return False
+    return stem_a != stem_b
+
+
 __all__ = [
     "LEGAL_ENTITY_PLACEHOLDER",
+    "addresses_materially_diverge",
     "compute_identity_key",
+    "contact_name_agrees",
     "corroborating_signal_agrees",
     "identity_name",
     "names_materially_diverge",

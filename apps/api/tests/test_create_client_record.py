@@ -711,6 +711,15 @@ async def test_dedup_key_falls_back_to_email_when_key_is_null(
     # SAME bucket - the residual the raw-string email key used to leave open.
     assert data["dedup_key"] == "email:mixed@example.com"
 
+    # THE PRODUCER AND THE CONSUMER MUST AGREE (review round 5). The consumer's
+    # CEL fallback is `"email:" + event.data.email`, so if this payload carried
+    # the RAW address the two would compute different buckets for one client
+    # and `Concurrency(limit=1)` would serialise nothing between a legacy event
+    # and a fresh one. Asserting the identity directly, rather than each side
+    # separately, is what makes a future divergence fail here.
+    assert data["email"] == "mixed@example.com"
+    assert f"email:{data['email']}" == data["dedup_key"]
+
 
 @pytest.mark.db
 async def test_identity_key_uses_legal_entity_when_no_business_name(

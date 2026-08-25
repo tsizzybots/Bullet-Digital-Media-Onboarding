@@ -15,6 +15,10 @@ retriable vs not):
   wraps this in `inngest.NonRetriableError`.
 - `GhlServerError` (5xx / 429) - GHL is down, rate-limiting, or timing
   out. Transient; the worker lets it propagate so Inngest retries.
+- `GhlNotConfiguredError` - the agency API key is empty, so no call is
+  possible. Non-retriable. It has its own type rather than a bare
+  `RuntimeError` because `httpx.StreamError` IS a `RuntimeError`, so a
+  broad catch dead-lettered recoverable transport failures alongside it.
 """
 
 from __future__ import annotations
@@ -97,6 +101,20 @@ class GhlClientError(GhlError):
         super().__init__(f"GHL returned {status_code}: {_clip(body)}")
 
 
+class GhlNotConfiguredError(GhlError, RuntimeError):
+    """The agency API key is empty, so no call can be made at all.
+
+    Non-retriable - retrying an unset env var achieves nothing - but it needs
+    its own type rather than a bare `RuntimeError` (review round 5). The worker
+    caught `RuntimeError` to dead-letter this case, and **`httpx.StreamError`
+    is a subclass of `RuntimeError`**, so a transport-level streaming failure
+    on a perfectly recoverable signing was being dead-lettered alongside it.
+
+    Still inherits `RuntimeError` so any caller that catches the old type keeps
+    working; the worker now catches THIS, which `httpx.StreamError` is not.
+    """
+
+
 class GhlServerError(GhlError):
     """A 5xx or 429 from GHL - server error, rate-limit, or overload.
 
@@ -165,7 +183,7 @@ class HttpGhlClient:
     async def create_location(self, payload: dict) -> GhlLocation:
         if not self._api_key:
             # Fail loudly rather than silently no-op, mirroring HttpPandaDocClient.
-            raise RuntimeError(
+            raise GhlNotConfiguredError(
                 "GHL_AGENCY_API_KEY is empty; cannot create sub-account. "
                 "Set it on the Render env group."
             )
@@ -198,7 +216,7 @@ class HttpGhlClient:
 
     async def find_location_by_email(self, email: str, *, company_id: str) -> GhlLocation | None:
         if not self._api_key:
-            raise RuntimeError(
+            raise GhlNotConfiguredError(
                 "GHL_AGENCY_API_KEY is empty; cannot look up sub-account. "
                 "Set it on the Render env group."
             )

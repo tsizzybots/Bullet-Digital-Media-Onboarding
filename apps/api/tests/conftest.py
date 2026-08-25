@@ -5,6 +5,14 @@ Tests marked `@pytest.mark.db` require a live Postgres reachable via
 without docker compose up), those tests are skipped with a clear message
 rather than failing - non-DB tests still run.
 
+**IN CI THIS FAILS CLOSED INSTEAD.** When `CI` is set, an unreachable
+database is an ERROR, not a skip. Silently skipping is how two review
+rounds shipped: ~223 DB tests turned into skips and the run still
+reported green, so every guard they covered was unverified while looking
+verified. A skipped test cannot fail, so it cannot prove anything - the
+same reason `review_gate_mutate.py` reports UNPROVEN rather than passing
+a mutation whose test skipped.
+
 The test engine uses `NullPool` so it cannot leak connections across the
 per-function event loops that `pytest-asyncio` creates in auto mode. The
 production engine in `bullet_api.db.session` remains pooled.

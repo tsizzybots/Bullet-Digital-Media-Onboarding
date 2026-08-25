@@ -50,7 +50,7 @@
 - Ran `scripts/smoke_ghl_subaccount.py` against the live agency.
 - **Create:** `POST /locations/` with `{name, companyId}` -> **HTTP 200**. Response is a full location object; `raw` keys: `brandId, business, companyId, country, currency, dateAdded, defaultEmailService, domain, email, id, isAgencySubAccount, logoUrl, name, permissions, settings, snapshotId, social, timezone, traceId, website`. The `create_location -> GhlLocation` projection (`id`/`name`/`companyId`) maps correctly, so the S1-25 assumptions hold. Because the object carries `id`/`name`/`companyId`, this also confirms the search-hit field names for `find_location_by_email`.
 - **Finding + fix (see 3.1):** the first cleanup DELETE 422'd and left a throwaway location; it was deleted by hand immediately, the script's delete params were corrected, and a re-run did a clean create+delete.
-- **Cleanup:** two throwaway locations created across the two runs (`fPHHcAkDMStPoyzbKWe1`, `h5AMaoiTQXD2CeKfqZcT`); BOTH confirmed deleted (delete -> 200 "Deleted location"; follow-up GET -> 403). No leak.
+- **Cleanup:** two throwaway locations created across the two runs (ids `<redacted, live GHL location ids - review round 5>`); BOTH confirmed deleted (delete -> 200 "Deleted location"; follow-up GET -> 403). No leak.
 
 ### Step 4b - Summary + embeddings seam smoke (21/07 + 22/07/2026) - ALL PASS
 Ran `scripts/smoke_summary_embeddings.py` (exercises the two live client seams; skips R2/DB/Inngest by design - the production summariser reads the transcript from R2, but the live-API risk lives entirely in the seams, which take/return plain objects).

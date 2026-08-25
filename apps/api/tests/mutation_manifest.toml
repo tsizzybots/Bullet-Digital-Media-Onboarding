@@ -1,0 +1,216 @@
+# G2 - the mutation manifest.
+#
+# Every guard names the test that KILLS it. `review_gate_mutate.py` breaks each
+# guard in turn, runs only the named test, and asserts that test FAILS. A guard
+# whose test still passes while the guard is broken is revert-green: it looks
+# defended and is not.
+#
+# This exists because five consecutive review rounds landed the same finding -
+# the fix was right, the test proving it was missing or could not fail. Round 5
+# put it plainly: "Delete all three guards and 609 tests still pass."
+#
+# Adding an entry is cheap. Skipping one costs a review round.
+
+[[mutation]]
+name = "F2 - postcode form invariance (no token sorting)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    stripped = \"\".join(tokens)"
+replace = "    stripped = \"\".join(sorted(tokens))"
+must_fail = "tests/test_identity_key.py::TestPostcodeFormInvariance"
+
+[[mutation]]
+name = "F2 - relaxed UK separator (round 4's whitespace-only form)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "[\\s,.\\-]*([0-9][A-Z]{2})"
+replace = "\\s*([0-9][A-Z]{2})"
+must_fail = "tests/test_identity_key.py::TestPostcodeFormInvariance"
+
+[[mutation]]
+name = "F3 - anchored _UK_POSTCODE (round 4's one-liner)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "r\"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\\s,.\\-]*([0-9][A-Z]{2})(?![A-Z0-9])\""
+replace = "r\"([A-Z]{1,2}[0-9][A-Z0-9]?)[\\s,.\\-]*([0-9][A-Z]{2})\""
+must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey"
+
+[[mutation]]
+name = "F3 - sequential-digit phone filler (round 4's one-liner)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        or _is_sequential_digits(tail)\n"
+replace = ""
+must_fail = "tests/test_identity_key.py::TestSequentialDigitFiller"
+
+[[mutation]]
+name = "F5 area - landline rejection (the pre-round-5 distinct-digit floor)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        len(set(tail)) == 1\n        or _is_repeating_pair(tail)"
+replace = "        len(set(tail)) <= 2"
+must_fail = "tests/test_identity_key.py::TestRealLandlinesSurvive"
+
+[[mutation]]
+name = "F4 - contact name requires both parts (the concatenate-and-strip form)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not (first_norm_a and last_norm_a and first_norm_b and last_norm_b):\n        return False"
+replace = "    if not (first_norm_a or last_norm_a):\n        return False"
+must_fail = "tests/test_identity_key.py::TestContactNameAgrees::test_blank_surname_does_not_collapse_to_a_first_name_match"
+
+[[mutation]]
+name = "F4 - placeholder contact names"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if f\"{first_norm_a} {last_norm_a}\" in _PLACEHOLDER_CONTACT_NAMES:\n        return False\n"
+replace = ""
+must_fail = "tests/test_identity_key.py::TestContactNameAgrees::test_placeholder_contact_names_never_agree"
+
+[[mutation]]
+name = "Unicode transliteration for letters NFKD cannot decompose"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    translated = value.translate(_TRANSLITERATIONS)"
+replace = "    translated = value"
+must_fail = "tests/test_identity_key.py::TestUnicodeFold"
+
+[[mutation]]
+name = "F1 - address disqualifier (pure helper)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not stem_a or not stem_b:\n        return False\n    return stem_a != stem_b"
+replace = "    return False"
+must_fail = "tests/test_identity_key.py::TestAddressesMateriallyDiverge::test_different_addresses_diverge"
+
+# --- DB-marked: these need Docker/Postgres up. They SKIP without it, and a
+# skipped test cannot fail, so the runner reports them as UNPROVEN rather than
+# passing them. A skipped run reporting green is exactly what let rounds 1-2
+# ship.
+
+# Bars 1 and 3 had NO manifest entry, which is why nobody noticed that removing
+# `_seed_client`'s shared phone default disarmed both: with no phone on either
+# row, bar 2 refuses first and neither the name check nor the contact-name check
+# ever decides anything. Deleting `names_materially_diverge` from `_pick_sibling`
+# left all 672 tests passing. Declared now.
+
+[[mutation]]
+name = "Numeric postcode from JSON is coerced, not read as absent"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    if isinstance(candidate, int):\n        # A numeric postcode (75008) can arrive unquoted from JSON, where it"
+replace = "    if False:\n        # A numeric postcode (75008) can arrive unquoted from JSON, where it"
+must_fail = "tests/test_ghl_subaccount.py::test_numeric_phone_and_postcode_from_json_still_corroborate"
+requires_db = true
+
+[[mutation]]
+name = "Numeric phone from JSON is coerced, not read as absent"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    if isinstance(candidate, int) and not isinstance(candidate, bool):\n        # A phone can arrive unquoted from JSON, same as a numeric postcode.\n        candidate = str(candidate)"
+replace = "    pass"
+must_fail = "tests/test_ghl_subaccount.py::test_numeric_phone_and_postcode_from_json_still_corroborate"
+requires_db = true
+
+[[mutation]]
+name = "Bar 1 - the full-name divergence check in _pick_sibling"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if names_materially_diverge(client_name, candidate_name):\n            continue"
+replace = "        if False:\n            continue"
+must_fail = "tests/test_ghl_subaccount.py::test_prefix_collision_divergent_names_flags_possible_duplicate"
+requires_db = true
+
+[[mutation]]
+name = "Bar 3 - the require_contact_name WIRING (not just the helper)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            if require_contact_name\n            else True"
+replace = "            if False\n            else True"
+must_fail = "tests/test_ghl_subaccount.py::test_null_identity_key_email_fallback_flags_when_contact_name_disagrees"
+requires_db = true
+
+[[mutation]]
+name = "F1 - address disqualifier wired into _pick_sibling"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if phone_agrees and contact_ok and not address_disqualifies:"
+replace = "        if phone_agrees and contact_ok:"
+must_fail = "tests/test_ghl_subaccount.py::test_franchisee_two_studios_same_phone_is_separated_by_address"
+requires_db = true
+
+[[mutation]]
+name = "The empty-key RAISE SITES must use the narrow type, not bare RuntimeError"
+file = "src/bullet_api/ghl/client.py"
+find = "            raise GhlNotConfiguredError(\n                \"GHL_AGENCY_API_KEY is empty; cannot create sub-account. \""
+replace = "            raise RuntimeError(\n                \"GHL_AGENCY_API_KEY is empty; cannot create sub-account. \""
+must_fail = "tests/test_ghl_client.py::test_empty_api_key_raises_not_configured"
+
+[[mutation]]
+name = "...and the lookup raise site too (it runs first on every attempt)"
+file = "src/bullet_api/ghl/client.py"
+find = "            raise GhlNotConfiguredError(\n                \"GHL_AGENCY_API_KEY is empty; cannot look up sub-account. \""
+replace = "            raise RuntimeError(\n                \"GHL_AGENCY_API_KEY is empty; cannot look up sub-account. \""
+must_fail = "tests/test_ghl_client.py::test_find_location_by_email_empty_api_key_raises_not_configured"
+
+[[mutation]]
+name = "A transport StreamError must not be dead-lettered as a config error"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        except GhlNotConfiguredError as exc:"
+replace = "        except RuntimeError as exc:"
+must_fail = "tests/test_ghl_subaccount.py::test_handler_never_dead_letters_a_bare_runtime_error"
+
+[[mutation]]
+name = "Producer and CEL must agree on the email bucket (raw vs lowercased)"
+file = "src/bullet_api/worker/client_record.py"
+find = '            "email": normalized_email,'
+replace = '            "email": fields.email,'
+must_fail = "tests/test_create_client_record.py::test_dedup_key_falls_back_to_email_when_key_is_null"
+requires_db = true
+
+[[mutation]]
+name = "A missing location name is unknown, not a confident negative"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if not name_known:\n            # Nothing known on either signal - the most ambiguous case there\n            # is, so it must not be a confident verdict in either direction.\n            return _GHL_HIT_UNDECIDABLE\n"
+replace = ""
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_with_no_name_is_undecidable_not_a_confident_negative"
+requires_db = true
+
+[[mutation]]
+name = "The failure recorder must recover a deactivated transaction (the zombie)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        except SQLAlchemyError:\n            await session.rollback()\n            await fail_action(session, action_id=begun.action_id, last_error=str(exc))"
+replace = "        except SQLAlchemyError:\n            raise"
+must_fail = "tests/test_ghl_subaccount.py::test_db_error_while_flagging_still_records_the_action_failed"
+requires_db = true
+
+# The PAIR to the one above. Recovering the zombie by rolling back
+# UNCONDITIONALLY silently discarded the possible-duplicate flag on every
+# ordinary failure - a regression introduced BY the first fix and caught by
+# this gate, not by review. Both directions need a killing test or the next
+# edit picks whichever one is unguarded.
+[[mutation]]
+name = "...without discarding the possible-duplicate flag on ordinary failures"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        try:\n            await fail_action(session, action_id=begun.action_id, last_error=str(exc))\n            await session.commit()\n        except SQLAlchemyError:\n            await session.rollback()"
+replace = "        if True:\n            await session.rollback()"
+must_fail = "tests/test_ghl_subaccount.py::test_possible_duplicate_flag_survives_an_ordinary_create_failure"
+requires_db = true
+
+[[mutation]]
+name = "F5 - GHL leg requires phone (the round-2 bar it was still using)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        return _GHL_HIT_SAME_BUSINESS if phone_agrees else _GHL_HIT_UNDECIDABLE"
+replace = "        return _GHL_HIT_SAME_BUSINESS"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_orphan_of_another_franchisee_is_not_reused"
+requires_db = true
+
+[[mutation]]
+name = "F5 - absence is not agreement on the GHL leg"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    candidate = raw.get(\"phone\")\n    if not candidate:\n        business = raw.get(\"business\")\n        if isinstance(business, dict):\n            candidate = business.get(\"phone\")"
+replace = "    candidate = raw.get(\"phone\")"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_reads_postcode_nested_under_business"
+requires_db = true
+
+[[mutation]]
+name = "F5 - the phone bar must not break the at-least-once backstop"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        phone_agrees = corroborating_signal_agrees(\n            phone_a=client_phone, phone_b=_location_phone(location)\n        )"
+replace = "        phone_agrees = False"
+must_fail = "tests/test_ghl_subaccount.py::test_lost_response_orphan_is_reused_when_the_lookup_returns_it"
+requires_db = true
+
+[[mutation]]
+name = "F1 - address must not break the genuine returning client"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        address_disqualifies = addresses_materially_diverge(client_address, candidate.address)"
+replace = "        address_disqualifies = bool(client_address) or bool(candidate.address)"
+must_fail = "tests/test_ghl_subaccount.py::test_returning_client_same_address_still_links"
+requires_db = true

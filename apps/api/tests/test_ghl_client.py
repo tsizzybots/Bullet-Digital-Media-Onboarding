@@ -18,6 +18,7 @@ from bullet_api.ghl.client import (
     GHL_API_VERSION,
     GhlClientError,
     GhlLocation,
+    GhlNotConfiguredError,
     GhlServerError,
     HttpGhlClient,
 )
@@ -68,9 +69,18 @@ async def test_create_location_sends_expected_url_headers_and_body() -> None:
     assert json.loads(request.content) == payload
 
 
-async def test_empty_api_key_raises_runtime_error() -> None:
+async def test_empty_api_key_raises_not_configured() -> None:
+    """The NARROW type, not bare RuntimeError (review round 5).
+
+    The worker catches `GhlNotConfiguredError` specifically, because
+    `httpx.StreamError` is itself a `RuntimeError` and the old broad catch
+    dead-lettered recoverable transport failures. Asserting the base class
+    here is satisfied by EITHER type, so it could not tell a revert apart -
+    and a reverted raise site would sail past the narrowed catch entirely,
+    burning the full retry budget on an unset env var.
+    """
     client = HttpGhlClient(api_key="")
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(GhlNotConfiguredError) as exc:
         await client.create_location({"name": "Gym", "companyId": "c"})
     assert "GHL_AGENCY_API_KEY" in str(exc.value)
 
@@ -150,9 +160,12 @@ async def test_find_location_by_email_404_returns_none() -> None:
     assert await client.find_location_by_email("nobody@example.com", company_id="c") is None
 
 
-async def test_find_location_by_email_empty_api_key_raises_runtime_error() -> None:
+async def test_find_location_by_email_empty_api_key_raises_not_configured() -> None:
+    """Same narrow-type assertion as the create path - the lookup runs
+    first on every attempt, so a reverted raise site here is reached
+    sooner."""
     client = HttpGhlClient(api_key="")
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(GhlNotConfiguredError) as exc:
         await client.find_location_by_email("a@b.com", company_id="c")
     assert "GHL_AGENCY_API_KEY" in str(exc.value)
 

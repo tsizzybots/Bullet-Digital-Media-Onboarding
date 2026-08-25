@@ -1,0 +1,15 @@
+{
+  "_README": [
+    "Values the gate should stop reporting. Add an entry ONLY with a reason,",
+    "and never to silence a real finding - a suppressed finding is exactly how",
+    "five review rounds happened. G6 entries in particular must be values that",
+    "are genuinely not live identifiers."
+  ],
+  "G1": [],
+  "G6": [
+    "aB3cD4eF5gH6iJ7kL8mN"
+  ],
+  "_G6_REASONS": {
+    "aB3cD4eF5gH6iJ7kL8mN": "Fictional id in review_gate.py's own comment, documenting the shape the GHL pattern matches. Not a live identifier - it replaced a real one that this check itself caught."
+  }
+}

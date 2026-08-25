@@ -436,7 +436,19 @@ async def create_client_record_core(
             "client_id": str(client_id),
             "onboarding_event_id": str(onboarding_event_id),
             "document_id": document_id,
-            "email": fields.email,
+            # NORMALIZED, so this field and `dedup_key` below cannot disagree
+            # about one client (review round 5). Stated precisely, because the
+            # first version of this comment overclaimed: the consumer's CEL
+            # fallback `"email:" + event.data.email` only fires when `dedup_key`
+            # is ABSENT, and this producer sets it unconditionally - so for
+            # events emitted here the field is never read for bucketing at all.
+            # The legacy events that DO hit the fallback were emitted by the old
+            # producer with the raw address already baked into the queued
+            # payload, which this change cannot retroactively fix. So this is
+            # defence-in-depth against a future producer that omits `dedup_key`,
+            # not a live bug being closed. Nothing else reads the field
+            # (grepped: the CEL key is its only consumer).
+            "email": normalized_email,
             # Propagate the PandaDoc account (S1-25c) so the signed-PDF worker
             # downloads with the matching account's API key.
             "account": account,

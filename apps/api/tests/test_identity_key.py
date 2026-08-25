@@ -10,6 +10,7 @@ import pytest
 
 from bullet_api.worker.identity_key import (
     LEGAL_ENTITY_PLACEHOLDER,
+    addresses_materially_diverge,
     compute_identity_key,
     contact_name_agrees,
     corroborating_signal_agrees,
@@ -256,7 +257,222 @@ class TestCorroboratingSignalAgrees:
     def test_placeholder_numbers_never_corroborate(self, a: str, b: str) -> None:
         # Two unrelated clients whose phone field was filled with filler must
         # not corroborate each other into a merge.
+        #
+        # NOTE these three are caught by the ORIGINAL denylist and
+        # distinct-digit check. They are kept as regression cover for those,
+        # but they prove nothing about the round-4 sequential guard - see
+        # `TestSequentialDigitFiller` below, which is the test that actually
+        # dies when `_is_sequential_digits` is removed.
         assert corroborating_signal_agrees(phone_a=a, phone_b=b) is False
+
+
+class TestNameTokenizerDropsPunctuationAndRuns:
+    """The tokenizer's own documented examples, which nothing tested.
+
+    `_ALNUM_TOKEN`'s comment names "F45  Training" (double space) and "ltd." as
+    the cases it exists to normalize; neither appeared in the suite.
+    """
+
+    def test_repeated_whitespace_collapses(self) -> None:
+        assert normalize_name("F45  Training") == normalize_name("F45 Training") == "f45training"
+
+    def test_trailing_suffix_punctuation_dropped(self) -> None:
+        assert normalize_name("Foobar Ltd.") == normalize_name("Foobar Limited") == "foobar"
+
+
+class TestSequentialDigitFiller:
+    """Kills `_is_sequential_digits` (review round 4, one-line finding).
+
+    The guard existed for two rounds with NO test naming a value only it
+    catches, so deleting it left the suite green - which is how round 5 found
+    it. `"1234567890"` is the most common filler number in existence and its
+    9-digit tail is `"234567890"`, absent from `_PLACEHOLDER_PHONE_TAILS`.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "1234567890",  # the tail is "234567890" - NOT in the denylist
+            "0123456789",
+            "9876543210",
+            "2345678901",
+        ],
+    )
+    def test_sequential_runs_are_filler(self, value: str) -> None:
+        assert normalize_phone(value) == ""
+
+    def test_sequential_filler_never_corroborates(self) -> None:
+        assert corroborating_signal_agrees(phone_a="1234567890", phone_b="1234567890") is False
+
+
+class TestRealLandlinesSurvive:
+    """Review round 5: the filler check was rejecting real UK landlines.
+
+    `len(set(tail)) <= 2` treated `"+44 20 7700 0000"` (tail `"770000000"`,
+    distinct digits {7, 0}) as filler, so bar 2 was PERMANENTLY unsatisfiable
+    for every client on such a number and a genuine returning client got a
+    duplicate sub-account on every signing, silently. Filler is a matter of
+    shape - one repeated digit, or a repeating pair - not of how few distinct
+    digits happen to appear.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "+44 20 7700 0000",  # London landline
+            "020 7000 0000",
+            "0800 100 1000",  # freephone
+            "+44 161 200 2000",
+        ],
+    )
+    def test_real_landline_is_usable(self, value: str) -> None:
+        assert normalize_phone(value) != ""
+
+    def test_landline_corroborates_a_returning_client(self) -> None:
+        assert (
+            corroborating_signal_agrees(phone_a="+44 20 7700 0000", phone_b="020 7700 0000") is True
+        )
+
+    @pytest.mark.parametrize("value", ["0000000000", "1212121212", "2121212121"])
+    def test_shape_filler_is_still_rejected(self, value: str) -> None:
+        # Narrowing the check must not reopen the hole it was narrowed from.
+        assert normalize_phone(value) == ""
+
+
+class TestPostcodeFormInvariance:
+    """THE invariant: one postal value produces one key, whatever form it takes.
+
+    Four axes vary independently in the wild - token order, separator, case and
+    an attached town - and normalization must be blind to all four. Round 4
+    fixed the ORDER axis by sorting tokens and broke the SEPARATOR axis doing
+    it, which is review round 5's finding 2: a regression of the same class as
+    the bug it fixed. Testing the invariant rather than the reported example is
+    what makes that impossible to repeat.
+    """
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("K1A 0B1", "K1A0B1"),  # Canada - broken by round 4's sort
+            ("94107 1234", "94107-1234"),  # US ZIP+4 - broken by round 4's sort
+            ("E8 1AA", "E8, 1AA"),  # UK, punctuated address line
+            ("E8 1AA", "E8-1AA"),  # UK, hyphenated
+            # A comma-separated line carrying a FLAT NUMBER. This is the case
+            # that makes the relaxed separator load-bearing rather than
+            # cosmetic: without it the UK branch misses, step 3 keeps every
+            # digit-bearing token, and the flat number contaminates the key
+            # ("2E81AA"). Found by the mutation runner, not by review - the
+            # first three rows above all survive the unrelaxed separator.
+            ("E8 1AA", "Flat 2, E8, 1AA"),
+            ("E8 1AA", "e8  1aa"),  # case + whitespace
+            ("London E8 1AA", "E8 1AA"),  # attached town
+            ("75008 Paris", "Paris 75008"),  # token order - round 4's own case
+            ("D02 X285", "D02X285"),  # Ireland
+        ],
+    )
+    def test_same_value_different_form_keys_identically(self, a: str, b: str) -> None:
+        assert normalize_postcode(a) == normalize_postcode(b) != ""
+
+    def test_different_postcodes_still_differ(self) -> None:
+        # Form-invariance must not collapse genuinely different values.
+        assert normalize_postcode("E8 1AA") != normalize_postcode("E9 1AA")
+        assert normalize_postcode("75008 Paris") != normalize_postcode("75009 Paris")
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("K1A 0B1", "K1A0B1"),
+            ("94107 1234", "941071234"),
+            ("75008 Paris", "75008"),
+            ("E8, 1AA", "E81AA"),
+        ],
+    )
+    def test_canonical_output_is_pinned(self, value: str, expected: str) -> None:
+        """Pin the exact canonical form, not just that two inputs agree.
+
+        Round 4's sort produced "0B1K1A" and "123494107" for the first two -
+        self-consistent, so an equality-only test could still pass while the
+        stored key changed under everyone. Migration 0013 warns that stored
+        keys are a snapshot of this normalizer, so the concrete output is part
+        of the contract, not an implementation detail.
+        """
+        assert normalize_postcode(value) == expected
+
+
+class TestMalformedPostcodeNeverMintsAUkKey:
+    """Kills the round-4 anchoring of `_UK_POSTCODE`.
+
+    Unanchored, the pattern matched a SUBSTRING of a malformed value, minting a
+    confident but WRONG UK key instead of falling through to the fail-safe.
+    Neither literal below appeared anywhere in the suite before round 5, so the
+    anchors were revert-green.
+    """
+
+    def test_trailing_characters_do_not_mint_a_uk_key(self) -> None:
+        assert normalize_postcode("AB12 3CDE") != "AB123CD"
+
+    def test_extra_letter_does_not_mint_a_uk_key(self) -> None:
+        assert normalize_postcode("E81AAX") != "E81AA"
+
+    def test_a_malformed_value_never_collides_with_the_real_one(self) -> None:
+        # The failure that matters: a malformed value keying as a REAL client's
+        # postcode would merge two unrelated businesses.
+        assert normalize_postcode("E81AAX") != normalize_postcode("E8 1AA")
+
+
+class TestUnicodeFold:
+    """Letters NFKD cannot decompose (review round 5).
+
+    NFKD splits base + combining mark, but o-slash, eszett, l-stroke and ash
+    are single indivisible code points - nothing to split - so the ASCII
+    tokenizer DELETED them, keying one business two ways.
+    """
+
+    @pytest.mark.parametrize(
+        ("accented", "plain"),
+        [
+            ("Bjørn Fitness", "Bjorn Fitness"),
+            ("Café Gym", "Cafe Gym"),
+            ("Łódź Gym", "Lodz Gym"),
+            ("Æon Fitness", "AEon Fitness"),
+        ],
+    )
+    def test_accented_and_plain_spellings_key_identically(self, accented: str, plain: str) -> None:
+        assert normalize_name(accented) == normalize_name(plain) != ""
+
+
+class TestAddressesMateriallyDiverge:
+    """Bar 4 - a DISQUALIFIER, so its absence posture is inverted.
+
+    Review round 5, finding 1. Address cannot corroborate (it collapses with
+    the postcode, round 2 finding 2) but a DIFFERING address can still refuse a
+    link, and that refusal is the only thing separating one owner's two sites
+    when brand, head-office postcode and phone are all identical.
+    """
+
+    def test_different_addresses_diverge(self) -> None:
+        assert (
+            addresses_materially_diverge("Studio One, 1 Mare Street", "Studio Two, 99 Kingsland")
+            is True
+        )
+
+    def test_same_address_does_not_diverge(self) -> None:
+        assert addresses_materially_diverge("1 Mare Street", "1 Mare Street") is False
+
+    def test_formatting_differences_do_not_diverge(self) -> None:
+        assert addresses_materially_diverge("1 Mare Street", "1  mare  street.") is False
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [(None, "1 Mare Street"), ("1 Mare Street", None), (None, None), ("", "1 Mare Street")],
+    )
+    def test_absence_abstains_rather_than_disqualifying(self, a: str | None, b: str | None) -> None:
+        # THE asymmetry against `names_materially_diverge`, where absence IS
+        # divergence. A missing corroborator must fail closed or a missing
+        # signal reads as a match; a missing DISQUALIFIER must abstain or it
+        # vetoes links it has no evidence against - which for the legacy rows
+        # carrying no address would refuse every genuine returning client.
+        assert addresses_materially_diverge(a, b) is False
 
 
 class TestContactNameAgrees:
@@ -286,6 +502,68 @@ class TestContactNameAgrees:
         assert contact_name_agrees("John", "Smith", None, None) is False
         assert contact_name_agrees(None, None, "John", "Smith") is False
 
+    @pytest.mark.parametrize("missing", [None, "", "   "])
+    def test_blank_surname_does_not_collapse_to_a_first_name_match(
+        self, missing: str | None
+    ) -> None:
+        """Review round 5, finding 4 - and the reason bar 3 needed narrowing.
+
+        Concatenate-and-strip meant a blank `Client.LastName` on BOTH rows
+        reduced this bar to first names: two different Sarahs at two sites,
+        sharing an `ops@` mailbox and a head-office line, both with a blank
+        `Company.Zip`, linked with no flag - reopening round 2's finding 5
+        through a different door.
+
+        The surname is also the field most likely to be absent: it is sourced
+        from a merge token pinned to the UK template, so an INT template
+        lacking it yields None on EVERY row. Absence of a signal is absence of
+        the signal, never agreement.
+        """
+        assert contact_name_agrees("Sarah", missing, "Sarah", missing) is False
+
+    @pytest.mark.parametrize(
+        "full_name",
+        ["Head Office", "Accounts Department", "Front Desk", "The Office"],
+    )
+    def test_placeholder_contact_names_never_agree(self, full_name: str) -> None:
+        # A department is what gets typed when the real signer is unknown, so
+        # two unrelated clients would corroborate each other on it - the same
+        # reasoning the placeholder postcode and phone denylists apply.
+        # Parametrized on the FULL name so each denylist member appears
+        # literally, and a member silently dropped from the set fails here.
+        first, last = full_name.split(" ", 1)
+        assert contact_name_agrees(first, last, first, last) is False
+
+    def test_placeholder_matching_is_case_and_space_insensitive(self) -> None:
+        # The denylist is compared against the lowercased "first last" form, so
+        # "Head Office" typed any which way must still be rejected.
+        assert contact_name_agrees("HEAD", " Office ", "head", "office") is False
+
+    def test_a_real_full_name_still_agrees(self) -> None:
+        # Narrowing must not break the case bar 3 exists to serve: the SAME
+        # person signing a second time for a genuinely returning client.
+        assert contact_name_agrees("Sarah", "Okonkwo", "sarah", " Okonkwo ") is True
+
+
+class TestPrefixCollisionIsFlaggedNotMerged:
+    """`names_materially_diverge`'s own documented example, untested until now.
+
+    The 6-char key truncation is deliberately lenient, so this function's job is
+    catching the false matches that leniency creates. Its docstring names
+    "Brand Gym Hackney Gym" vs "Brand Gym Hackney" as the pair that must
+    diverge - a strictness that is the safe side of "never auto-merge".
+    """
+
+    def test_a_longer_name_at_the_same_key_diverges(self) -> None:
+        assert names_materially_diverge("Brand Gym Hackney Gym", "Brand Gym Hackney") is True
+
+    def test_the_two_still_share_an_identity_key(self) -> None:
+        # Which is WHY the divergence check earns its place: the key alone
+        # cannot separate them.
+        assert compute_identity_key("Brand Gym Hackney Gym", "E8 1AA") == compute_identity_key(
+            "Brand Gym Hackney", "E8 1AA"
+        )
+
 
 class TestPostcodePlaceholderShapes:
     """A denylist only catches the placeholders someone thought of.
@@ -297,6 +575,15 @@ class TestPostcodePlaceholderShapes:
     @pytest.mark.parametrize("value", ["99999", "XXXX", "1111", "AAAA"])
     def test_single_repeated_character_rejected(self, value: str) -> None:
         assert normalize_postcode(value) == ""
+
+    def test_placeholder_survives_the_town_drop_step(self) -> None:
+        """Rejection runs AFTER the alphabetic-token drop, not before it.
+
+        "00000 ABC" drops to "00000", which the placeholder denylist then
+        catches. Under the order the docstring used to claim (reject first, on
+        the raw strip) it would have keyed as "00000ABC" and sailed through.
+        """
+        assert normalize_postcode("00000 ABC") == ""
 
     @pytest.mark.parametrize("value", ["TBA", "NONE", "ASAP", "PENDING"])
     def test_no_digit_at_all_rejected(self, value: str) -> None:
