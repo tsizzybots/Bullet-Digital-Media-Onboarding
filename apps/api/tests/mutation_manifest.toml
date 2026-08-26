@@ -11,12 +11,55 @@
 #
 # Adding an entry is cheap. Skipping one costs a review round.
 
+# --- normalize_postcode, rebuilt in round 6 -----------------------------------
+# This function produced a blocking finding in rounds 4, 5 AND 6. Each piece of
+# the new design is mutated separately, and each is killed by a PROPERTY test
+# rather than an example - the round-6 diagnosis was that only 1 of 9 example
+# pairs even entered the branch under test.
+
 [[mutation]]
-name = "F2 - postcode form invariance (no token sorting)"
+name = "R6 - alpha/digit tokenizer (separator-independence)"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    stripped = \"\".join(tokens)"
-replace = "    stripped = \"\".join(sorted(tokens))"
-must_fail = "tests/test_identity_key.py::TestPostcodeFormInvariance"
+find = '_POSTCODE_TOKEN = re.compile(r"[A-Z]+|[0-9]+")'
+replace = '_POSTCODE_TOKEN = re.compile(r"[A-Z0-9]+")'
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeSeparatorIndependence"
+
+[[mutation]]
+name = "R6 - the sort (order-independence)"
+file = "src/bullet_api/worker/identity_key.py"
+find = '    stripped = "".join(sorted(tokens))'
+replace = '    stripped = "".join(tokens)'
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeOrderIndependence"
+
+[[mutation]]
+name = "R6 - UK pattern probed on the separator-stripped form too"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    for probe in (upper, flat):"
+replace = "    for probe in (upper,):"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeSeparatorIndependence"
+
+[[mutation]]
+name = "R6 - ZIP+4 reduces to ZIP5"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    zip_plus_four = _US_ZIP_PLUS_FOUR.match(flat)"
+replace = "    zip_plus_four = None"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSixCases::test_reported_splits_are_closed"
+
+[[mutation]]
+name = "R6 - filler DIGIT content is rejected even beside letters (00000 ABC)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if digits and (digits in _PLACEHOLDER_POSTCODES or len(set(digits)) == 1):\n        return \"\""
+replace = "    if False:\n        return \"\""
+must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_placeholder_survives_the_town_drop_step"
+
+# Round 6 named both of these as revert-green with no manifest entry.
+
+[[mutation]]
+name = "R6 - names_materially_diverge treats an EMPTY stem as divergence"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not stem_a or not stem_b:\n        return True"
+replace = "    if False:\n        return True"
+must_fail = "tests/test_identity_key.py::TestNamesMateriallyDiverge::test_empty_stem_is_divergence_not_agreement"
 
 [[mutation]]
 name = "F2 - relaxed UK separator (round 4's whitespace-only form)"
@@ -186,8 +229,8 @@ requires_db = true
 [[mutation]]
 name = "F5 - GHL leg requires phone (the round-2 bar it was still using)"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "        return _GHL_HIT_SAME_BUSINESS if phone_agrees else _GHL_HIT_UNDECIDABLE"
-replace = "        return _GHL_HIT_SAME_BUSINESS"
+find = "        if not phone_agrees:\n            return _GHL_HIT_UNDECIDABLE"
+replace = "        if False:\n            return _GHL_HIT_UNDECIDABLE"
 must_fail = "tests/test_ghl_subaccount.py::test_ghl_orphan_of_another_franchisee_is_not_reused"
 requires_db = true
 
@@ -213,4 +256,93 @@ file = "src/bullet_api/worker/ghl_subaccount.py"
 find = "        address_disqualifies = addresses_materially_diverge(client_address, candidate.address)"
 replace = "        address_disqualifies = bool(client_address) or bool(candidate.address)"
 must_fail = "tests/test_ghl_subaccount.py::test_returning_client_same_address_still_links"
+requires_db = true
+
+# Review round 6, P1: the keyed path selected strictly one query, so every
+# pre-0013 row (NULL identity_key, no backfill) was permanently invisible.
+
+[[mutation]]
+name = "R6 - keyed path falls back to the email query when it finds nothing"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+# Models the ACTUAL pre-round-6 behaviour: email consulted only when the row is
+# unkeyed, so a keyed client never reaches a pre-0013 sibling. (The first
+# attempt at this entry mutated to `if keyed:`, which still runs the fallback
+# for a keyed client and therefore disabled nothing - it SURVIVED, and the
+# runner said so.)
+find = "    keyed_candidates_found = bool(candidates)\n    if not candidates:"
+replace = "    keyed_candidates_found = bool(candidates)\n    if not keyed:"
+must_fail = "tests/test_ghl_subaccount.py::test_keyed_client_falls_back_to_email_for_a_pre_0013_sibling"
+requires_db = true
+
+[[mutation]]
+name = "R6 - ...and the fallback carries the UNKEYED bar, not the keyed one"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        require_contact_name=not keyed_candidates_found,"
+replace = "        require_contact_name=not keyed,"
+must_fail = "tests/test_ghl_subaccount.py::test_keyed_email_fallback_still_demands_the_contact_name"
+requires_db = true
+
+[[mutation]]
+name = "R6 - ...and the fallback NEVER reconsiders a row the key already separated"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "                _SIBLING_BY_EMAIL_UNKEYED_SQL if keyed else _SIBLING_BY_EMAIL_SQL,"
+replace = "                _SIBLING_BY_EMAIL_SQL,"
+must_fail = "tests/test_ghl_subaccount.py::test_email_fallback_never_reconsiders_a_row_the_key_already_separated"
+requires_db = true
+
+# Review round 6, P1: the subordination guard cannot engage on an empty
+# candidate set, so the GHL leg needed bar 4 of its own.
+
+[[mutation]]
+name = "R6 - the GHL leg applies bar 4 (address disqualifier)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if addresses_materially_diverge(client_address, location_address):\n            return _GHL_HIT_UNDECIDABLE"
+replace = "        if False:\n            return _GHL_HIT_UNDECIDABLE"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_leg_applies_bar_4_when_the_db_leg_saw_no_candidates"
+requires_db = true
+
+[[mutation]]
+name = "R6 - an address we cannot corroborate is not agreement"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if client_address and not location_address:\n            return _GHL_HIT_UNDECIDABLE"
+replace = "        if False:\n            return _GHL_HIT_UNDECIDABLE"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_we_hold_an_address_for_but_cannot_corroborate_is_undecidable"
+requires_db = true
+
+[[mutation]]
+name = "R6 - address is SENT on create, or the GHL leg is blind to bar 4"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = '''    if address:
+        payload["address"] = address'''
+replace = '''    if False:
+        pass'''
+must_fail = "tests/test_ghl_subaccount.py::test_create_payload_carries_the_address_so_our_own_locations_self_identify"
+requires_db = true
+
+# Review round 6: a pure prefix collision flagged an INNOCENT client against a
+# row positively established as a different business, and suppressed that
+# client's own GHL lookup behind the collision guard.
+
+[[mutation]]
+name = "R6 - a pure prefix collision must not flag anyone"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    return None, collided"
+replace = "    return None, collided or (candidates[0] if candidates else None)"
+must_fail = "tests/test_ghl_subaccount.py::test_prefix_collision_divergent_names_flags_possible_duplicate"
+requires_db = true
+
+[[mutation]]
+name = "R6 - a torn action never reports success with no sub-account id"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if client.ghl_subaccount_id:\n            return CreateSubaccountResult("
+replace = "        if True:\n            return CreateSubaccountResult("
+must_fail = "tests/test_ghl_subaccount.py::test_torn_action_success_with_no_id_is_repaired_not_reported_clean"
+requires_db = true
+
+[[mutation]]
+name = "R6 - a corroborated link CLEARS an earlier possible-duplicate flag"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        await _clear_possible_duplicate(session, client_id=client_id)"
+replace = "        pass"
+must_fail = "tests/test_ghl_subaccount.py::test_a_confident_link_clears_an_earlier_possible_duplicate_flag"
 requires_db = true

@@ -149,6 +149,11 @@ jobs:
     needs: [python-checks]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The review gate diffs against the merge base. A shallow checkout has
+          # no `main` ref, and the gate EXITS rather than reporting a vacuous
+          # pass over an empty diff - so this is required, not cosmetic.
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -184,6 +189,24 @@ jobs:
         env:
           DATABASE_URL: ${{ steps.neon-branch.outputs.db_url || secrets.NEON_STAGING_DATABASE_URL }}
         run: uv run pytest apps/api -v --tb=short
+
+      # The review gate, on the same job because the mutation half needs the
+      # SAME database the suite just used. Review round 6, P1: without this the
+      # gate is a point-in-time measurement on one laptop - the manifest rots
+      # silently and a stale `find` pattern (correctly reported ERROR) never
+      # surfaces. The mechanism built to stop round 6 would not have survived
+      # its first refactor.
+      #
+      # `--include-db` is deliberate: db-marked guards SKIP without Postgres, a
+      # skipped test cannot fail, so it cannot prove a guard. The runner reports
+      # UNPROVEN and fails, which is the whole point.
+      - name: Review gate (static checks)
+        run: uv run python apps/api/scripts/review_gate.py --base origin/${{ github.base_ref || 'main' }}
+
+      - name: Review gate (mutation manifest)
+        env:
+          DATABASE_URL: ${{ steps.neon-branch.outputs.db_url || secrets.NEON_STAGING_DATABASE_URL }}
+        run: uv run python apps/api/scripts/review_gate_mutate.py --include-db
 
       # Always clean up the ephemeral branch, even if earlier steps failed.
       - name: Delete Neon branch

@@ -83,6 +83,20 @@ _ALNUM_TOKEN = re.compile(r"[a-z0-9]+")
 _NON_ALNUM = re.compile(r"[^A-Z0-9]+")
 _NON_DIGIT = re.compile(r"[^0-9]")
 
+# Postcode tokens: maximal runs of letters OR digits. Splitting on the
+# alpha<->digit TRANSITION as well as on separators is the whole point - it is
+# what makes the token set identical for "1011 AB", "1011AB" and "1011-AB", and
+# therefore what makes the key separator-independent (review round 6, finding 1).
+# `str.split()` could not do this: it only ever splits on whitespace, so
+# "1011AB" stayed one token while "1011 AB" became two.
+_POSTCODE_TOKEN = re.compile(r"[A-Z]+|[0-9]+")
+
+# US ZIP+4 ("94107-1234") identifies the same delivery area as its ZIP5
+# ("94107"), so one business writing each form must not split into two clients.
+# Reduced to the ZIP5 BEFORE tokenizing, because the sort below would otherwise
+# interleave the two digit groups and a positional truncation would be garbage.
+_US_ZIP_PLUS_FOUR = re.compile(r"^(\d{5})-?\d{4}$")
+
 # Phone comparison uses the TAIL of the digits so a country code / trunk prefix
 # difference ("+44 7700 900123" vs "07700 900123") does not split one business.
 # 9 is long enough that two genuinely different numbers colliding is not a real
@@ -315,19 +329,32 @@ def normalize_postcode(postcode: str | None) -> str:
     if not postcode:
         return ""
     upper = postcode.upper()
-    uk_match = _UK_POSTCODE.search(upper)
-    if uk_match is not None:
-        return uk_match.group(1) + uk_match.group(2)
-    tokens = [t for t in (_NON_ALNUM.sub("", token) for token in upper.split()) if t]
-    # A digit-bearing token is the postal code itself; a purely-alphabetic one
-    # beside it is a town ("75008 Paris"). Dropping the latter makes the result
-    # order-independent WITHOUT reordering characters, which is what round 4's
-    # sort did at the cost of separator-sensitivity. When nothing carries a
-    # digit, keep every token - the no-digit rejection below then handles it.
-    if any(any(ch.isdigit() for ch in token) for token in tokens):
-        tokens = [token for token in tokens if any(ch.isdigit() for ch in token)]
-    stripped = "".join(tokens)
+    flat = _NON_ALNUM.sub("", upper)
+    # The UK pattern is tried on the RAW string AND on the separator-stripped
+    # form. With the raw string alone the UK branch is ITSELF
+    # separator-sensitive: "AB12CD" matches and "AB 12 CD" does not, so one
+    # postcode keys two ways. Found by the property runner, not by example -
+    # every hand-picked UK case in the suite happened to match both ways.
+    for probe in (upper, flat):
+        uk_match = _UK_POSTCODE.search(probe)
+        if uk_match is not None:
+            return uk_match.group(1) + uk_match.group(2)
+    zip_plus_four = _US_ZIP_PLUS_FOUR.match(flat)
+    if zip_plus_four is not None:
+        return zip_plus_four.group(1)
+    # Tokenize on alpha/digit runs, then SORT. The two steps do different jobs
+    # and both are load-bearing: the tokenizer delivers separator-independence,
+    # the sort delivers order-independence ("75008 Paris" == "Paris 75008").
+    # Nothing is DROPPED, which is what makes this non-lossy.
+    tokens = _POSTCODE_TOKEN.findall(upper)
+    stripped = "".join(sorted(tokens))
     if len(stripped) < _MIN_POSTCODE_LEN or stripped in _PLACEHOLDER_POSTCODES:
+        return ""
+    # A value whose DIGIT content is itself filler is filler, however many
+    # letters sit beside it ("00000 ABC"). Checked on the digits alone because
+    # the letters would otherwise satisfy the distinct-character test below.
+    digits = "".join(token for token in tokens if token.isdigit())
+    if digits and (digits in _PLACEHOLDER_POSTCODES or len(set(digits)) == 1):
         return ""
     # A denylist is a BLOCKLIST, so it only ever catches the placeholders
     # somebody thought of - "TBA", "99999" and "12345" all sail past one

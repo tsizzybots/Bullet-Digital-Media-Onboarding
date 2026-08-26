@@ -109,7 +109,7 @@ class TestNormalizePostcode:
 
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [("75008", "75008"), ("D02 X285", "D02X285"), ("10115", "10115"), ("2000", "2000")],
+        [("75008", "75008"), ("D02 X285", "02285DX"), ("10115", "10115"), ("2000", "2000")],
     )
     def test_international_postcodes_survive(self, value: str, expected: str) -> None:
         # The INT PandaDoc account is live, so a UK-only rule would silently
@@ -194,6 +194,27 @@ class TestNamesMateriallyDiverge:
     def test_prefix_collision_diverges(self) -> None:
         # Same first-6 ("fitnes") but different full names -> divergent.
         assert names_materially_diverge("Fitness First", "Fitness Studio") is True
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [(None, None), ("", ""), ("   ", "   "), ("The", "Ltd"), (None, "Real Gym")],
+    )
+    def test_empty_stem_is_divergence_not_agreement(self, a: str | None, b: str | None) -> None:
+        """An UNUSABLE name is divergence, never a match (round 2, finding 6).
+
+        Two unidentifiable signings both normalize to "", so plain equality
+        called them a match - directly contradicting `identity_name`'s promise
+        that an unidentifiable signing can never merge with another. "The" and
+        "Ltd" are the sharp case: both are non-empty strings that normalize
+        away to nothing.
+
+        Added in round 6, which found this branch had no killing test and no
+        manifest entry - delete it and two unidentifiable signings clear bar 1.
+        Note the deliberate ASYMMETRY against `addresses_materially_diverge`,
+        where absence ABSTAINS: this one corroborates, so absence must fail
+        closed; that one disqualifies, so absence must not veto.
+        """
+        assert names_materially_diverge(a, b) is True
 
 
 class TestNormalizePhone:
@@ -381,9 +402,16 @@ class TestPostcodeFormInvariance:
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
-            ("K1A 0B1", "K1A0B1"),
-            ("94107 1234", "941071234"),
-            ("75008 Paris", "75008"),
+            # Sorted alpha/digit tokens. The exact string is opaque - what is
+            # pinned is that it is STABLE, because migration 0013 warns stored
+            # keys are a snapshot of this module and there is no recompute tool.
+            ("K1A 0B1", "011ABK"),
+            # ZIP+4 reduces to ZIP5, so "94107" and "94107-1234" are one client.
+            ("94107 1234", "94107"),
+            # The town is KEPT, not dropped. Dropping it was round 5's lossy
+            # collide ("1011 AB" == "1011 CD"); the sort delivers the
+            # order-independence the drop was reaching for, without the loss.
+            ("75008 Paris", "75008PARIS"),
             ("E8, 1AA", "E81AA"),
         ],
     )

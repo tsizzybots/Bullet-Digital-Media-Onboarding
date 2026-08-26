@@ -99,6 +99,36 @@ def _node_id_resolves(node_id: str) -> bool:
     return proc.returncode == 0 and " no tests ran" not in (proc.stdout + proc.stderr)
 
 
+# One entry per unique `must_fail`, so a node id shared by several guards is
+# only baselined once.
+_BASELINE_CACHE: dict[str, tuple[bool, str]] = {}
+
+
+def _baseline_is_clean(node_id: str) -> tuple[bool, str]:
+    """Does this test PASS on unmutated source?
+
+    Review round 6: `_node_id_resolves` proved the test EXISTS, not that it
+    passes. A test already red for an unrelated reason exits 1 under mutation
+    too, and the runner recorded KILLED - the same false-pass class the round-5
+    work was supposed to end, living inside the tool that checks for it.
+
+    A guard cannot be proven by a test that was going to fail anyway, so a red
+    baseline is an ERROR, not a kill.
+    """
+    if node_id not in _BASELINE_CACHE:
+        status, detail = _run_test(node_id)
+        if status == SURVIVED:  # "passed with the guard broken" == passed clean
+            _BASELINE_CACHE[node_id] = (True, "")
+        elif status == UNPROVEN:
+            _BASELINE_CACHE[node_id] = (False, "skips on unmutated source - it cannot kill")
+        else:
+            _BASELINE_CACHE[node_id] = (
+                False,
+                f"does NOT pass on unmutated source ({status}) - a kill would be spurious",
+            )
+    return _BASELINE_CACHE[node_id]
+
+
 def _run_test(node_id: str) -> tuple[str, str]:
     """Return (status, detail) for one mutated guard's named test."""
     try:
@@ -253,6 +283,12 @@ def main() -> int:
             outcomes.append(
                 Outcome(name, ERROR, f"must_fail selects no test: {entry['must_fail']}")
             )
+            print(f"  {ERROR:<9} {name}")
+            continue
+
+        baseline_ok, baseline_detail = _baseline_is_clean(entry["must_fail"])
+        if not baseline_ok:
+            outcomes.append(Outcome(name, ERROR, f"{entry['must_fail']} {baseline_detail}"))
             print(f"  {ERROR:<9} {name}")
             continue
 

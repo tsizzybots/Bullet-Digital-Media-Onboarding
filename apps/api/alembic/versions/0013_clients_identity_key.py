@@ -31,16 +31,20 @@ the dedup guard raises:
   because `Company.Address` and `Company.Zip` are read from the same HubSpot
   company record, so the address agrees exactly when the key already agrees and
   corroborates nothing extra.
-  It IS a disqualifier (review round 5, finding 1). The two directions are not
-  symmetric: a signal that collapses with the key can never GRANT a link it did
-  not already imply, but a DIFFERING address can still refuse one. That refusal
-  is the only thing separating one owner's two sites when the brand, the
-  head-office `Company.Zip` and the `Client.Phone` are identical on both
-  documents - which cleared every other bar and auto-linked site 2 into site
-  1's sub-account with no flag. So the returning-client auto-link requires name
+  It IS a disqualifier (review round 5, finding 1): a signal that collapses with
+  the key can never GRANT a link it did not already imply, but a DIFFERING
+  address can still refuse one. So the returning-client auto-link requires name
   + postcode (the key) PLUS phone agreement, AND no actively-disagreeing
   address. Absence abstains rather than blocking - see
   `identity_key.addresses_materially_diverge`.
+  CORRECTED (review round 6): the round-5 wording claimed this closes the
+  one-owner-two-sites case. It does not. `Company.Address` and `Company.Zip`
+  come from the SAME HubSpot company record, so one owner with one company
+  record and two deals gives two rows identical on address as well as postcode -
+  every bar clears and site 2 still auto-links. Bar 4 fires only when two rows
+  come from DIFFERENT company records sharing a postcode. Closing the real case
+  needs `hubspot_company_id`, which Bullet's documents do not currently carry -
+  see `_pick_sibling`'s docstring for the full trace.
 - `possible_duplicate_ghl_id` TEXT NULL - the candidate when the collision is
   against a GHL LOCATION rather than a clients row. The live GHL lookup can
   find an existing sub-account we cannot corroborate (a legacy location with
