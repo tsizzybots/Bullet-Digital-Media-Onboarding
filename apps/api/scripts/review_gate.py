@@ -212,6 +212,18 @@ def _test_corpus() -> str:
     return "\n".join(parts)
 
 
+def _literal_is_covered(literal: str, corpus: str) -> bool:
+    """The literal must appear as an exact QUOTED string, not a substring.
+
+    Review round 7: a plain `in` let "1 Mare St" report covered because
+    "1 Mare Street" appears in a test - the abbreviated form was never tested
+    at all. Requiring the closing quote makes prefix-of-a-longer-literal
+    misses visible. Pure and extracted so `test_review_gate.py` exercises THIS
+    code rather than a re-implementation of the rule (the oracle lesson).
+    """
+    return f'"{literal}"' in corpus or f"'{literal}'" in corpus
+
+
 def check_g1_comment_literals(result: GateResult, base: str, allowlist: list[str]) -> None:
     corpus = _test_corpus()
     seen: set[str] = set()
@@ -223,12 +235,13 @@ def check_g1_comment_literals(result: GateResult, base: str, allowlist: list[str
             if not _looks_like_example_data(literal):
                 continue
             seen.add(literal)
-            if literal not in corpus:
+            if not _literal_is_covered(literal, corpus):
                 result.add(
                     "G1",
                     f"{file}:{line}",
-                    f'comment names example data "{literal}" but no test contains it - '
-                    f"the guard it documents is revert-green",
+                    f'comment names example data "{literal}" but no test contains it '
+                    f"as an exact quoted literal - the guard it documents is "
+                    f"revert-green",
                 )
 
 
@@ -243,7 +256,13 @@ class _ConditionalAssertVisitor(ast.NodeVisitor):
         self.result = result
 
     def visit_If(self, node: ast.If) -> None:
-        if self._contains_assert(node.body) and self._condition_reads_system(node.test):
+        # ONE-SIDED asserts only (review round 7): an assert in the body with
+        # none in the else (or vice versa) can be skipped silently; asserts on
+        # BOTH branches always run one of them, which is the legitimate
+        # branch-per-expectation pattern, not a hole.
+        body_asserts = self._contains_assert(node.body)
+        else_asserts = self._contains_assert(node.orelse)
+        if (body_asserts != else_asserts) and self._condition_reads_system(node.test):
             self.result.add(
                 "G4",
                 f"{self.path.relative_to(REPO_ROOT)}:{node.lineno}",
@@ -254,14 +273,20 @@ class _ConditionalAssertVisitor(ast.NodeVisitor):
 
     @staticmethod
     def _contains_assert(body: list[ast.stmt]) -> bool:
-        return any(isinstance(stmt, ast.Assert) for stmt in body)
+        # The WHOLE subtree, not just top-level statements (review round 7):
+        # `if hits: for h in hits: assert ...` is the commonest real shape in
+        # this suite, and the old top-level scan missed the assert one indent
+        # down - along with `with`-wrapped and `else:`-branch asserts.
+        return any(isinstance(inner, ast.Assert) for stmt in body for inner in ast.walk(stmt))
 
     @staticmethod
     def _condition_reads_system(test: ast.expr) -> bool:
-        """True when the condition calls something, i.e. is derived rather than
-        a static parametrized flag. `if flagged.scalar_one():` qualifies;
+        """True when the condition derives a value rather than reading a plain
+        parametrized flag. `if flagged.scalar_one():`, `if rows[0]:` and
+        `if row.linked_client_id:` all qualify (review round 7 added the
+        subscript and attribute forms - `if rows[0]:` was invisible);
         `if expect_link:` does not."""
-        return any(isinstance(n, ast.Call) for n in ast.walk(test))
+        return any(isinstance(n, ast.Call | ast.Subscript | ast.Attribute) for n in ast.walk(test))
 
 
 def check_g4_conditional_assertions(result: GateResult) -> None:
@@ -340,21 +365,37 @@ _PII_PATTERNS = {
     "GHL location id": _GHL_ID_SHAPE,
 }
 
-_PII_SCAN_GLOBS = ("apps/api/**/*.py", "docs/**/*.md")
+# WIDENED in review round 7: the old scope (apps/api/*.py + docs/*.md) left
+# `render.yaml`, `ci.yml`, the dashboard TS and every JSON fixture outside the
+# PII gate on a public repo - and a captured GHL response landing in a JSON
+# fixture is the single most likely leak vector.
+_PII_SCAN_ROOTS = ("apps/", "docs/", "packages/", ".github/", "render.yaml")
+_PII_SCAN_SUFFIXES = (".py", ".md", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml")
+_PII_SCAN_EXCLUDE = ("node_modules/", ".venv/", ".next/", "dist/", "generated/", "-lock.")
+
+
+def _pii_scan_candidate(name: str) -> bool:
+    if not name.startswith(_PII_SCAN_ROOTS):
+        return False
+    if not name.endswith(_PII_SCAN_SUFFIXES):
+        return False
+    return not any(part in name for part in _PII_SCAN_EXCLUDE)
 
 
 def _occurrences_at(ref: str | None, pattern: re.Pattern[str]) -> Counter[str]:
     counts: Counter[str] = Counter()
     if ref is None:
-        for glob in _PII_SCAN_GLOBS:
-            for path in REPO_ROOT.glob(glob):
+        tracked = _git("ls-files", "--cached", "--others", "--exclude-standard").splitlines()
+        for name in tracked:
+            if not _pii_scan_candidate(name):
+                continue
+            path = REPO_ROOT / name
+            if path.is_file():
                 counts.update(pattern.findall(path.read_text(errors="replace")))
         return counts
     files = _git("ls-tree", "-r", "--name-only", ref).splitlines()
     for name in files:
-        if not (name.startswith("apps/api/") or name.startswith("docs/")):
-            continue
-        if not name.endswith((".py", ".md")):
+        if not _pii_scan_candidate(name):
             continue
         counts.update(pattern.findall(_git("show", f"{ref}:{name}")))
     return counts

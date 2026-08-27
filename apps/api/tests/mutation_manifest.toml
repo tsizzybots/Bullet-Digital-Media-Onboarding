@@ -11,46 +11,84 @@
 #
 # Adding an entry is cheap. Skipping one costs a review round.
 
-# --- normalize_postcode, rebuilt in round 6 -----------------------------------
-# This function produced a blocking finding in rounds 4, 5 AND 6. Each piece of
-# the new design is mutated separately, and each is killed by a PROPERTY test
-# rather than an example - the round-6 diagnosis was that only 1 of 9 example
-# pairs even entered the branch under test.
+# --- normalize_postcode, specified in round 7 ---------------------------------
+# This function produced a blocking finding in FOUR consecutive rounds (4-7),
+# each fix trading one axis for another until round 7 proved the axes jointly
+# unsatisfiable and specified the token path as the flat ordered string. Each
+# mutation below reintroduces the EXACT form some earlier round shipped, and
+# each is killed by a property test whose oracle is independent of the
+# implementation - the round-7 diagnosis was that the previous property file's
+# oracle was the implementation's own transform, a tautology.
 
 [[mutation]]
-name = "R6 - alpha/digit tokenizer (separator-independence)"
+name = "R7 - reintroduce round 6's SORT: the anagram collide comes back"
 file = "src/bullet_api/worker/identity_key.py"
-find = '_POSTCODE_TOKEN = re.compile(r"[A-Z]+|[0-9]+")'
-replace = '_POSTCODE_TOKEN = re.compile(r"[A-Z0-9]+")'
-must_fail = "tests/test_identity_key_properties.py::TestPostcodeSeparatorIndependence"
+find = "    stripped = flat"
+replace = '    stripped = "".join(sorted(re.findall(r"[A-Z]+|[0-9]+", flat)))'
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeInjectivity::test_named_near_misses_stay_apart"
 
 [[mutation]]
-name = "R6 - the sort (order-independence)"
+name = "R7 - reintroduce round 5's DROP: the 1011 AB == 1011 CD collide comes back"
 file = "src/bullet_api/worker/identity_key.py"
-find = '    stripped = "".join(sorted(tokens))'
-replace = '    stripped = "".join(tokens)'
-must_fail = "tests/test_identity_key_properties.py::TestPostcodeOrderIndependence"
+find = "    stripped = flat"
+replace = '    stripped = "".join(t for t in re.findall(r"[A-Z]+|[0-9]+", flat) if any(c.isdigit() for c in t)) or flat'
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeInjectivity::test_named_near_misses_stay_apart"
 
 [[mutation]]
-name = "R6 - UK pattern probed on the separator-stripped form too"
+name = "R7 - the token path must BE the flat string (the spec property bites)"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    for probe in (upper, flat):"
-replace = "    for probe in (upper,):"
-must_fail = "tests/test_identity_key_properties.py::TestPostcodeSeparatorIndependence"
+find = "    stripped = flat"
+replace = '    stripped = "".join(sorted(re.findall(r"[A-Z]+|[0-9]+", flat)))'
+must_fail = "tests/test_identity_key_properties.py::TestTokenPathIsTheFlatString"
 
 [[mutation]]
-name = "R6 - ZIP+4 reduces to ZIP5"
+name = "R7 - ZIP+4 reduces to ZIP5 (the reduction itself)"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    zip_plus_four = _US_ZIP_PLUS_FOUR.match(flat)"
+find = "    zip_plus_four = _US_ZIP_PLUS_FOUR.match(stripped)"
 replace = "    zip_plus_four = None"
-must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSixCases::test_reported_splits_are_closed"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_zip5_and_zip_plus_four_are_one_business"
 
 [[mutation]]
-name = "R6 - filler DIGIT content is rejected even beside letters (00000 ABC)"
+name = "R7 - ZIP+4 must FALL THROUGH to the filler checks, not return"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    if digits and (digits in _PLACEHOLDER_POSTCODES or len(set(digits)) == 1):\n        return \"\""
-replace = "    if False:\n        return \"\""
-must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_placeholder_survives_the_town_drop_step"
+find = "        stripped = zip_plus_four.group(1)"
+replace = "        return zip_plus_four.group(1)"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_zip_plus_four_filler_is_rejected"
+
+[[mutation]]
+name = "R7 - the no-digit filler shape (replaces the dead alpha denylist)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not any(ch.isdigit() for ch in stripped):"
+replace = "    if False:"
+must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_no_digit_at_all_rejected"
+
+[[mutation]]
+name = "R7 - the contiguous repeated-digit filler shape (replaces the dead numeric denylist)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(digits) >= 3 and len(set(digits)) == 1 and digits in stripped:"
+replace = "    if False:"
+must_fail = "tests/test_identity_key.py::TestNormalizePostcode::test_placeholders_rejected"
+
+[[mutation]]
+name = "R7 - ...whose CONTIGUITY clause spares real postcodes like K1K 1K1"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(digits) >= 3 and len(set(digits)) == 1 and digits in stripped:"
+replace = "    if len(digits) >= 3 and len(set(digits)) == 1:"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_real_alternating_postcode_with_repeated_digits_survives"
+
+[[mutation]]
+name = "R7 - the minimum-length filler shape"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(stripped) < _MIN_POSTCODE_LEN:"
+replace = "    if False:"
+must_fail = "tests/test_identity_key.py::TestNormalizePostcode::test_too_short_rejected"
+
+[[mutation]]
+name = "R7 - phone single-repeated-digit shape (now the dead denylist is gone)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(set(tail)) == 1 or _is_repeating_pair(tail) or _is_sequential_digits(tail):"
+replace = "    if _is_repeating_pair(tail) or _is_sequential_digits(tail):"
+must_fail = "tests/test_identity_key.py::TestRealLandlinesSurvive::test_shape_filler_is_still_rejected"
 
 # Round 6 named both of these as revert-green with no manifest entry.
 
@@ -78,15 +116,15 @@ must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey"
 [[mutation]]
 name = "F3 - sequential-digit phone filler (round 4's one-liner)"
 file = "src/bullet_api/worker/identity_key.py"
-find = "        or _is_sequential_digits(tail)\n"
-replace = ""
+find = " or _is_sequential_digits(tail):"
+replace = ":"
 must_fail = "tests/test_identity_key.py::TestSequentialDigitFiller"
 
 [[mutation]]
 name = "F5 area - landline rejection (the pre-round-5 distinct-digit floor)"
 file = "src/bullet_api/worker/identity_key.py"
-find = "        len(set(tail)) == 1\n        or _is_repeating_pair(tail)"
-replace = "        len(set(tail)) <= 2"
+find = "    if len(set(tail)) == 1 or _is_repeating_pair(tail) or _is_sequential_digits(tail):"
+replace = "    if len(set(tail)) <= 2 or _is_sequential_digits(tail):"
 must_fail = "tests/test_identity_key.py::TestRealLandlinesSurvive"
 
 [[mutation]]
@@ -301,12 +339,32 @@ replace = "        if False:\n            return _GHL_HIT_UNDECIDABLE"
 must_fail = "tests/test_ghl_subaccount.py::test_ghl_leg_applies_bar_4_when_the_db_leg_saw_no_candidates"
 requires_db = true
 
+# Round 7 INVERTED the round-6 "ours only -> undecidable" veto (it doomed the
+# whole legacy cohort behind an unclearable flag); the guard is now the ABSTAIN
+# posture plus the nested-payload read, each with its own kill below.
+
 [[mutation]]
-name = "R6 - an address we cannot corroborate is not agreement"
+name = "R7 - bar-4 absence ABSTAINS on the GHL leg (the legacy cohort stays reusable)"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "        if client_address and not location_address:\n            return _GHL_HIT_UNDECIDABLE"
-replace = "        if False:\n            return _GHL_HIT_UNDECIDABLE"
-must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_we_hold_an_address_for_but_cannot_corroborate_is_undecidable"
+find = "        if addresses_materially_diverge(client_address, location_address):\n            return _GHL_HIT_UNDECIDABLE"
+replace = "        if not (client_address and location_address) or addresses_materially_diverge(client_address, location_address):\n            return _GHL_HIT_UNDECIDABLE"
+must_fail = "tests/test_ghl_subaccount.py::test_legacy_location_with_no_address_is_still_reused_when_corroborated"
+requires_db = true
+
+[[mutation]]
+name = "R7 - _location_address reads the business-nested payload shape"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    candidate = raw.get(\"address\")\n    if not candidate:\n        business = raw.get(\"business\")\n        if isinstance(business, dict):\n            candidate = business.get(\"address\")"
+replace = "    candidate = raw.get(\"address\")"
+must_fail = "tests/test_ghl_subaccount.py::test_divergent_address_nested_under_business_still_vetoes"
+requires_db = true
+
+[[mutation]]
+name = "R7 - a success with NO recoverable id must fall through, never report clean"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if recovered:"
+replace = "        if True:"
+must_fail = "tests/test_ghl_subaccount.py::test_torn_action_with_no_id_anywhere_falls_through_and_self_heals"
 requires_db = true
 
 [[mutation]]
@@ -346,3 +404,33 @@ find = "        await _clear_possible_duplicate(session, client_id=client_id)"
 replace = "        pass"
 must_fail = "tests/test_ghl_subaccount.py::test_a_confident_link_clears_an_earlier_possible_duplicate_flag"
 requires_db = true
+
+# --- the gate's own detectors (round 7: "the gate itself has no self-tests") --
+
+[[mutation]]
+name = "R7 gate - G1 must demand an exact QUOTED literal, not a substring"
+file = "scripts/review_gate.py"
+find = "    return f'\"{literal}\"' in corpus or f\"'{literal}'\" in corpus"
+replace = "    return literal in corpus"
+must_fail = "tests/test_review_gate.py::TestG1QuotedLiteralRule"
+
+[[mutation]]
+name = "R7 gate - G4 must search the WHOLE branch subtree for asserts"
+file = "scripts/review_gate.py"
+find = "        return any(isinstance(inner, ast.Assert) for stmt in body for inner in ast.walk(stmt))"
+replace = "        return any(isinstance(stmt, ast.Assert) for stmt in body)"
+must_fail = "tests/test_review_gate.py::TestG4ConditionalAssertShapes::test_assert_nested_in_a_for_loop_is_flagged"
+
+[[mutation]]
+name = "R7 gate - G4 must see subscript/attribute reads, not only calls"
+file = "scripts/review_gate.py"
+find = "isinstance(n, ast.Call | ast.Subscript | ast.Attribute) for n in ast.walk(test)"
+replace = "isinstance(n, ast.Call) for n in ast.walk(test)"
+must_fail = "tests/test_review_gate.py::TestG4ConditionalAssertShapes::test_subscript_condition_is_flagged"
+
+[[mutation]]
+name = "R7 gate - G6 must scan yaml/ts/json surfaces, not only py/md"
+file = "scripts/review_gate.py"
+find = '_PII_SCAN_SUFFIXES = (".py", ".md", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml")'
+replace = '_PII_SCAN_SUFFIXES = (".py", ".md")'
+must_fail = "tests/test_review_gate.py::TestG6ScanScope"

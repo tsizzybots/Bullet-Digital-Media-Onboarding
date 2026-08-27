@@ -573,7 +573,7 @@ def _classify_ghl_hit(
     | agrees  | agrees   | agrees  | agrees     | same business      | -> reuse
     | agrees  | agrees   | agrees  | both absent| same business      | -> reuse
     | agrees  | agrees   | agrees  | differs    | undecidable        | -> own + flag
-    | agrees  | agrees   | agrees  | ours only  | undecidable        | -> own + flag
+    | agrees  | agrees   | agrees  | ours only  | same business      | -> reuse
     | agrees  | agrees   | absent  | any        | undecidable        | -> own + flag
     | agrees  | agrees   | differs | any        | undecidable        | -> own + flag
     | agrees  | differs  | any     | any        | different business | -> own (franchise)
@@ -586,11 +586,12 @@ def _classify_ghl_hit(
     | unknown | unknown  | any     | any        | undecidable        | -> own + flag
 
     The address column reads in ONE DIRECTION: it can only ever downgrade a
-    reuse to undecidable, never grant one - which is why every row where name or
-    postcode already decided the verdict is `any`. "ours only" means we hold an
-    address the location does not carry, i.e. every location created before
-    review round 6; absence on BOTH sides abstains, or the legacy population
-    could never be reused at all.
+    reuse to undecidable on ACTIVE disagreement, never grant one - which is why
+    every row where name or postcode already decided the verdict is `any`.
+    "ours only" (we hold an address, the location - i.e. the whole legacy
+    cohort - carries none) ABSTAINS and reuses: round 6 vetoed here, which
+    permanently flagged every legacy location behind an unclearable flag
+    (review round 7). Absence on BOTH sides abstains for the same reason.
 
     **Why phone had to join (review round 5, finding 5).** Name + postcode is
     STRICTLY the bar round 2 proved insufficient for the DB leg, and the GHL
@@ -674,12 +675,15 @@ def _classify_ghl_hit(
         location_address = _location_address(location)
         if addresses_materially_diverge(client_address, location_address):
             return _GHL_HIT_UNDECIDABLE
-        # An address we hold but the location cannot corroborate is NOT
-        # agreement. Locations created before this change carry no address, so
-        # this is the legacy population: own sub-account plus a flag, rather
-        # than a merge we cannot justify.
-        if client_address and not location_address:
-            return _GHL_HIT_UNDECIDABLE
+        # Absence ABSTAINS on bar 4, here exactly as on the DB leg (review
+        # round 7). Round 6 shipped a one-sided veto - "we hold an address the
+        # location cannot corroborate" -> UNDECIDABLE - and that quietly doomed
+        # the ENTIRE legacy cohort: every pre-existing GHL location carries no
+        # address, so the reuse leg refused all of them with a flag that
+        # `_clear_possible_duplicate`'s own docstring says can never clear.
+        # Bar 4 is a DISQUALIFIER: it only ever vetoes on ACTIVE disagreement.
+        # A name+postcode+phone-corroborated hit with no address to check is a
+        # corroborated hit.
         return _GHL_HIT_SAME_BUSINESS
     return _GHL_HIT_DIFFERENT_BUSINESS
 
@@ -764,8 +768,9 @@ async def create_ghl_subaccount_core(
     Steps: load the client; short-circuit if already provisioned; reuse a
     DB sibling's sub-account if this is a returning client whose full name
     matches (link `parent_client_id`); else record an `in_progress` action +
-    COMMIT, look GHL up by email, reuse only a hit corroborated on name AND
-    postcode, else POST create; on success record `success` + write
+    COMMIT, look GHL up by email, reuse only a hit corroborated on name,
+    postcode AND phone (with no actively-divergent address), else POST create;
+    on success record `success` + write
     `ghl_subaccount_id` back + COMMIT, or on error record `failed` + COMMIT and
     re-raise. An uncorroborated match at either step flags `possible_duplicate`
     and provisions its own sub-account rather than merging.
@@ -1014,6 +1019,16 @@ async def create_ghl_subaccount_core(
     )
     # COMMIT the in_progress row before the external calls so a crash
     # mid-lookup / mid-POST leaves a visible row rather than a silent gap.
+    #
+    # KNOWN AND DELIBERATE (review round 7 noted it as mitigation-without-
+    # cause): on the flagged paths, `_flag_possible_duplicate`'s UPDATE runs
+    # after this commit and deliberately rides the TERMINAL commit, so its row
+    # lock on `clients` is held across the GHL HTTP call. Closing that (commit
+    # the flag separately) reopens the round-5 zombie: an extra commit in the
+    # gap is one more thing that can raise between the committed `in_progress`
+    # row and its terminal state. The exposure is bounded by the GHL client's
+    # 10s timeout and is a single-row lock; 0013's `lock_timeout` protects
+    # migrations queueing behind it. Trade accepted, not overlooked.
     await session.commit()
 
     # A replay whose action already succeeded short-circuits without a
@@ -1128,17 +1143,18 @@ async def create_ghl_subaccount_core(
     # A hit is NOT reused on the strength of the email alone - email is the
     # identity we deliberately moved OFF one branch earlier, and reusing on it
     # here re-conflates exactly the franchises the identity key separates.
-    # `_classify_ghl_hit` demands the name AND the postcode; anything less
+    # `_classify_ghl_hit` demands name, postcode AND phone (and no
+    # actively-divergent address); anything less
     # provisions its own sub-account, and an UNDECIDABLE verdict also records
     # the suspected location for a human to merge deliberately.
     #
     # THIS LEG IS SUBORDINATE TO THE DB LEG (review round 2, finding 1). If the
     # dedup guard above refused a candidate this run, GHL reuse is skipped
-    # entirely rather than re-judged. Two reasons it cannot be trusted to
-    # re-decide: (a) it judges a DIFFERENT object - a GHL location, not a
-    # clients row - so it cannot see the address bar at all (a location payload
-    # carries no address we send); and (b) on precisely the flagged path the
-    # postcode
+    # entirely rather than re-judged. The reason it cannot be trusted to
+    # re-decide (corrected round 7 - reason (a) here used to claim this leg
+    # "cannot see the address bar at all", which round 6 itself made false by
+    # sending `address` on create and applying bar 4 in `_classify_ghl_hit`):
+    # on precisely the flagged path the postcode
     # test is true BY CONSTRUCTION, because rows sharing an `identity_key` share
     # the normalized postcode - so the verdict collapses to a name check that
     # bar 1 has already passed. The result was a row flagged as a possible

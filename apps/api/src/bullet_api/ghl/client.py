@@ -235,7 +235,8 @@ class HttpGhlClient:
         # orphan). Callers must not treat a `None` as proof no location exists.
         #
         # `limit=1` means a business with several locations returns an arbitrary
-        # one; the caller corroborates the hit on name + postcode before reusing
+        # one; the caller corroborates the hit on name, postcode and phone
+        # (vetoing on a divergent address) before reusing
         # it, so an unrelated hit is flagged rather than merged.
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.get(

@@ -499,9 +499,11 @@ async def create_client_record_core(
             # log its presence so a "why did this not match a returning
             # client" question is answerable from production logs.
             "has_identity_key": identity_key is not None,
-            # postal_code is now persisted (0013); address/state/country are
-            # still extracted-but-not-stored (no columns yet) - logging their
-            # presence until a follow-up migration adds them.
+            # postal_code AND address are persisted (0013) - this comment
+            # claimed address was "extracted-but-not-stored" two rounds after
+            # 0013 added the column and the INSERT above started writing it
+            # (corrected round 7). state/country remain extracted-but-not-
+            # stored; logging presence until a follow-up migration adds them.
             "has_address": fields.address is not None,
             "has_state": fields.state is not None,
             "has_postal_code": fields.postal_code is not None,

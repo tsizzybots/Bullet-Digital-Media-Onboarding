@@ -35,9 +35,14 @@ key already does and corroborates nothing (review round 2, finding 2). It IS a
 DISQUALIFIER (review round 5, finding 1) - `addresses_materially_diverge` - and
 the two directions are not symmetric: a signal that collapses with the key can
 never GRANT a link it did not already imply, but a DIFFERING address can still
-refuse one, and that refusal is the only thing separating one owner's two sites
-when brand, head-office postcode and phone all match. So address votes to
-REFUSE, never to accept, and its absence abstains rather than failing closed.
+refuse one. It does NOT close the one-owner-two-sites case (corrected round 6,
+and this header missed the correction until round 7): one owner with ONE
+company record and two deals produces two rows identical on address as well as
+postcode, so every bar clears and site 2 still auto-links - see
+`test_one_company_record_two_deals_still_auto_links`, which pins that gap as
+documented behaviour until `hubspot_company_id` or `Existing_Client_Identifier`
+exists in the data. Address votes to REFUSE, never to accept, and its absence
+abstains rather than failing closed.
 
 Fail-safe to CREATE: `compute_identity_key` returns None whenever it lacks a
 usable signal (no normalized business name, or no usable postcode). A None key
@@ -83,18 +88,11 @@ _ALNUM_TOKEN = re.compile(r"[a-z0-9]+")
 _NON_ALNUM = re.compile(r"[^A-Z0-9]+")
 _NON_DIGIT = re.compile(r"[^0-9]")
 
-# Postcode tokens: maximal runs of letters OR digits. Splitting on the
-# alpha<->digit TRANSITION as well as on separators is the whole point - it is
-# what makes the token set identical for "1011 AB", "1011AB" and "1011-AB", and
-# therefore what makes the key separator-independent (review round 6, finding 1).
-# `str.split()` could not do this: it only ever splits on whitespace, so
-# "1011AB" stayed one token while "1011 AB" became two.
-_POSTCODE_TOKEN = re.compile(r"[A-Z]+|[0-9]+")
-
 # US ZIP+4 ("94107-1234") identifies the same delivery area as its ZIP5
 # ("94107"), so one business writing each form must not split into two clients.
-# Reduced to the ZIP5 BEFORE tokenizing, because the sort below would otherwise
-# interleave the two digit groups and a positional truncation would be garbage.
+# The reduction FALLS THROUGH to the filler checks below rather than returning
+# (review round 7): returning early let "00000-0000" and "999999999" mint the
+# exact placeholder keys ("00000", "99999") the filler checks exist to reject.
 _US_ZIP_PLUS_FOUR = re.compile(r"^(\d{5})-?\d{4}$")
 
 # Phone comparison uses the TAIL of the digits so a country code / trunk prefix
@@ -110,12 +108,17 @@ _PHONE_MIN_DIGITS = 7
 # placeholder in the phone field.
 #
 # NARROWED (review round 5): this was "two or fewer DISTINCT digits", which
-# rejects real UK landlines - "+44 20 7700 0000" has the tail "770000000",
+# rejects real UK landlines - "+44 20 7700 0000" has the tail "077000000",
 # distinct digits {7, 0}. Bar 2 was therefore permanently unsatisfiable for
 # every client on such a number, so a genuine returning client got a duplicate
 # sub-account on EVERY signing, silently. Filler is a matter of SHAPE (one
 # digit, or a repeating pair) rather than of how few digits happen to appear.
-_PLACEHOLDER_PHONE_TAILS = frozenset({"123456789", "987654321", "012345678"})
+#
+# The old `_PLACEHOLDER_PHONE_TAILS` denylist ("123456789", "987654321",
+# "012345678") is GONE (review round 7): every member is a sequential run, so
+# `_is_sequential_digits` subsumed it completely and the membership check was
+# dead code that could not fail a test. A guard that cannot fail is worse than
+# no guard - it reads as coverage.
 
 # UK postcode: outward (area + district) then inward (sector + unit). Searched
 # ANYWHERE in the string so a value that carries the town too ("London E8 1AA")
@@ -139,32 +142,13 @@ _UK_POSTCODE = re.compile(
     r"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\s,.\-]*([0-9][A-Z]{2})(?![A-Z0-9])"
 )
 
-# Values people type INSTEAD of a postcode. Each is non-empty after stripping,
-# so without this denylist they mint a real-looking key that every other
-# placeholder-using client would share - the exact mis-merge the key exists to
-# prevent. Compared against the alphanumeric-stripped, uppercased form, so
-# "N/A" and "n.a." both arrive here as "NA".
-_PLACEHOLDER_POSTCODES = frozenset(
-    {
-        "NA",
-        "NONE",
-        "NIL",
-        "NOTAPPLICABLE",
-        "TBC",
-        "TBD",
-        "UNKNOWN",
-        "XX",
-        "XXX",
-        "XXXX",
-        "XXXXX",
-        "0",
-        "00",
-        "000",
-        "0000",
-        "00000",
-        "000000",
-    }
-)
+# There is deliberately NO postcode denylist any more (review round 7 found
+# every membership check dead). The shape checks in `normalize_postcode`
+# subsume the old `_PLACEHOLDER_POSTCODES` set completely: its alphabetic
+# members ("NA", "TBC", "UNKNOWN", "XXXX", ...) carry no digit; its numeric
+# members ("0" ... "000000") are either under `_MIN_POSTCODE_LEN` or a single
+# repeated digit. A denylist whose every member is caught earlier cannot fail
+# a test, and a guard that cannot fail reads as coverage while providing none.
 
 # Shortest postcode we will key on. UK outward+inward is 5 ("E81AA"); the
 # shortest national formats in use are 4 digits. Anything under this is noise
@@ -280,91 +264,96 @@ def normalize_name(name: str | None) -> str:
 def normalize_postcode(postcode: str | None) -> str:
     """Normalize a postcode to a canonical key fragment, or "" if unusable.
 
-    Order matters:
+    THE SPEC, small enough to state completely - which is the round-7 fix:
 
-    1. A UK postcode found ANYWHERE in the string wins, returned as
-       outward+inward with no space ("London E8 1AA" -> "E81AA", same as
-       "E8 1AA"). This is what stops one business keying two ways.
-    2. Otherwise TOKENIZE on whitespace, strip each token to alphanumerics,
-       and - when any token carries a digit - DISCARD the purely-alphabetic
-       tokens, joining what remains in ORIGINAL order. International postcodes
-       stay usable ("75008", "D02 X285" -> "D02X285") and a town name attached
-       to one drops out, so "75008 Paris" and "Paris 75008" both key as
-       "75008" now that the INT account is live.
+    1. A UK postcode found in the raw string OR its separator-stripped form is
+       extracted as outward+inward ("London E8 1AA" -> "E81AA"). The flat probe
+       keeps the UK branch itself separator-independent ("AB12CD" == "AB 12 CD").
+    2. Otherwise the key IS the separator-stripped uppercased string, verbatim -
+       no sorting, no dropping, no reordering of any kind - with exactly one
+       equivalence: a US ZIP+4 reduces to its ZIP5 ("94107-1234" -> "94107",
+       one delivery area, one client), and the reduced value still runs the
+       filler gauntlet below rather than returning early (review round 7:
+       returning early let "00000-0000" mint the exact placeholder key "00000"
+       the gauntlet exists to reject).
+    3. Filler is rejected by SHAPE, never by denylist: too short
+       (`_MIN_POSTCODE_LEN`), no digit at all ("TBA", "NONE", "XXXX"), or a
+       contiguous run of one repeated digit ("00000", "99999", "00000 ABC").
+       The contiguity requirement is what keeps real alternating postcodes
+       alive: Ottawa's "K1K 1K1" has digit content "111" but no "111" run, so
+       it keys normally (a latent false-reject in rounds 5-6, found while
+       proving the round-7 rejection rules).
 
-    3. THEN reject placeholders ("N/A", "TBC", "00000") and anything shorter
-       than `_MIN_POSTCODE_LEN`, returning "" so the key computes to None and
-       the signing fails safe to CREATE. (Renumbered, review round 5: the code
-       has always applied this rejection to the POST-drop joined string, but
-       the docstring listed it as step 2 while insisting "Order matters" -
-       pointing a reader at the wrong sequence. Observable difference:
-       "00000 ABC" is rejected under the real order and accepted as "00000"
-       under the documented one. The code's order is the safer of the two, so
-       the fix is to the docstring.)
+    WHY THE KEY PRESERVES ORDER - the theorem that ends the axis-trading.
+    Rounds 4-7 each repaired one axis and silently broke another: round 4
+    sorted (order fixed, separator broken), round 5 dropped alphabetic tokens
+    (separator fixed, "1011 AB" == "1011 CD" collide added), round 6 sorted
+    canonical runs (both fixed, "K1A 0B1" == "B1A 0K1" anagram collide added).
+    That was not carelessness. The three properties being chased are jointly
+    UNSATISFIABLE:
 
-    THE INVARIANT, stated so it can be tested rather than assumed: one postal
-    value produces one key regardless of the FORM it arrives in. Four axes
-    vary independently in the wild - token order, separator character, case,
-    and an attached town - and the normalization must be blind to all four.
+      S: separator-independence   f("VLT 1117") == f("VLT1117")
+      O: order-independence       f("75008 Paris") == f("Paris 75008")
+      I: injectivity              f("K1A 0B1") != f("B1A 0K1")
 
-    FIXED (review round 5, finding 2): round 4 fixed the ORDER axis by sorting
-    tokens, and in doing so broke the SEPARATOR axis - the same class of bug it
-    was fixing. "K1A 0B1" sorted to "0B1K1A" while "K1A0B1" stayed "K1A0B1";
-    "94107 1234" -> "123494107" against "94107-1234" -> "941071234". Both
-    matched BEFORE round 4. Dropping alphabetic tokens instead of sorting
-    achieves order-independence for the case that actually motivated it (a town
-    beside a numeric postcode) without reordering anything, so a value that
-    differs only in punctuation now canonicalizes identically to one that does
-    not.
+    S forces f to depend only on the separator-stripped ordered string. O then
+    forces f("75008PARIS") == f("PARIS75008") - two flat strings differing only
+    in run order - so f must be invariant under run reordering. But "K1A0B1"
+    and "B1A0K1" share one run multiset, so run-order-invariance maps them
+    together, violating I. Any future change restoring O MUST therefore
+    reintroduce a collision; there is no clever tokenization that escapes this.
 
-    KNOWN DEVIATION from the S1-26b/c review, recorded here so it is met stated
-    rather than discovered: the review asked to "return None for anything
-    malformed" after validating a UK postcode. Step 3 does not - applied
-    strictly it would return None for every non-UK postcode, disabling
-    returning-client matching for the whole INT PandaDoc account, which is
-    live. Reverting to the strict reading is a one-line change (drop step 3);
-    INT clients would then carry a NULL identity_key and fall back to the email
-    sibling check. See the 03/08/2026 CHANGELOG entry.
+    One property had to go. I is non-negotiable: its failure is a false MERGE
+    (one client's assets inside another client's sub-account, the unrecoverable
+    direction). So O is DELIBERATELY OPEN: "75008 Paris" and "Paris 75008" key
+    differently, as do "75008" and "75008 Paris" (the attached-town axis, open
+    for the same reason - closing it means dropping tokens, which is round 5's
+    collide). Both failures are SPLITS: the second signing finds no candidate
+    and provisions a spare, visible, deletable sub-account - the direction this
+    module fails toward everywhere else. `test_identity_key_properties.py` pins
+    the open axes as documented behaviour so a future "fix" that closes them by
+    reintroducing a collide fails loudly.
+
+    Stored keys changed shape in round 7 (order-preserving replaces sorted).
+    Free ONLY because migration 0013 has never run outside local dev - see its
+    WARNING before touching this function again.
     """
     if not postcode:
         return ""
     upper = postcode.upper()
     flat = _NON_ALNUM.sub("", upper)
-    # The UK pattern is tried on the RAW string AND on the separator-stripped
-    # form. With the raw string alone the UK branch is ITSELF
-    # separator-sensitive: "AB12CD" matches and "AB 12 CD" does not, so one
-    # postcode keys two ways. Found by the property runner, not by example -
-    # every hand-picked UK case in the suite happened to match both ways.
-    for probe in (upper, flat):
-        uk_match = _UK_POSTCODE.search(probe)
-        if uk_match is not None:
-            return uk_match.group(1) + uk_match.group(2)
-    zip_plus_four = _US_ZIP_PLUS_FOUR.match(flat)
+    # RAW only. Round 6 also probed the separator-stripped form, because its
+    # SORTED token path keyed "AB 12 CD" differently from "AB12CD" whenever the
+    # raw probe missed. Under the round-7 spec that probe went dead: the token
+    # path returns the flat string, and a flat-form UK match is boxed in by its
+    # own lookarounds to be exactly the whole flat string - the same value the
+    # token path returns anyway. The mutation runner proved it: removing the
+    # probe survived every test, so it was deleted rather than kept as
+    # coverage-shaped dead code. The one divergence class (a UK code whose
+    # digits are contiguous filler, written with separators INSIDE the outward
+    # half, e.g. "B 11 1AA") now rejects to NULL - the fail-safe direction -
+    # instead of minting a key.
+    uk_match = _UK_POSTCODE.search(upper)
+    if uk_match is not None:
+        return uk_match.group(1) + uk_match.group(2)
+    stripped = flat
+    zip_plus_four = _US_ZIP_PLUS_FOUR.match(stripped)
     if zip_plus_four is not None:
-        return zip_plus_four.group(1)
-    # Tokenize on alpha/digit runs, then SORT. The two steps do different jobs
-    # and both are load-bearing: the tokenizer delivers separator-independence,
-    # the sort delivers order-independence ("75008 Paris" == "Paris 75008").
-    # Nothing is DROPPED, which is what makes this non-lossy.
-    tokens = _POSTCODE_TOKEN.findall(upper)
-    stripped = "".join(sorted(tokens))
-    if len(stripped) < _MIN_POSTCODE_LEN or stripped in _PLACEHOLDER_POSTCODES:
-        return ""
-    # A value whose DIGIT content is itself filler is filler, however many
-    # letters sit beside it ("00000 ABC"). Checked on the digits alone because
-    # the letters would otherwise satisfy the distinct-character test below.
-    digits = "".join(token for token in tokens if token.isdigit())
-    if digits and (digits in _PLACEHOLDER_POSTCODES or len(set(digits)) == 1):
-        return ""
-    # A denylist is a BLOCKLIST, so it only ever catches the placeholders
-    # somebody thought of - "TBA", "99999" and "12345" all sail past one
-    # (review round 2, P2). Add two shape checks that reject filler by FORM
-    # rather than by membership: a value made of a single repeated character
-    # ("99999", "XXXX"), and one with no digit at all ("TBA", "NONE"). Every
-    # real postal format in use carries at least one digit.
-    if len(set(stripped)) == 1:
+        # Reduce, then FALL THROUGH - the reduced value must still face the
+        # filler checks (review round 7, P1).
+        stripped = zip_plus_four.group(1)
+    if len(stripped) < _MIN_POSTCODE_LEN:
         return ""
     if not any(ch.isdigit() for ch in stripped):
+        # Every real postal format in use carries at least one digit; a value
+        # with none ("TBA", "NONE", "PENDING") is a placeholder by shape.
+        return ""
+    digits = "".join(ch for ch in stripped if ch.isdigit())
+    if len(digits) >= 3 and len(set(digits)) == 1 and digits in stripped:
+        # A CONTIGUOUS run of one repeated digit is filler ("00000",
+        # "00000 ABC"), whether or not letters sit beside it. The contiguity
+        # test (`digits in stripped`) is what spares real alternating formats:
+        # "K1K1K1" has digit content "111" but no "111" substring.
         return ""
     return stripped
 
@@ -409,7 +398,7 @@ def _is_repeating_pair(digits: str) -> bool:
 
     Filler by SHAPE. Deliberately narrower than "few distinct digits", which
     also matched real landlines whose subscriber number is mostly zeroes
-    ("+44 20 7700 0000" -> "770000000"). A repeating pair cannot occur in a
+    ("+44 20 7700 0000" -> "077000000"). A repeating pair cannot occur in a
     real allocated number; a low digit count routinely does.
     """
     if len(digits) < 4 or len(set(digits)) != 2:
@@ -440,19 +429,13 @@ def normalize_phone(phone: str | None) -> str:
     # was filled with filler would CORROBORATE each other and auto-link - the
     # exact mis-merge this signal exists to prevent (review round 2, P2).
     #
-    # FIXED (review round 4, one-line finding): "1234567890" is 10 digits, so
-    # the LAST 9 are "234567890" - not in `_PLACEHOLDER_PHONE_TAILS` (which
-    # only holds "123456789"), so the most common filler number in existence
-    # was passing as a corroborating signal. `_is_sequential_digits` catches
-    # it (and every other rotation) by SHAPE rather than growing the denylist
-    # one string at a time - same principle already applied to postcodes
-    # above ("a denylist only catches the placeholders somebody thought of").
-    if (
-        len(set(tail)) == 1
-        or _is_repeating_pair(tail)
-        or tail in _PLACEHOLDER_PHONE_TAILS
-        or _is_sequential_digits(tail)
-    ):
+    # FIXED (review round 4): "1234567890" is 10 digits, so its 9-digit tail
+    # "234567890" slipped past the old denylist, and the most common filler
+    # number in existence passed as a corroborating signal.
+    # `_is_sequential_digits` catches it (and every rotation) by SHAPE; the
+    # denylist it obsoleted is deleted (round 7 - every member was sequential,
+    # so the membership check was dead code that could not fail a test).
+    if len(set(tail)) == 1 or _is_repeating_pair(tail) or _is_sequential_digits(tail):
         return ""
     return tail
 

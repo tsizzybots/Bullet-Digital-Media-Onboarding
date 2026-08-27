@@ -27,8 +27,9 @@ class TestNormalizeName:
         assert normalize_name("Brand Gym  Hackney!") == "brandgymhackney"
 
     def test_drops_leading_the(self) -> None:
-        # Otherwise "the gy" would eat the whole 6-char budget.
-        assert normalize_name("The Gym Group") == "gymgroup"
+        # Otherwise "the gy" would eat the whole 6-char budget. Pins both
+        # spellings the constant's comment cites.
+        assert normalize_name("The Gym Group") == normalize_name("Gym Group") == "gymgroup"
 
     def test_drops_trailing_ltd(self) -> None:
         assert normalize_name("Foobar Ltd") == "foobar"
@@ -109,7 +110,7 @@ class TestNormalizePostcode:
 
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [("75008", "75008"), ("D02 X285", "02285DX"), ("10115", "10115"), ("2000", "2000")],
+        [("75008", "75008"), ("D02 X285", "D02X285"), ("10115", "10115"), ("2000", "2000")],
     )
     def test_international_postcodes_survive(self, value: str, expected: str) -> None:
         # The INT PandaDoc account is live, so a UK-only rule would silently
@@ -307,16 +308,22 @@ class TestSequentialDigitFiller:
     The guard existed for two rounds with NO test naming a value only it
     catches, so deleting it left the suite green - which is how round 5 found
     it. `"1234567890"` is the most common filler number in existence and its
-    9-digit tail is `"234567890"`, absent from `_PLACEHOLDER_PHONE_TAILS`.
+    9-digit tail is `"234567890"`, which the old denylist (deleted in round 7
+    as dead code - every member was sequential) never held anyway.
     """
 
     @pytest.mark.parametrize(
         "value",
         [
-            "1234567890",  # the tail is "234567890" - NOT in the denylist
+            "1234567890",  # the tail is "234567890" - NOT in the old denylist
             "0123456789",
             "9876543210",
             "2345678901",
+            # The old denylist's own members and the docstring's rotations -
+            # each must still die to the SHAPE check now the denylist is gone.
+            "987654321",
+            "012345678",
+            "876543210",
         ],
     )
     def test_sequential_runs_are_filler(self, value: str) -> None:
@@ -329,7 +336,8 @@ class TestSequentialDigitFiller:
 class TestRealLandlinesSurvive:
     """Review round 5: the filler check was rejecting real UK landlines.
 
-    `len(set(tail)) <= 2` treated `"+44 20 7700 0000"` (tail `"770000000"`,
+    `len(set(tail)) <= 2` treated `"+44 20 7700 0000"` (tail `"077000000"` -
+    the wrong literal `"770000000"` stood here for two rounds, corrected round 7 -
     distinct digits {7, 0}) as filler, so bar 2 was PERMANENTLY unsatisfiable
     for every client on such a number and a genuine returning client got a
     duplicate sub-account on every signing, silently. Filler is a matter of
@@ -349,12 +357,28 @@ class TestRealLandlinesSurvive:
     def test_real_landline_is_usable(self, value: str) -> None:
         assert normalize_phone(value) != ""
 
+    def test_london_landline_tail_is_the_documented_literal(self) -> None:
+        # Pins the exact 9-digit tail the docstrings cite ("077000000"). The
+        # wrong literal ("770000000") stood in three docstrings for two rounds
+        # because nothing computed it - a stale-claim class the reviewer greps.
+        assert normalize_phone("+44 20 7700 0000") == "077000000"
+
     def test_landline_corroborates_a_returning_client(self) -> None:
         assert (
             corroborating_signal_agrees(phone_a="+44 20 7700 0000", phone_b="020 7700 0000") is True
         )
 
-    @pytest.mark.parametrize("value", ["0000000000", "1212121212", "2121212121"])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "0000000000",
+            "1212121212",
+            "2121212121",
+            # The exact 9-digit examples the constants' comments cite.
+            "000000000",
+            "121212121",
+        ],
+    )
     def test_shape_filler_is_still_rejected(self, value: str) -> None:
         # Narrowing the check must not reopen the hole it was narrowed from.
         assert normalize_phone(value) == ""
@@ -386,8 +410,12 @@ class TestPostcodeFormInvariance:
             # first three rows above all survive the unrelaxed separator.
             ("E8 1AA", "Flat 2, E8, 1AA"),
             ("E8 1AA", "e8  1aa"),  # case + whitespace
-            ("London E8 1AA", "E8 1AA"),  # attached town
-            ("75008 Paris", "Paris 75008"),  # token order - round 4's own case
+            ("London E8 1AA", "E8 1AA"),  # attached town (UK: regex extracts)
+            # ("75008 Paris", "Paris 75008") is GONE from this list - the order
+            # axis is deliberately open by theorem (see normalize_postcode and
+            # TestOrderAxisIsDeliberatelyOpen in the properties file). Round 4
+            # required it, and satisfying it is exactly what forced every
+            # subsequent round's collide.
             ("D02 X285", "D02X285"),  # Ireland
         ],
     )
@@ -402,15 +430,16 @@ class TestPostcodeFormInvariance:
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
-            # Sorted alpha/digit tokens. The exact string is opaque - what is
-            # pinned is that it is STABLE, because migration 0013 warns stored
-            # keys are a snapshot of this module and there is no recompute tool.
-            ("K1A 0B1", "011ABK"),
+            # The key IS the flat ordered string (round 7's spec) - pinned
+            # because migration 0013 warns stored keys are a snapshot of this
+            # module and there is no recompute tool. Round 6 pinned "011ABK"
+            # here: the sorted form, whose anagram collisions are the round-7
+            # P0.
+            ("K1A 0B1", "K1A0B1"),
             # ZIP+4 reduces to ZIP5, so "94107" and "94107-1234" are one client.
             ("94107 1234", "94107"),
-            # The town is KEPT, not dropped. Dropping it was round 5's lossy
-            # collide ("1011 AB" == "1011 CD"); the sort delivers the
-            # order-independence the drop was reaching for, without the loss.
+            # The town is KEPT (dropping was round 5's collide) and order is
+            # KEPT (sorting was round 6's) - so the town rides along verbatim.
             ("75008 Paris", "75008PARIS"),
             ("E8, 1AA", "E81AA"),
         ],
@@ -486,6 +515,17 @@ class TestAddressesMateriallyDiverge:
 
     def test_same_address_does_not_diverge(self) -> None:
         assert addresses_materially_diverge("1 Mare Street", "1 Mare Street") is False
+
+    def test_abbreviated_street_form_diverges_as_the_docstring_claims(self) -> None:
+        """The docstring's own example pair, pinned verbatim.
+
+        Round 7's live G1 instance: the docstring named "1 Mare St" vs
+        "1 Mare Street" and no test used the abbreviated form - substring
+        matching hid it behind the longer literal. STRICT divergence is the
+        documented intent: a refusal costs a spare flagged sub-account, a
+        false pass-through costs a wrong merge.
+        """
+        assert addresses_materially_diverge("1 Mare St", "1 Mare Street") is True
 
     def test_formatting_differences_do_not_diverge(self) -> None:
         assert addresses_materially_diverge("1 Mare Street", "1  mare  street.") is False
@@ -604,12 +644,14 @@ class TestPostcodePlaceholderShapes:
     def test_single_repeated_character_rejected(self, value: str) -> None:
         assert normalize_postcode(value) == ""
 
-    def test_placeholder_survives_the_town_drop_step(self) -> None:
-        """Rejection runs AFTER the alphabetic-token drop, not before it.
+    def test_filler_digits_beside_letters_still_reject(self) -> None:
+        """ "00000 ABC" must not mint a key however many letters ride along.
 
-        "00000 ABC" drops to "00000", which the placeholder denylist then
-        catches. Under the order the docstring used to claim (reject first, on
-        the raw strip) it would have keyed as "00000ABC" and sailed through.
+        (Renamed in round 7: the old name cited "the town drop step", a
+        mechanism rounds 5-6 shipped and round 7 deleted - a lossy drop was the
+        round-5 collide. The rejection now comes from the contiguous
+        repeated-digit shape check, which sees the "00000" run inside
+        "00000ABC".)
         """
         assert normalize_postcode("00000 ABC") == ""
 

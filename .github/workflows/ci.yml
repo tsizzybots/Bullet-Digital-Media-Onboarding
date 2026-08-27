@@ -200,10 +200,17 @@ jobs:
       # `--include-db` is deliberate: db-marked guards SKIP without Postgres, a
       # skipped test cannot fail, so it cannot prove a guard. The runner reports
       # UNPROVEN and fails, which is the whole point.
+      # PULL-REQUEST ONLY (review round 7): on a push to main, `github.base_ref`
+      # is empty, so the static gate's base resolved to origin/main - the very
+      # commit under test - and it passed VACUOUSLY over an empty diff. A gate
+      # that runs against its own commit is theatre; on main the code has
+      # already passed the real gate on its PR.
       - name: Review gate (static checks)
-        run: uv run python apps/api/scripts/review_gate.py --base origin/${{ github.base_ref || 'main' }}
+        if: github.event_name == 'pull_request'
+        run: uv run python apps/api/scripts/review_gate.py --base origin/${{ github.base_ref }}
 
       - name: Review gate (mutation manifest)
+        if: github.event_name == 'pull_request'
         env:
           DATABASE_URL: ${{ steps.neon-branch.outputs.db_url || secrets.NEON_STAGING_DATABASE_URL }}
         run: uv run python apps/api/scripts/review_gate_mutate.py --include-db

@@ -2134,6 +2134,82 @@ async def test_db_error_while_flagging_still_records_the_action_failed(
 
 
 @pytest.mark.db
+async def test_torn_action_with_no_id_anywhere_falls_through_and_self_heals(
+    async_session: AsyncSession,
+) -> None:
+    """The OTHER half of the torn-state repair (review round 7).
+
+    Round 6's test only exercised the branch where `external_id` IS
+    recoverable from the action row. When NEITHER the client row NOR the
+    action row holds an id, the recorded success cannot be trusted - the old
+    code returned `(None, skipped=True)`, a clean success with no sub-account,
+    and replacing the whole block with that bare return left the suite green.
+    The correct route is FALLING THROUGH to the lookup-then-create path, which
+    self-heals: the lookup reuses an existing location rather than minting a
+    duplicate.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@torn2.com",
+        business_name="Torn Two Gym",
+        legal_entity="Torn Two Gym",
+        postal_code="E8 1AA",
+        phone="+44 7700 900888",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_first_run"), lookup_result=None)
+    first = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert first.created is True
+
+    # Tear BOTH sides: success recorded, id lost everywhere.
+    await async_session.execute(
+        text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": client_id}
+    )
+    await async_session.execute(
+        text(
+            "UPDATE platform_actions SET external_id = NULL "
+            "WHERE client_id = :id AND action = :action"
+        ),
+        {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+    )
+    await async_session.commit()
+
+    # The replay's lookup finds the orphaned location, so the fall-through
+    # reuses it - no duplicate POST, and never a success with no id.
+    replay = FakeGhlClient(
+        location=_ghl_location("loc_should_not_create"),
+        lookup_result=_ghl_location(
+            "loc_first_run",
+            name="Torn Two Gym",
+            postal_code="E8 1AA",
+            phone="+44 7700 900888",
+        ),
+    )
+    result = await create_ghl_subaccount_core(
+        async_session,
+        replay,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.ghl_subaccount_id == "loc_first_run", (
+        "a success with no recoverable id must fall through, never report clean"
+    )
+    assert replay.calls == [], "self-healing must reuse, not mint a duplicate"
+    repaired = await async_session.execute(
+        text("SELECT ghl_subaccount_id FROM clients WHERE id = :id"), {"id": client_id}
+    )
+    assert repaired.scalar_one() == "loc_first_run"
+
+
+@pytest.mark.db
 async def test_a_confident_link_clears_an_earlier_possible_duplicate_flag(
     async_session: AsyncSession,
 ) -> None:
@@ -2368,14 +2444,19 @@ async def test_ghl_leg_applies_bar_4_when_the_db_leg_saw_no_candidates(
 
 
 @pytest.mark.db
-async def test_ghl_hit_we_hold_an_address_for_but_cannot_corroborate_is_undecidable(
+async def test_legacy_location_with_no_address_is_still_reused_when_corroborated(
     async_session: AsyncSession,
 ) -> None:
-    """Absence is not agreement on bar 4's GHL side either.
+    """Bar 4's absence posture on the GHL leg: ABSTAIN, exactly as the DB leg.
 
-    Locations created before round 6 carry no address, so an address we hold
-    cannot be checked against them. That is the ~100-location legacy
-    population: own sub-account plus a flag, never a merge we cannot justify.
+    INVERTED in round 7. The round-6 version of this test asserted the
+    opposite - "we hold an address the location cannot corroborate" vetoed the
+    reuse - and that veto quietly doomed the ENTIRE legacy cohort: every
+    pre-existing GHL location carries no address, so the reuse leg refused all
+    of them behind a flag `_clear_possible_duplicate`'s own docstring says can
+    never clear. Bar 4 is a DISQUALIFIER; it vetoes only on ACTIVE
+    disagreement. A hit corroborated on name, postcode AND phone with no
+    address to check is a corroborated hit.
     """
     client_id = await _seed_client(
         async_session,
@@ -2394,7 +2475,7 @@ async def test_ghl_hit_we_hold_an_address_for_but_cannot_corroborate_is_undecida
         raw={"id": "loc_legacy", "postalCode": "E8 1AA", "phone": "+44 7700 900222"},
     )
     ghl = FakeGhlClient(
-        location=_ghl_location("loc_own", name="Legacy Addr Gym", postal_code="E8 1AA"),
+        location=_ghl_location("loc_should_not_create"),
         lookup_result=legacy,
     )
 
@@ -2406,11 +2487,72 @@ async def test_ghl_hit_we_hold_an_address_for_but_cannot_corroborate_is_undecida
         company_id=COMPANY_ID,
     )
 
-    assert result.created is True
+    assert result.created is False, "the legacy cohort must remain reusable"
+    assert result.ghl_subaccount_id == "loc_legacy"
+    assert ghl.calls == []
     flagged = await async_session.execute(
         text("SELECT possible_duplicate FROM clients WHERE id = :id"), {"id": client_id}
     )
-    assert flagged.scalar_one() is True
+    assert flagged.scalar_one() is False
+
+
+@pytest.mark.db
+async def test_divergent_address_nested_under_business_still_vetoes(
+    async_session: AsyncSession,
+) -> None:
+    """`_location_address` must read the `business`-nested shape too.
+
+    Review round 7: the nested fallback had no test - the only nested-payload
+    test nested `postalCode` and `phone`. The module's own comments cite a live
+    21/07 response carrying a `business` object, so if GHL echoes `address`
+    nested and the fallback is deleted, bar 4 on the GHL leg reads every real
+    payload as address-absent and the veto never fires.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@nestedaddr.com",
+        business_name="Nested Addr Gym",
+        legal_entity="Nested Addr Gym",
+        postal_code="E8 1AA",
+        phone="+44 7700 900333",
+        address="Studio Two, 99 Kingsland Road",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    nested = GhlLocation(
+        id="loc_nested_addr",
+        name="Nested Addr Gym",
+        company_id=COMPANY_ID,
+        raw={
+            "id": "loc_nested_addr",
+            "business": {
+                "postalCode": "E8 1AA",
+                "phone": "+44 7700 900333",
+                "address": "Studio One, 1 Mare Street",  # ACTIVELY divergent
+            },
+        },
+    )
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_own", name="Nested Addr Gym", postal_code="E8 1AA"),
+        lookup_result=nested,
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True, "a divergent nested address must veto the reuse"
+    assert result.ghl_subaccount_id == "loc_own"
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_ghl_id FROM clients WHERE id = :id"),
+        {"id": client_id},
+    )
+    is_dup, dup_ghl = flagged.one()
+    assert is_dup is True
+    assert dup_ghl == "loc_nested_addr"
 
 
 @pytest.mark.db
