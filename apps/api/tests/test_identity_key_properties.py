@@ -58,6 +58,12 @@ POSTCODE_CORES = [
     "AB12CD",
     "10115",
     "94107",
+    # Repdigit reals (round 8): their ABSENCE from this list is what hid the
+    # contiguity false-reject - "1111AB" fails separator-independence on
+    # `keys != {""}` the moment the rule over-rejects, and "B111AA" fails it on
+    # `len(keys) == 1` if the UK/token paths ever disagree again.
+    "1111AB",
+    "B111AA",
 ]
 
 _RUN = re.compile(r"[A-Z]+|[0-9]+")
@@ -145,7 +151,7 @@ class TestTokenPathIsTheFlatString:
                 assert (
                     len(flat) < 3
                     or not any(ch.isdigit() for ch in flat)
-                    or (len(digits) >= 3 and len(set(digits)) == 1 and digits in flat)
+                    or (len(set(digits)) == 1 and (flat == digits or digits.startswith("0")))
                 ), f"{value!r} rejected without matching any documented filler shape"
             elif re.fullmatch(r"\d{5}-?\d{4}", flat) or re.fullmatch(r"\d{9}", flat):
                 assert key == flat[:5], f"{value!r}: ZIP+4 must reduce to its ZIP5"
@@ -272,25 +278,50 @@ class TestPostcodeRoundSevenCases:
         assert normalize_postcode(value) == ""
 
     def test_real_alternating_postcode_with_repeated_digits_survives(self) -> None:
-        # Ottawa's K1K 1K1: digit content "111" but no contiguous "111" run.
-        # A latent false-reject in rounds 5-6, found while specifying the
-        # round-7 rejection rules.
+        # Ottawa's K1K 1K1: a latent false-reject in rounds 5-6, found while
+        # specifying the round-7 rejection rules. Its digit content really is
+        # the "111" the source comment cites - computed, not asserted by prose.
+        assert "".join(ch for ch in "K1K1K1" if ch.isdigit()) == "111"
         assert normalize_postcode("K1K 1K1") == "K1K1K1"
 
-    def test_filler_shaped_uk_code_with_internal_separators_rejects_to_null(self) -> None:
-        """The one divergence class the deleted round-6 flat probe covered.
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("1111 AB", "1111AB"),  # Diemen, NL - round 8: was NULL-keyed
+            ("2222 XX", "2222XX"),
+            ("7777 DS", "7777DS"),
+            ("9999 VF", "9999VF"),
+            ("VLT 1111", "VLT1111"),  # Valletta, MT
+        ],
+    )
+    def test_real_repdigit_postcodes_survive(self, value: str, expected: str) -> None:
+        """Round 8: the contiguity rule rejected these REAL postcodes to NULL,
+        silently self-skipping the returning-client check for those INT
+        clients. Repdigit-beside-letters is filler only when the digits are all
+        ZERO ("00000 ABC") - no postal system issues an all-zero block."""
+        assert normalize_postcode(value) == expected
 
-        "B 11 1AA" - separators INSIDE the outward half, digit content a
-        contiguous "111" run - missed the raw UK probe and now rejects to ""
-        (NULL key, email-fallback path) instead of minting a key. The fail-safe
-        direction: the mutation runner proved the probe covering it could not
-        be killed by any test, so the probe was deleted and this pins the safe
-        residual rather than leaving it undocumented.
+    @pytest.mark.parametrize("value", ["00000 ABC", "0000 AB", "00 XX 00"])
+    def test_all_zero_digits_beside_letters_still_reject(self, value: str) -> None:
+        assert normalize_postcode(value) == ""
+
+    def test_uk_code_with_internal_separators_keys_identically_anyway(self) -> None:
+        """The round-7 residual CLOSED ITSELF under the round-8 repdigit rule.
+
+        "B 11 1AA" - separators INSIDE the outward half - misses the raw UK
+        probe, but the token path returns the flat string "B111AA", which is
+        exactly what the probe extracts from the standard spellings. Round 7
+        pinned this as a fail-safe NULL (the old contiguity rule rejected the
+        "111" digit run); round 8 narrowed that rule to spare real repdigit
+        postcodes, and the narrowing removed the residual entirely: all three
+        spellings now share one key with no probe needed.
         """
-        assert normalize_postcode("B 11 1AA") == ""
-        # The standard spellings of the same class still key normally.
-        assert normalize_postcode("B11 1AA") == "B111AA"
-        assert normalize_postcode("B111AA") == "B111AA"
+        assert (
+            normalize_postcode("B 11 1AA")
+            == normalize_postcode("B11 1AA")
+            == normalize_postcode("B111AA")
+            == "B111AA"
+        )
 
     def test_zip5_and_zip_plus_four_are_one_business(self) -> None:
         assert normalize_postcode("94107") == normalize_postcode("94107-1234") == "94107"

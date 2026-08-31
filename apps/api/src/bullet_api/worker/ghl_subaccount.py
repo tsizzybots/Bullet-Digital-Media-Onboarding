@@ -1260,23 +1260,37 @@ async def create_ghl_subaccount_core(
         await _record_failure(exc)
         raise
 
-    await complete_action(
-        session,
-        action_id=begun.action_id,
-        external_id=location.id,
-        response=location.raw,
-    )
-    # Guard with `ghl_subaccount_id IS NULL` so a concurrent writer cannot
-    # be clobbered; the per-client concurrency cap makes that race
-    # near-impossible, but the guard is cheap insurance.
-    await session.execute(
-        text(
-            "UPDATE clients SET ghl_subaccount_id = :ghl_id "
-            "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
-        ),
-        {"ghl_id": location.id, "client_id": client_id},
-    )
-    await session.commit()
+    # GUARDED (review round 8): this was the only unguarded raise point on the
+    # success path. A commit failure here - the comment above `_record_failure`
+    # calls Neon connection resets routine - used to discard a location id we
+    # are HOLDING IN MEMORY, leave the action `in_progress` with no retry_count
+    # bump, and hand the retry to an eventually-consistent lookup that may mint
+    # a second location. Routing through `_record_failure` records `failed` +
+    # the error (its own SQLAlchemyError path rolls back and retries the
+    # write), so the retry arrives with a visible, bumped action row - and the
+    # orphan it must reconcile carries the full payload we just sent, which the
+    # lookup corroborates on name, postcode and phone.
+    try:
+        await complete_action(
+            session,
+            action_id=begun.action_id,
+            external_id=location.id,
+            response=location.raw,
+        )
+        # Guard with `ghl_subaccount_id IS NULL` so a concurrent writer cannot
+        # be clobbered; the per-client concurrency cap makes that race
+        # near-impossible, but the guard is cheap insurance.
+        await session.execute(
+            text(
+                "UPDATE clients SET ghl_subaccount_id = :ghl_id "
+                "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+            ),
+            {"ghl_id": location.id, "client_id": client_id},
+        )
+        await session.commit()
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
 
     log.info(
         "S1-25 GHL sub-account created",
@@ -1356,10 +1370,17 @@ async def create_ghl_subaccount_core(
         # event queued before S1-26c deployed has no `dedup_key` at all and
         # falls back to `email:...`. Those are different buckets, so during the
         # deploy window a legacy event and a fresh one for the SAME business do
-        # NOT serialise against each other. The residual risk is bounded: it
-        # needs both to be in flight simultaneously, and `platform_actions`'
-        # idempotency key plus the sibling re-check still stand behind it. It
-        # closes on its own once the queue drains, and cannot be fixed in CEL
+        # NOT serialise against each other. Round 8 audited the two backstops
+        # this comment used to cite, and BOTH were false reassurance: the
+        # `platform_actions` idempotency key is
+        # `{client_id}:ghl:create_subaccount:{event_id}`, so two DIFFERENT
+        # client rows for one business can never collide on it, and "the
+        # sibling re-check" is precisely the check that races when neither run
+        # has committed a `ghl_subaccount_id` yet. The residual is real, merely
+        # narrow: it needs a legacy queued event AND a fresh signing for the
+        # SAME business in flight in the one deploy window, worst case is a
+        # duplicate (visible, flagged, S1-26e-mergeable) sub-account, it closes
+        # on its own once the queue drains, and it cannot be fixed in CEL
         # because the expression cannot compute an identity_key.
         #
         # CEL has no `??`, and Inngest's docs do not document

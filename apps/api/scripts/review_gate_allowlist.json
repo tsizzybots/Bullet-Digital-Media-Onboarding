@@ -7,9 +7,17 @@
   ],
   "G1": [],
   "G6": [
-    "aB3cD4eF5gH6iJ7kL8mN"
+    "aB3cD4eF5gH6iJ7kL8mN",
+    "bot-name@some-project.iam.gserviceaccount.com",
+    "newdomainhit@bulletdigitalmedia.com",
+    "olddomainhit@bulletdigitalmedia.com",
+    "person@bulletdigitalmedia.com"
   ],
   "_G6_REASONS": {
-    "aB3cD4eF5gH6iJ7kL8mN": "Fictional id in review_gate.py's own comment, documenting the shape the GHL pattern matches. Not a live identifier - it replaced a real one that this check itself caught."
+    "aB3cD4eF5gH6iJ7kL8mN": "Fictional id in review_gate.py's own comment, documenting the shape the GHL pattern matches. Not a live identifier - it replaced a real one that this check itself caught.",
+    "olddomainhit@bulletdigitalmedia.com": "Synthetic fixture in test_review_gate.py's G6 self-tests - must match the real client-domain pattern to prove the detector fires.",
+    "newdomainhit@bulletdigitalmedia.com": "Same synthetic G6 self-test fixture.",
+    "person@bulletdigitalmedia.com": "Same synthetic G6 self-test fixture (the negative case for the service-account pattern).",
+    "bot-name@some-project.iam.gserviceaccount.com": "Synthetic fixture proving the round-8 service-account pattern matches its shape."
   }
 }

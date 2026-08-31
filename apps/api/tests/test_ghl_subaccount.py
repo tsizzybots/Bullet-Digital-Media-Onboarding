@@ -1563,12 +1563,25 @@ async def test_ghl_hit_without_postcode_is_not_reused(async_session: AsyncSessio
 @pytest.mark.db
 async def test_ghl_hit_with_divergent_name_is_not_reused(async_session: AsyncSession) -> None:
     """A hit on a shared mailbox whose location name is a different business is
-    not reused even when it carries a postcode."""
-    client_id = await _seed_client(async_session, email="shared@example.com")
+    not reused even when it carries a postcode AND a matching phone.
+
+    The phone is seeded on BOTH sides (round 8) so the divergent NAME is the
+    only refusal - without it, phone-absence refused the reuse first and the
+    name guard could be deleted with this test still green, which is exactly
+    what kept it out of the mutation manifest.
+    """
+    client_id = await _seed_client(
+        async_session, email="shared@example.com", phone="+44 7700 900123"
+    )
     event_id = await _seed_onboarding_event(async_session)
     ghl = FakeGhlClient(
         location=_ghl_location("loc_new"),
-        lookup_result=_ghl_location("loc_other", name="Totally Other Gym", postal_code="E8 1AA"),
+        lookup_result=_ghl_location(
+            "loc_other",
+            name="Totally Other Gym",
+            postal_code="E8 1AA",
+            phone="+44 7700 900123",
+        ),
     )
 
     result = await create_ghl_subaccount_core(
@@ -2272,6 +2285,77 @@ async def test_a_confident_link_clears_an_earlier_possible_duplicate_flag(
     is_dup, dup_of = cleared.one()
     assert is_dup is False, "a corroborated link answers the question the flag was asking"
     assert dup_of is None
+
+
+@pytest.mark.db
+async def test_commit_failure_after_successful_create_still_records_failed(
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 8: the ONLY unguarded raise point on the success path.
+
+    After a SUCCESSFUL `create_location`, `complete_action` + the client UPDATE
+    + `commit()` sat outside any try/except. A commit failure (Neon resets are
+    routine per this module's own comments) discarded a location id held in
+    memory, left the action `in_progress` with no retry_count bump, and handed
+    the retry to an eventually-consistent lookup that may mint a second
+    location. Every other external-call failure routes through
+    `_record_failure`; now this one does too.
+
+    The first commit AFTER the create raises once (a real SQLAlchemyError, as
+    a reset produces); `_record_failure`'s own recovery then lands `failed`.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@commitfail.com",
+        business_name="Commit Fail Gym",
+        legal_entity="Commit Fail Gym",
+        postal_code="E8 1AA",
+        phone="+44 7700 900666",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_created_ok"), lookup_result=None)
+
+    real_commit = async_session.commit
+    state = {"armed": False, "raised": False}
+
+    async def flaky_commit() -> None:
+        if state["armed"] and not state["raised"]:
+            state["raised"] = True
+            raise SQLAlchemyError("simulated connection reset at COMMIT")
+        await real_commit()
+
+    monkeypatch.setattr(async_session, "commit", flaky_commit)
+
+    # Arm AFTER the in_progress commit: the create succeeds, then the terminal
+    # commit is the one that dies.
+    original_create = ghl.create_location
+
+    async def create_then_arm(payload: dict) -> GhlLocation:
+        location = await original_create(payload)
+        state["armed"] = True
+        return location
+
+    monkeypatch.setattr(ghl, "create_location", create_then_arm)
+
+    with pytest.raises(SQLAlchemyError):
+        await create_ghl_subaccount_core(
+            async_session,
+            ghl,
+            client_id=client_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    status = await async_session.execute(
+        text(
+            "SELECT status, external_id FROM platform_actions "
+            "WHERE client_id = :id AND action = :action"
+        ),
+        {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+    )
+    row = status.one()
+    assert row.status == "failed", "the action must be visibly failed, never stranded in_progress"
 
 
 @pytest.mark.db

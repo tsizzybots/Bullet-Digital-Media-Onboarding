@@ -206,9 +206,41 @@ def _added_comment_lines(base: str) -> list[tuple[str, int, str]]:
 
 
 def _test_corpus() -> str:
-    parts = []
+    """String constants from inside test FUNCTION BODIES, quoted for matching.
+
+    AST-scoped (review round 8, asked twice): the corpus used to be every test
+    file concatenated raw, so a literal quoted in a test's DOCSTRING counted as
+    coverage - deleting the real assertion under it kept G1 clean. Now only
+    string constants that sit inside a `test_*` function body (docstrings
+    excluded) count, re-quoted so `_literal_is_covered`'s exact-quote rule
+    keeps rejecting prefix matches.
+    """
+    parts: list[str] = []
     for path in TESTS_ROOT.rglob("*.py"):
-        parts.append(path.read_text(errors="replace"))
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if not node.name.startswith("test_"):
+                continue
+            body = node.body
+            # Skip the docstring expression - quoting a literal in prose is
+            # not testing it.
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                body = body[1:]
+            # Decorators count: parametrize values ARE the test's inputs.
+            for stmt in [*body, *node.decorator_list]:
+                for inner in ast.walk(stmt):
+                    if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                        parts.append(f'"{inner.value}"')
     return "\n".join(parts)
 
 
@@ -320,31 +352,42 @@ _DISCRIMINATING_PARAMS = {
 }
 
 
+def _scan_seed_defaults(tree: ast.AST, path: Path, result: GateResult) -> None:
+    """Per-tree G5 scan, extracted pure so the self-tests can feed synthetic
+    ASTs (review round 8: every detector outside the three self-tested helpers
+    could be neutered wholesale with the whole self-test file green)."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+            continue
+        if not node.name.startswith("_seed"):
+            continue
+        kwonly = node.args.kwonlyargs
+        defaults = node.args.kw_defaults
+        for arg, default in zip(kwonly, defaults, strict=False):
+            if arg.arg not in _DISCRIMINATING_PARAMS or default is None:
+                continue
+            if isinstance(default, ast.Constant) and default.value is None:
+                continue  # None default is "absent", not a pinned value
+            try:
+                rel = str(path.relative_to(REPO_ROOT))
+            except ValueError:
+                rel = str(path)
+            result.add(
+                "G5",
+                f"{rel}:{node.lineno}",
+                f"`{node.name}` defaults the discriminating signal "
+                f"`{arg.arg}` - every seeded row agrees on it, so a bar "
+                f"reading it is pinned in one direction",
+            )
+
+
 def check_g5_fixture_defaults(result: GateResult) -> None:
     for path in TESTS_ROOT.rglob("*.py"):
         try:
             tree = ast.parse(path.read_text())
         except SyntaxError:
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
-                continue
-            if not node.name.startswith("_seed"):
-                continue
-            kwonly = node.args.kwonlyargs
-            defaults = node.args.kw_defaults
-            for arg, default in zip(kwonly, defaults, strict=False):
-                if arg.arg not in _DISCRIMINATING_PARAMS or default is None:
-                    continue
-                if isinstance(default, ast.Constant) and default.value is None:
-                    continue  # None default is "absent", not a pinned value
-                result.add(
-                    "G5",
-                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}",
-                    f"`{node.name}` defaults the discriminating signal "
-                    f"`{arg.arg}` - every seeded row agrees on it, so a bar "
-                    f"reading it is pinned in one direction",
-                )
+        _scan_seed_defaults(tree, path, result)
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +404,9 @@ _GHL_ID_SHAPE = re.compile(
 
 _PII_PATTERNS = {
     "client-domain email": re.compile(r"[\w.+-]+@(?:bulletdigitalmedia)\.com"),
+    # GCP service accounts are live identifiers too (round 8: one landed in a
+    # net-new CHANGELOG entry on a public repo and no pattern matched it).
+    "GCP service account": re.compile(r"[\w.-]+@[\w-]+\.iam\.gserviceaccount\.com"),
     "Render id": re.compile(r"\b(?:srv|dep|evg|crn)-[a-z0-9]{15,}\b"),
     "GHL location id": _GHL_ID_SHAPE,
 }
@@ -401,20 +447,31 @@ def _occurrences_at(ref: str | None, pattern: re.Pattern[str]) -> Counter[str]:
     return counts
 
 
+def _net_new_pii(
+    label: str,
+    before: Counter[str],
+    after: Counter[str],
+    allowlist: list[str],
+    result: GateResult,
+) -> None:
+    """Pure net-new comparison, extracted for the round-8 self-tests."""
+    for value, count in after.items():
+        if value in allowlist or _CAMEL_CASE.match(value):
+            continue
+        was = before.get(value, 0)
+        if count > was:
+            result.add(
+                "G6",
+                "working tree",
+                f"{label} `{value}` net-new: merge-base has {was}, HEAD has {count}",
+            )
+
+
 def check_g6_pii(result: GateResult, base: str, allowlist: list[str]) -> None:
     for label, pattern in _PII_PATTERNS.items():
-        before = _occurrences_at(base, pattern)
-        after = _occurrences_at(None, pattern)
-        for value, count in after.items():
-            if value in allowlist or _CAMEL_CASE.match(value):
-                continue
-            was = before.get(value, 0)
-            if count > was:
-                result.add(
-                    "G6",
-                    "working tree",
-                    f"{label} `{value}` net-new: merge-base has {was}, HEAD has {count}",
-                )
+        _net_new_pii(
+            label, _occurrences_at(base, pattern), _occurrences_at(None, pattern), allowlist, result
+        )
 
 
 # ---------------------------------------------------------------------------

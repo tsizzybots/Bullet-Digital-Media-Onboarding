@@ -240,6 +240,20 @@ class TestNormalizePhone:
         # An extension or a truncated field must never corroborate anything.
         assert normalize_phone(value) == ""
 
+    @pytest.mark.parametrize("value", ["5551", "4419", "x2274", "+44 20 55"])
+    def test_short_numbers_die_to_the_length_gate_alone(self, value: str | None) -> None:
+        """Round 8, finding 1: the length gate was revert-green.
+
+        Every param of the test above is ALSO caught by a different guard
+        ("12345" by the sequential check, "+44" and "ext. 22" by the
+        single-distinct-digit check), so `if False:`-ing the length gate left
+        all 220 identity-key tests green. These digits are non-sequential and
+        multi-distinct, so ONLY the length gate rejects them - and if it broke,
+        a 4-digit extension would become a usable phone able to corroborate
+        bar 2, the unsafe direction.
+        """
+        assert normalize_phone(value) == ""
+
 
 class TestCorroboratingSignalAgrees:
     """The second bar: a signal INDEPENDENT of the company record.
@@ -330,6 +344,9 @@ class TestSequentialDigitFiller:
         assert normalize_phone(value) == ""
 
     def test_sequential_filler_never_corroborates(self) -> None:
+        # The 9-digit tail of "1234567890" really is the "234567890" the
+        # source comment cites - computed here so the claim cannot go stale.
+        assert "1234567890"[-9:] == "234567890"
         assert corroborating_signal_agrees(phone_a="1234567890", phone_b="1234567890") is False
 
 
@@ -601,6 +618,33 @@ class TestContactNameAgrees:
         # literally, and a member silently dropped from the set fails here.
         first, last = full_name.split(" ", 1)
         assert contact_name_agrees(first, last, first, last) is False
+
+    @pytest.mark.parametrize(
+        ("first", "last"),
+        [
+            ("Head", "Office."),
+            ("Front", "Desk."),
+            ("Accounts", "Dept"),
+            ("Main", "Office"),
+            ("Reception", "Desk"),
+        ],
+    )
+    def test_trailing_punctuation_cannot_bypass_the_placeholder_set(
+        self, first: str, last: str
+    ) -> None:
+        """Round 8: the membership test was a raw strip+lower denylist - the
+        pattern this module deleted everywhere else - bypassed in the UNSAFE
+        direction: ("Head", "Office.") CORROBORATED because "head office."
+        missed the set. Both parts now fold + tokenize first, exactly as
+        `normalize_name` does."""
+        assert contact_name_agrees(first, last, first, last) is False
+
+    def test_accented_signer_agrees_with_unaccented_spelling(self) -> None:
+        # Round 8: no unicode fold meant "José"/"Jose" never agreed, so bar 3
+        # was permanently unsatisfiable for an accented signer whose documents
+        # differ only by an accent - the class round 5 fixed for names. Safe
+        # direction, but a silent permanent self-skip.
+        assert contact_name_agrees("José", "Ruiz", "Jose", "Ruiz") is True
 
     def test_placeholder_matching_is_case_and_space_insensitive(self) -> None:
         # The denylist is compared against the lowercased "first last" form, so

@@ -129,26 +129,36 @@ def _baseline_is_clean(node_id: str) -> tuple[bool, str]:
     return _BASELINE_CACHE[node_id]
 
 
-def _run_test(node_id: str) -> tuple[str, str]:
-    """Return (status, detail) for one mutated guard's named test."""
-    try:
-        proc = _pytest(node_id)
-    except subprocess.TimeoutExpired:
-        return ERROR, f"pytest exceeded {TEST_TIMEOUT_SECONDS}s - the guard is unproven"
+def _classify_pytest_result(returncode: int, output: str, node_id: str) -> tuple[str, str]:
+    """Pure exit-code/output classification, extracted in round 8.
 
-    output = proc.stdout + proc.stderr
-    if proc.returncode in _PYTEST_NON_ANSWERS:
+    This is the load-bearing logic that stops false KILLs (a stale node id, or
+    CI with Postgres down, exits non-zero without answering the question) and
+    false passes (a skipped-only run exits 0), and it had no tests of its own -
+    the exact revert-green shape this tool exists to end, living in the tool.
+    `test_review_gate.py` pins the whole table.
+    """
+    if returncode in _PYTEST_NON_ANSWERS:
         return ERROR, (
-            f"pytest exited {proc.returncode} (not a test failure) - the run did not "
+            f"pytest exited {returncode} (not a test failure) - the run did not "
             f"answer the question. Last line: {output.strip().splitlines()[-1:]}"
         )
     # A run of only-skipped tests exits 0, so the exit code alone cannot tell
     # "defended" from "never actually executed".
     if " skipped" in output and " passed" not in output and " failed" not in output:
         return UNPROVEN, "the named test skipped - it cannot fail, so it cannot kill"
-    if proc.returncode == _PYTEST_TESTS_FAILED:
+    if returncode == _PYTEST_TESTS_FAILED:
         return KILLED, ""
     return SURVIVED, f"{node_id} passed with the guard broken"
+
+
+def _run_test(node_id: str) -> tuple[str, str]:
+    """Return (status, detail) for one mutated guard's named test."""
+    try:
+        proc = _pytest(node_id)
+    except subprocess.TimeoutExpired:
+        return ERROR, f"pytest exceeded {TEST_TIMEOUT_SECONDS}s - the guard is unproven"
+    return _classify_pytest_result(proc.returncode, proc.stdout + proc.stderr, node_id)
 
 
 def _apply(path: Path, find: str, replace: str) -> tuple[str, str] | str:
@@ -244,7 +254,10 @@ def main() -> int:
         print(f"--only {args.only!r} matched no mutation - refusing to report a vacuous pass.")
         return 1
 
-    print(f"mutation manifest: {len(mutations)} guard(s) declared\n")
+    db_url = os.environ.get("DATABASE_URL", "")
+    db_target = db_url.rsplit("@", 1)[-1] if db_url else "NOT SET (db-marked guards will skip)"
+    print(f"mutation manifest: {len(mutations)} guard(s) declared")
+    print(f"db-marked guards run against: {db_target}\n")
 
     # Restore-on-signal. `try/finally` covers Python exceptions but NOT SIGTERM
     # or SIGHUP, so an IDE stopping the task or a closed terminal would leave a

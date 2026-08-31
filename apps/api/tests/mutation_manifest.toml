@@ -62,19 +62,48 @@ find = "    if not any(ch.isdigit() for ch in stripped):"
 replace = "    if False:"
 must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_no_digit_at_all_rejected"
 
-[[mutation]]
-name = "R7 - the contiguous repeated-digit filler shape (replaces the dead numeric denylist)"
-file = "src/bullet_api/worker/identity_key.py"
-find = "    if len(digits) >= 3 and len(set(digits)) == 1 and digits in stripped:"
-replace = "    if False:"
-must_fail = "tests/test_identity_key.py::TestNormalizePostcode::test_placeholders_rejected"
+# Round 8 replaced the contiguity rule: it rejected REAL repdigit postcodes
+# (Diemen's "1111 AB", Valletta's "VLT 1111") to NULL. Filler is now: purely
+# numeric single-distinct, or all-ZERO digits beside letters. Three kills, one
+# per clause and one for the narrowing itself.
 
 [[mutation]]
-name = "R7 - ...whose CONTIGUITY clause spares real postcodes like K1K 1K1"
+name = "R8 - purely numeric repdigit is filler (99999, 1111)"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    if len(digits) >= 3 and len(set(digits)) == 1 and digits in stripped:"
-replace = "    if len(digits) >= 3 and len(set(digits)) == 1:"
-must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_real_alternating_postcode_with_repeated_digits_survives"
+find = "        if stripped == digits:"
+replace = "        if False:"
+# NOT test_placeholders_rejected: its repdigit params are all-zero, which the
+# zeros clause catches with clause 1 disabled - the runner reported SURVIVED
+# on the first pointing. Only NONZERO pure repdigits die to this clause alone.
+must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_single_repeated_character_rejected"
+
+[[mutation]]
+name = "R8 - all-zero digits beside letters is filler (00000 ABC)"
+file = "src/bullet_api/worker/identity_key.py"
+find = '        if digits[0] == "0":'
+replace = "        if False:"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_all_zero_digits_beside_letters_still_reject"
+
+[[mutation]]
+name = "R8 - ...and the narrowing itself: NONZERO repdigit postcodes are REAL"
+file = "src/bullet_api/worker/identity_key.py"
+find = '        if digits[0] == "0":'
+replace = "        if True:"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_real_repdigit_postcodes_survive"
+
+[[mutation]]
+name = "R8 - the phone LENGTH gate (finding 1: it was revert-green)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(digits) < _PHONE_MIN_DIGITS:"
+replace = "    if False:"
+must_fail = "tests/test_identity_key.py::TestNormalizePhone::test_short_numbers_die_to_the_length_gate_alone"
+
+[[mutation]]
+name = "R8 - contact-name parts fold and tokenize before EVERY comparison"
+file = "src/bullet_api/worker/identity_key.py"
+find = '        return "".join(_ALNUM_TOKEN.findall(_fold_unicode(value or "").lower()))'
+replace = '        return (value or "").strip().lower()'
+must_fail = "tests/test_identity_key.py::TestContactNameAgrees::test_trailing_punctuation_cannot_bypass_the_placeholder_set"
 
 [[mutation]]
 name = "R7 - the minimum-length filler shape"
@@ -84,10 +113,15 @@ replace = "    if False:"
 must_fail = "tests/test_identity_key.py::TestNormalizePostcode::test_too_short_rejected"
 
 [[mutation]]
-name = "R7 - phone single-repeated-digit shape (now the dead denylist is gone)"
+# The R7 "single-repeated-digit shape" entry is GONE (round 8): deleting
+# `_is_repeating_pair`'s set-size gate made it subsume the caller's
+# `len(set(tail)) == 1` clause, the runner reported that clause's kill
+# SURVIVED, and the clause was deleted per the module's bar. The repdigit case
+# is now owned by `_is_repeating_pair`, killed below.
+name = "R8 - _is_repeating_pair owns single-AND-double-digit filler"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    if len(set(tail)) == 1 or _is_repeating_pair(tail) or _is_sequential_digits(tail):"
-replace = "    if _is_repeating_pair(tail) or _is_sequential_digits(tail):"
+find = "    return all(ch == digits[index % 2] for index, ch in enumerate(digits))"
+replace = "    return len(set(digits)) == 2 and all(ch == digits[index % 2] for index, ch in enumerate(digits))"
 must_fail = "tests/test_identity_key.py::TestRealLandlinesSurvive::test_shape_filler_is_still_rejected"
 
 # Round 6 named both of these as revert-green with no manifest entry.
@@ -123,7 +157,7 @@ must_fail = "tests/test_identity_key.py::TestSequentialDigitFiller"
 [[mutation]]
 name = "F5 area - landline rejection (the pre-round-5 distinct-digit floor)"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    if len(set(tail)) == 1 or _is_repeating_pair(tail) or _is_sequential_digits(tail):"
+find = "    if _is_repeating_pair(tail) or _is_sequential_digits(tail):"
 replace = "    if len(set(tail)) <= 2 or _is_sequential_digits(tail):"
 must_fail = "tests/test_identity_key.py::TestRealLandlinesSurvive"
 
@@ -434,3 +468,123 @@ file = "scripts/review_gate.py"
 find = '_PII_SCAN_SUFFIXES = (".py", ".md", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml")'
 replace = '_PII_SCAN_SUFFIXES = (".py", ".md")'
 must_fail = "tests/test_review_gate.py::TestG6ScanScope"
+
+# --- round 8: the classify guards the reviewer could not settle read-only, the
+# success-path terminal-commit guard, and the sharpened name kill.
+
+[[mutation]]
+name = "R8 - name divergence vetoes a postcode-and-phone-corroborated GHL hit"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if not name_agrees:\n            return _GHL_HIT_UNDECIDABLE"
+replace = "        if False:\n            return _GHL_HIT_UNDECIDABLE"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_with_divergent_name_is_not_reused"
+requires_db = true
+
+[[mutation]]
+name = "R8 - an unknown postcode on either side is never a confident reuse"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        return _GHL_HIT_UNDECIDABLE if name_agrees else _GHL_HIT_DIFFERENT_BUSINESS"
+replace = "        return _GHL_HIT_SAME_BUSINESS if name_agrees else _GHL_HIT_DIFFERENT_BUSINESS"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_without_postcode_is_not_reused"
+requires_db = true
+
+[[mutation]]
+name = "R8 - the success-path terminal commit routes failures through the recorder"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        await session.commit()\n    except Exception as exc:\n        await _record_failure(exc)\n        raise\n\n    log.info(\n        \"S1-25 GHL sub-account created\","
+replace = "        await session.commit()\n    except GhlNotConfiguredError as exc:\n        await _record_failure(exc)\n        raise\n\n    log.info(\n        \"S1-25 GHL sub-account created\","
+must_fail = "tests/test_ghl_subaccount.py::test_commit_failure_after_successful_create_still_records_failed"
+requires_db = true
+
+# Round 8: "the gate built to end revert-green guards has revert-green
+# detectors" - every detector the review listed as wholesale-neuterable now has
+# a kill of its own, including the runner's exit-code table and the
+# merge-base refusal whose docstring says it closes the vacuous-pass hole.
+
+[[mutation]]
+name = "R8 gate - _is_comment_or_prose cannot be neutered (disables G1 entirely)"
+file = "scripts/review_gate.py"
+find = "    stripped = text.strip()\n    if stripped.startswith(\"#\"):\n        return True"
+replace = "    return False\n    stripped = text.strip()\n    if stripped.startswith(\"#\"):\n        return True"
+must_fail = "tests/test_review_gate.py::TestG1DetectorInternals::test_comment_or_prose_detection"
+
+[[mutation]]
+name = "R8 gate - _looks_like_example_data cannot be neutered (disables G1 entirely)"
+file = "scripts/review_gate.py"
+find = "def _looks_like_example_data(literal: str) -> bool:\n    if _IDENTIFIER_ISH.match(literal):"
+replace = "def _looks_like_example_data(literal: str) -> bool:\n    return False\n    if _IDENTIFIER_ISH.match(literal):"
+must_fail = "tests/test_review_gate.py::TestG1DetectorInternals::test_example_data_heuristic"
+
+[[mutation]]
+name = "R8 gate - _QUOTED extracts real literals, not a poisoned pattern"
+file = "scripts/review_gate.py"
+find = "_QUOTED = re.compile(r'\"([^\"\\n]{2,60})\"|\\'([^\\'\\n]{2,60})\\'')"
+replace = "_QUOTED = re.compile(r'\"(zzzneverzzz)\"|\\'(zzzneverzzz)\\'')"
+must_fail = "tests/test_review_gate.py::TestG1DetectorInternals::test_quoted_literal_regex_extracts_both_quote_styles"
+
+[[mutation]]
+name = "R8 gate - the G1 corpus keeps excluding docstrings (AST scoping holds)"
+file = "scripts/review_gate.py"
+find = "            if (\n                body\n                and isinstance(body[0], ast.Expr)\n                and isinstance(body[0].value, ast.Constant)\n                and isinstance(body[0].value.value, str)\n            ):\n                body = body[1:]"
+replace = "            if False:\n                body = body[1:]"
+must_fail = "tests/test_review_gate.py::TestG1DetectorInternals::test_corpus_excludes_docstrings_but_keeps_bodies_and_decorators"
+
+[[mutation]]
+name = "R8 gate - G5's discriminating-param set cannot be emptied"
+file = "scripts/review_gate.py"
+find = "_DISCRIMINATING_PARAMS = {\n    \"phone\","
+replace = "_DISCRIMINATING_PARAMS = {\n    \"zzz_never\","
+must_fail = "tests/test_review_gate.py::TestG5Detector::test_seed_helper_with_pinned_corroborator_default_is_flagged"
+
+[[mutation]]
+name = "R8 gate - G5's _seed name coupling cannot be retargeted"
+file = "scripts/review_gate.py"
+find = "        if not node.name.startswith(\"_seed\"):"
+replace = "        if not node.name.startswith(\"_zzznever\"):"
+must_fail = "tests/test_review_gate.py::TestG5Detector::test_seed_helper_with_pinned_corroborator_default_is_flagged"
+
+[[mutation]]
+name = "R8 gate - G6's net-new comparison cannot be neutered"
+file = "scripts/review_gate.py"
+find = "        was = before.get(value, 0)\n        if count > was:"
+replace = "        was = before.get(value, 0)\n        if False:"
+must_fail = "tests/test_review_gate.py::TestG6Detector::test_net_new_value_is_flagged_and_preexisting_is_not"
+
+[[mutation]]
+name = "R8 gate - G6's allowlist branch cannot become allow-everything"
+file = "scripts/review_gate.py"
+find = "        if value in allowlist or _CAMEL_CASE.match(value):"
+replace = "        if True:"
+must_fail = "tests/test_review_gate.py::TestG6Detector::test_net_new_value_is_flagged_and_preexisting_is_not"
+
+[[mutation]]
+name = "R8 gate - the service-account pattern stays in the PII set"
+file = "scripts/review_gate.py"
+find = "    \"GCP service account\": re.compile(r\"[\\w.-]+@[\\w-]+\\.iam\\.gserviceaccount\\.com\"),"
+replace = ""
+must_fail = "tests/test_review_gate.py::TestG6Detector::test_service_account_pattern_matches_the_round8_live_instance_shape"
+
+[[mutation]]
+name = "R8 gate - _merge_base REFUSES an unresolvable base (the vacuous-pass hole)"
+file = "scripts/review_gate.py"
+# Reinstates the ORIGINAL round-5 hole verbatim: fall back to the unvalidated
+# ref string, empty diff, vacuous pass. (The first attempt gutted only the
+# first of the two exit layers and SURVIVED - the second layer still exited
+# for a bogus ref, which is the layers being deliberately redundant.)
+find = "    probe = subprocess.run(\n        [\"git\", \"rev-parse\", \"--verify\", f\"{base}^{{commit}}\"],"
+replace = "    return base\n    probe = subprocess.run(\n        [\"git\", \"rev-parse\", \"--verify\", f\"{base}^{{commit}}\"],"
+must_fail = "tests/test_review_gate.py::TestMergeBaseRefusal::test_unresolvable_base_exits_instead_of_passing_vacuously"
+
+[[mutation]]
+name = "R8 runner - non-answer exit codes are ERROR, never KILLED"
+file = "scripts/review_gate_mutate.py"
+find = "    if returncode in _PYTEST_NON_ANSWERS:"
+replace = "    if False:"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerClassification::test_the_full_table"
+
+[[mutation]]
+name = "R8 runner - a skipped-only run is UNPROVEN, never a pass"
+file = "scripts/review_gate_mutate.py"
+find = "    if \" skipped\" in output and \" passed\" not in output and \" failed\" not in output:"
+replace = "    if False:"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerClassification::test_the_full_table"

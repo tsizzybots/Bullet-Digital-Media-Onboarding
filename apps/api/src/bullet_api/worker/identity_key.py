@@ -165,9 +165,13 @@ _PLACEHOLDER_CONTACT_NAMES = frozenset(
         "head office",
         "the office",
         "accounts department",
+        "accounts dept",
         "accounts payable",
         "front desk",
+        "main office",
+        "reception desk",
         "n a",
+        "na",
         "not applicable",
         "to be confirmed",
     }
@@ -266,9 +270,16 @@ def normalize_postcode(postcode: str | None) -> str:
 
     THE SPEC, small enough to state completely - which is the round-7 fix:
 
-    1. A UK postcode found in the raw string OR its separator-stripped form is
-       extracted as outward+inward ("London E8 1AA" -> "E81AA"). The flat probe
-       keeps the UK branch itself separator-independent ("AB12CD" == "AB 12 CD").
+    1. A UK postcode found in the RAW string is extracted as outward+inward
+       ("London E8 1AA" -> "E81AA"). Raw only: round 6's extra probe of the
+       separator-stripped form went dead under this spec (a flat-form match is
+       boxed in by its own lookarounds to equal the whole flat string, which is
+       what step 2 returns anyway) and was deleted in round 7 when the mutation
+       runner proved no test could kill it. Separator-free spellings like
+       "AB12CD" still match the raw probe directly, and the exotic spelling
+       "B 11 1AA" (separators INSIDE the outward half) keys through step 2 as
+       the same flat string the probe would extract - no residual at all under
+       the round-8 filler rule, pinned by test.
     2. Otherwise the key IS the separator-stripped uppercased string, verbatim -
        no sorting, no dropping, no reordering of any kind - with exactly one
        equivalence: a US ZIP+4 reduces to its ZIP5 ("94107-1234" -> "94107",
@@ -329,10 +340,11 @@ def normalize_postcode(postcode: str | None) -> str:
     # own lookarounds to be exactly the whole flat string - the same value the
     # token path returns anyway. The mutation runner proved it: removing the
     # probe survived every test, so it was deleted rather than kept as
-    # coverage-shaped dead code. The one divergence class (a UK code whose
-    # digits are contiguous filler, written with separators INSIDE the outward
-    # half, e.g. "B 11 1AA") now rejects to NULL - the fail-safe direction -
-    # instead of minting a key.
+    # coverage-shaped dead code. Round 8 then removed the last divergence
+    # class too: "B 11 1AA" (separators INSIDE the outward half) used to
+    # reject to NULL under the contiguity filler rule; with that rule narrowed
+    # to spare real repdigit postcodes, the token path keys it as "B111AA" -
+    # exactly what the probe would have extracted. Zero divergence remains.
     uk_match = _UK_POSTCODE.search(upper)
     if uk_match is not None:
         return uk_match.group(1) + uk_match.group(2)
@@ -349,12 +361,22 @@ def normalize_postcode(postcode: str | None) -> str:
         # with none ("TBA", "NONE", "PENDING") is a placeholder by shape.
         return ""
     digits = "".join(ch for ch in stripped if ch.isdigit())
-    if len(digits) >= 3 and len(set(digits)) == 1 and digits in stripped:
-        # A CONTIGUOUS run of one repeated digit is filler ("00000",
-        # "00000 ABC"), whether or not letters sit beside it. The contiguity
-        # test (`digits in stripped`) is what spares real alternating formats:
-        # "K1K1K1" has digit content "111" but no "111" substring.
-        return ""
+    if digits and len(set(digits)) == 1:
+        # One repeated digit is filler ONLY in two shapes (narrowed, review
+        # round 8 - the round-7 contiguity rule rejected REAL repdigit
+        # postcodes: Diemen's "1111 AB", "9999 VF", Valletta's "VLT 1111" all
+        # NULL-keyed, silently self-skipping the returning-client check for
+        # those INT clients):
+        if stripped == digits:
+            # Purely numeric: "00000", "99999", "1111". No letters to anchor
+            # it as a real code, and the classic filler shapes live here
+            # (review round 2, P2).
+            return ""
+        if digits[0] == "0":
+            # All-ZERO digits beside letters: "00000 ABC". No postal system
+            # issues an all-zero numeric block, while NONZERO repdigit blocks
+            # beside letters are real ("1111 AB" is a Dutch postcode).
+            return ""
     return stripped
 
 
@@ -384,9 +406,13 @@ def _is_sequential_digits(digits: str) -> bool:
     other rotation of the keypad-run filler pattern people type when they
     have no real number to hand - by FORM, not by enumerating each rotation
     in a denylist (same reasoning `normalize_postcode` already applies).
+
+    CALLER CONTRACT: `digits` is the 7-9 digit tail `normalize_phone` computed
+    (its length gate runs first). The old `len(digits) < 2` guard was deleted
+    in round 8 - the reviewer's mutation sweep measured zero behavioural
+    difference over 30,020 inputs, and a guard no input can reach reads as
+    coverage. Behaviour on shorter strings is deliberately unspecified.
     """
-    if len(digits) < 2:
-        return False
     pairs = list(zip(digits, digits[1:], strict=False))
     ascending = all((int(a) + 1) % 10 == int(b) for a, b in pairs)
     descending = all((int(a) - 1) % 10 == int(b) for a, b in pairs)
@@ -400,9 +426,16 @@ def _is_repeating_pair(digits: str) -> bool:
     also matched real landlines whose subscriber number is mostly zeroes
     ("+44 20 7700 0000" -> "077000000"). A repeating pair cannot occur in a
     real allocated number; a low digit count routinely does.
+
+    OWNS the single-repeated-digit case too ("000000000"): a run of one digit
+    trivially alternates with itself, so this returns True for it. The
+    caller's separate `len(set(tail)) == 1` clause became DEAD the moment
+    round 8 deleted this function's `set != 2` gate - the gate's own mutation
+    runner caught that interaction (the clause's kill SURVIVED) and the clause
+    was deleted per the module's bar. CALLER CONTRACT: `digits` is the 7-9
+    digit tail; behaviour on shorter strings is unspecified (the old length
+    gate was deleted for zero behavioural difference over 30,020 inputs).
     """
-    if len(digits) < 4 or len(set(digits)) != 2:
-        return False
     return all(ch == digits[index % 2] for index, ch in enumerate(digits))
 
 
@@ -435,7 +468,7 @@ def normalize_phone(phone: str | None) -> str:
     # `_is_sequential_digits` catches it (and every rotation) by SHAPE; the
     # denylist it obsoleted is deleted (round 7 - every member was sequential,
     # so the membership check was dead code that could not fail a test).
-    if len(set(tail)) == 1 or _is_repeating_pair(tail) or _is_sequential_digits(tail):
+    if _is_repeating_pair(tail) or _is_sequential_digits(tail):
         return ""
     return tail
 
@@ -528,8 +561,20 @@ def contact_name_agrees(
     single-word one ("Accounts", "Admin") leaves the surname blank and is
     already refused by the both-parts rule above.
     """
-    first_norm_a, last_norm_a = (first_a or "").strip().lower(), (last_a or "").strip().lower()
-    first_norm_b, last_norm_b = (first_b or "").strip().lower(), (last_b or "").strip().lower()
+
+    # Fold + tokenize each part, exactly as `normalize_name` does (review
+    # round 8, two findings in one): (a) the placeholder membership was a raw
+    # strip+lower denylist - the pattern this module deleted everywhere else -
+    # bypassed in the UNSAFE direction by trailing punctuation ("Head",
+    # "Office.") CORROBORATED because "head office." missed the set; (b) no
+    # unicode fold, so an accented signer whose two documents differ only by
+    # an accent ("José" vs "Jose") made bar 3 permanently unsatisfiable - the
+    # exact class the fold fixed for business names in round 5.
+    def _part(value: str | None) -> str:
+        return "".join(_ALNUM_TOKEN.findall(_fold_unicode(value or "").lower()))
+
+    first_norm_a, last_norm_a = _part(first_a), _part(last_a)
+    first_norm_b, last_norm_b = _part(first_b), _part(last_b)
     if not (first_norm_a and last_norm_a and first_norm_b and last_norm_b):
         return False
     if f"{first_norm_a} {last_norm_a}" in _PLACEHOLDER_CONTACT_NAMES:
@@ -575,11 +620,15 @@ def addresses_materially_diverge(address_a: str | None, address_b: str | None) -
     address can only ever prevent a merge, never cause one, so reading it in
     this direction adds a separator without adding a false-match risk.
 
-    This is what closes round 5's finding 1: one owner, two sites, the same
-    brand in `Company.Name`, the same head-office `Company.Zip` and the same
-    `Client.Phone` on both documents clears every other bar, and site 2 links
-    into site 1's sub-account with no flag. The street addresses differ, and
-    that is the only signal on the row that does.
+    This closes round 5's finding 1 ONLY when the two rows carry different
+    street addresses - two company records sharing a postcode. It does NOT
+    close the one-owner-two-sites case (the module header and migration 0013
+    were corrected in rounds 6-7; this sentence was the straggler, round 8):
+    one owner with ONE company record and two deals gives two rows identical on
+    address as well, every bar clears, and site 2 still auto-links - the gap
+    `test_one_company_record_two_deals_still_auto_links` pins as documented
+    behaviour until `hubspot_company_id` or `Existing_Client_Identifier` exists
+    in the data.
 
     **Note the deliberate ASYMMETRY with `names_materially_diverge`**, where an
     absent name IS divergence. These read opposite because they do opposite
