@@ -19,7 +19,7 @@ Nothing here is a new feature. It is verification: prove that a diff already str
 - **Target:** Render **staging** (client-owned workspace `Agents's workspace`).
 - **Services:** `bullet-api-staging` (FastAPI receiver + admin), `bullet-worker-staging` (Inngest workers), `bullet-cron-staging` (reconciliation), `bullet-dashboard-staging-web` (Next.js).
 - **Data:** Neon Postgres at migration head `0012`.
-- **PandaDoc:** SANDBOX accounts (UK + INT). Live/production keys are a separate, later step.
+- **PandaDoc:** SANDBOX accounts (UK + INT) *as originally planned*. **SUPERSEDED 28/07/2026:** staging now runs Bullet's PRODUCTION PandaDoc keys (the sandbox key could not fetch the real documents the live webhook delivers - it 404'd and dead-lettered every one). Chain 1 is therefore driven via the replay endpoint against a THROWAWAY completed production document, never by signing a real client's agreement. See the CHANGELOG entries for 28/07 and 29/07.
 - **Provider accounts:** Anthropic + OpenAI are IzzyAgents-owned; GHL agency, PandaDoc, R2/Cloudflare, Google Cloud are Bullet-owned.
 
 ## 3. The two chains under test
