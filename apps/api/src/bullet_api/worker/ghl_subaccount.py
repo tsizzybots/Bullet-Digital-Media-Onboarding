@@ -469,12 +469,13 @@ def _pick_sibling(
         address_disqualifies = addresses_materially_diverge(client_address, candidate.address)
         # Bar 5 (review round 9, P1.1) - the POSTCODE must not actively disagree.
         # A disqualifier like bar 4: it can only ever REFUSE a link, never grant
-        # one, so absence abstains. It bites on the email-fallback paths, which
-        # key on the shared brand mailbox and never otherwise compared the
-        # postcode (`_SIBLING_SELECT` did not fetch it, and `identity_key IS NULL`
-        # is not proof of an absent postcode), so Brussels "1000" and Itegem
-        # "2222" false-merged. On the keyed path candidates share the normalized
-        # postcode by construction, so it can never fire there.
+        # one, so absence abstains. Its live path is DRIFT (corrected round 11): a
+        # legacy NULL-keyed sibling reached by the email fallback that still
+        # carries a real, divergent postcode, or a COALESCE upsert that kept an
+        # old postcode while filling a key. It is NORMALLY inert on the keyed
+        # path, where candidates share the normalized postcode - "normally" not
+        # "never", since that same upsert can leave a keyed row's stored postcode
+        # disagreeing with its key. See `postcodes_materially_diverge`.
         postcode_disqualifies = postcodes_materially_diverge(client_postcode, candidate.postal_code)
         if phone_agrees and contact_ok and not address_disqualifies and not postcode_disqualifies:
             return candidate, None
@@ -611,6 +612,12 @@ def _classify_ghl_hit(
     | unknown | differs  | any     | any        | different business | -> own
     | unknown | unknown  | any     | any        | undecidable        | -> own + flag
 
+    A WEAK-anchor postcode (a repdigit like "11111" that round 9 P1.2 lets key)
+    downgrades an otherwise-agreeing row to UNDECIDABLE, exactly as the DB leg's
+    bar 3 does (review round 11, P0.2): matching filler is not proof of one
+    business. So the `postcode agrees` rows above hold only for a STRONG postcode;
+    a weak one behaves like `postcode unknown`.
+
     The address column reads in ONE DIRECTION: it can only ever downgrade a
     reuse to undecidable on ACTIVE disagreement, never grant one - which is why
     every row where name or postcode already decided the verdict is `any`.
@@ -683,6 +690,14 @@ def _classify_ghl_hit(
         return _GHL_HIT_UNDECIDABLE if name_agrees else _GHL_HIT_DIFFERENT_BUSINESS
     if location_postcode == client_postcode_norm:
         if not name_agrees:
+            return _GHL_HIT_UNDECIDABLE
+        if postcode_is_weak_anchor(client_postcode) or postcode_is_weak_anchor(location_postcode):
+            # A repdigit postcode ("11111") is data-entry filler, not
+            # corroboration - the SAME weak anchor the DB leg's bar 3 guards
+            # (review round 11, P0.2). Matching filler is not proof of one
+            # business, so hand it to a human exactly as the DB leg does. Before
+            # round 9 this leg was safe here because "11111" normalized to "" ->
+            # UNDECIDABLE; P1.2 let it key, and round 10 closed only the DB leg.
             return _GHL_HIT_UNDECIDABLE
         # Name and postcode agreeing is exactly the bar round 2 rejected. The
         # phone must agree too, and absence is not agreement - an
@@ -938,6 +953,13 @@ async def create_ghl_subaccount_core(
     # it lacks the postcode anchor bars 1+2 lean on, so `require_contact_name`
     # replaces it with the signing contact's name instead of dropping the
     # requirement. See `_pick_sibling`'s docstring for the full reasoning.
+    # The weak-anchor gate must judge the postcode the keyed match ACTUALLY
+    # anchored on - the postcode half of the identity_key - not the stored
+    # `postal_code`, which the COALESCE upsert can leave disagreeing with the key
+    # (review round 11, P2). Fall back to the stored value when there is no key.
+    anchor_postcode = (
+        client.identity_key.partition("|")[2] if client.identity_key else client.postal_code
+    )
     sibling, collision = _pick_sibling(
         candidates,
         client_name=client_name,
@@ -952,13 +974,14 @@ async def create_ghl_subaccount_core(
         # `postcodes_materially_diverge`.
         client_postcode=client.postal_code,
         # The email fallback ALWAYS carries the stronger bar (unkeyed row OR
-        # keyed row whose key found nothing). AND a keyed row whose postcode is
-        # a WEAK anchor (a repdigit like "11111" that round 9 P1.2 lets key)
-        # keeps requiring bar 3 too: the keyed path's "shared postcode is the
-        # anchor" argument is void when the postcode is filler, so name + phone
-        # alone must not merge two sites of one brand (review round 10, P0.1).
+        # keyed row whose key found nothing). AND a keyed row whose ANCHOR
+        # postcode is a WEAK anchor (a repdigit like "11111" that round 9 P1.2
+        # lets key) keeps requiring bar 3 too: the keyed path's "shared postcode
+        # is the anchor" argument is void when the postcode is filler, so name +
+        # phone alone must not merge two sites of one brand (review round 10 P0.1,
+        # round 11 P1.1 broadened the classifier to filler-plus-text).
         require_contact_name=(
-            not keyed_candidates_found or postcode_is_weak_anchor(client.postal_code)
+            not keyed_candidates_found or postcode_is_weak_anchor(anchor_postcode)
         ),
     )
 

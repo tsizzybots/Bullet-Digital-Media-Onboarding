@@ -525,6 +525,10 @@ class TestMalformedPostcodeNeverMintsAUkKey:
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
+            # NOTE for future trimming (round 11, P3): the first four BARE params
+            # coincide with the token path - they pass even with the ordinal
+            # fallback deleted - so ONLY the two address-bearing params below
+            # carry the mutation kill for the fallback. Do not trim those two.
             ("E8 1ST", "E81ST"),
             ("B33 8TH", "B338TH"),
             ("E8 2ND", "E82ND"),
@@ -542,14 +546,70 @@ class TestMalformedPostcodeNeverMintsAUkKey:
         assert normalize_postcode(value) == expected
 
     @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("Unit A1, 1st Floor, B33 8TH", "B338TH"),
+            ("Unit A1, 1st Floor, E8 1ST", "E81ST"),
+            ("Suite C3 2nd Floor London SW1A 1ST", "SW1A1ST"),
+            ("Suite C3 2nd Floor Leeds LS1 4ST", "LS14ST"),
+        ],
+    )
+    def test_floor_ordinal_loses_to_an_ordinal_shaped_real_postcode(
+        self, value: str, expected: str
+    ) -> None:
+        # Round 11, P0.1: a unit/floor ordinal always PRECEDES the postcode in an
+        # address, so keeping the FIRST ordinal-shaped match let the floor number
+        # beat a real ordinal-shaped postcode - and two different postcodes
+        # collapsed onto one key (a false MERGE). The fallback keeps the LAST
+        # ordinal-shaped match, so the suffix (the postcode) wins.
+        assert normalize_postcode(value) == expected
+
+    def test_two_ordinal_shaped_sites_do_not_collapse_via_the_floor_number(self) -> None:
+        # The exact round-11 collision: both sites carried "A11ST" (the floor
+        # ordinal) under the first-match fallback, erasing the postcode axis.
+        first = normalize_postcode("Unit A1, 1st Floor, B33 8TH")
+        second = normalize_postcode("Unit A1, 1st Floor, E8 1ST")
+        assert first == "B338TH"
+        assert second == "E81ST"
+        assert first != second
+
+    def test_last_ordinal_wins_when_two_non_floor_ordinals_compete(self) -> None:
+        # The pin for the LAST-match rule specifically. The floor-word guard
+        # already removes a "1st Floor" ordinal from contention, so the floor
+        # params above cannot distinguish first-keep from last-keep - this one
+        # can: two ordinal-shaped matches, NEITHER followed by a floor word, and
+        # the suffix (the postcode) must win over the unit prefix.
+        assert normalize_postcode("Unit B2 1st, E8 1ST") == "E81ST"
+
+    def test_floor_ordinal_alone_does_not_mint_a_postcode_key(self) -> None:
+        # Round 11, P0.1 (related): an ordinal immediately followed by a floor
+        # word is a FLOOR, never a postcode. A value with no postcode at all must
+        # not mint a confident key that collides with a genuine client at the
+        # matching real postcode - it falls through to the verbatim token path.
+        assert normalize_postcode("Unit B2, 1st Floor") == "UNITB21STFLOOR"
+
+    def test_ordinal_fallback_returns_before_the_filler_gauntlet(self) -> None:
+        # Documented behaviour (round 11, P3): the ordinal fallback returns like
+        # every other UK-probe hit - before the filler checks - so a UK-shaped
+        # string with an ordinal inward keys verbatim ("A0 0TH"). Consistent
+        # with the non-ordinal path, and fail-toward-SPLIT if the value is junk.
+        assert normalize_postcode("A0 0TH") == "A00TH"
+
+    @pytest.mark.parametrize(
+        "prefix",
+        ["London ", "Unit A1, 1st Floor, ", "Suite C3 2nd Floor ", "Flat 2, 14 Mare St, "],
+    )
+    @pytest.mark.parametrize(
         "postcode",
         ["E8 1AA", "SW1A 1AA", "CR0 2AB", "E8 1ST", "B33 8TH", "N7 3RD"],
     )
-    def test_town_prefix_does_not_change_the_key(self, postcode: str) -> None:
-        # The invariant the raw probe exists for (review round 10): a value
-        # carrying the town must key identically to the bare postcode, including
-        # ordinal-shaped ones like "B33 8TH" that round 9 regressed.
-        assert normalize_postcode("London " + postcode) == normalize_postcode(postcode)
+    def test_address_prefix_does_not_change_the_key(self, prefix: str, postcode: str) -> None:
+        # The invariant the raw probe exists for (round 10, prefix-parametrized
+        # in round 11): a value carrying a town OR a unit/floor prefix must key
+        # identically to the bare postcode - including ordinal-shaped postcodes
+        # like "B33 8TH", which round 10's first-match fallback regressed for
+        # exactly the unit/floor prefixes this now parametrizes.
+        assert normalize_postcode(prefix + postcode) == normalize_postcode(postcode)
 
 
 class TestUnicodeFold:
@@ -794,17 +854,40 @@ class TestPostcodeIsWeakAnchor:
         # proof of one business, so the caller must keep the signer bar.
         assert postcode_is_weak_anchor(value) is True
 
-    @pytest.mark.parametrize("value", ["1000", "75008", "10115", "E8 1AA", "SW1A 1AA"])
+    @pytest.mark.parametrize("value", ["11111 USA", "11111 Berlin", "99999-XX"])
+    def test_repdigit_with_adjacent_text_is_still_weak(self, value: str) -> None:
+        # Round 11, P1.1: `normalized == digits` let filler typed with a country
+        # or town walk past the gate, so two rows sharing that data-entry
+        # convention keyed identically with bar 3 waived - the round-10 merge,
+        # re-opened. Weakness is judged on the leading digit block, not on the
+        # value being digits-only.
+        assert postcode_is_weak_anchor(value) is True
+
+    def test_the_adjacent_text_shape_keys_with_its_residue_yet_stays_weak(self) -> None:
+        # The exact mechanism of the bypass: the residue letters survive
+        # normalization, so the value is NOT digits-only - which is why the old
+        # test missed it - yet the leading repdigit block still keys the row.
+        assert normalize_postcode("11111 USA") == "11111USA"
+        assert postcode_is_weak_anchor("11111USA") is True
+
+    def test_stockholm_five_ones_is_weak_in_the_safe_direction(self) -> None:
+        # "111 11" is a REAL Stockholm postcode that normalizes to "11111" and
+        # is indistinguishable from filler. Classifying it weak only keeps bar 3
+        # ON (a returning client with the same signer still links), which is the
+        # safe direction - documented, not accidental.
+        assert postcode_is_weak_anchor("111 11") is True
+
+    @pytest.mark.parametrize("value", ["1000", "75008", "10115", "E8 1AA", "SW1A 1AA", "E1 1EE"])
     def test_a_postcode_with_real_entropy_is_strong(self, value: str) -> None:
-        # A second distinct digit ("1000") or any letter ("E8 1AA") is a real
-        # anchor - a UK postcode is never purely numeric.
+        # A second distinct digit ("1000") or a letter-first code ("E8 1AA",
+        # "E1 1EE" - repeated digits but real UK structure) is a real anchor - a
+        # UK postcode is never purely numeric and never digit-first.
         assert postcode_is_weak_anchor(value) is False
 
     @pytest.mark.parametrize("value", [None, "", "TBA", "00000"])
     def test_absent_or_filler_postcode_is_not_a_weak_anchor(self, value: str | None) -> None:
-        # Absence / filler normalizes to "" and is handled by the NULL-key path,
-        # not by the weak-anchor gate, so it reports False (there is no key to
-        # anchor at all).
+        # Absence / filler normalizes to "" (no key exists to anchor), and the
+        # weak regex cannot match an empty string, so the gate abstains.
         assert postcode_is_weak_anchor(value) is False
 
 

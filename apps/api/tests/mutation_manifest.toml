@@ -161,7 +161,7 @@ must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::
 
 [[mutation]]
 # Round 10, P1.3: an ordinal-SHAPED inward half can be a REAL postcode too
-# (E8 1ST, B33 8TH), so the skip keeps the first ordinal match as a fallback and
+# (E8 1ST, B33 8TH), so the loop keeps an ordinal match as a fallback and
 # returns it when no non-ordinal match exists. Dropping the fallback discards
 # the real postcode and lets a value carrying a town key differently.
 name = "R10 - the ordinal fallback (an ordinal-shaped REAL postcode is not discarded)"
@@ -169,6 +169,27 @@ file = "src/bullet_api/worker/identity_key.py"
 find = "    if ordinal_fallback is not None:\n        return ordinal_fallback"
 replace = "    if False:\n        return ordinal_fallback"
 must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_ordinal_shaped_real_postcode_is_not_discarded"
+
+[[mutation]]
+# Round 11, P0.1: the fallback must keep the LAST ordinal-shaped match. A
+# unit/floor ordinal always PRECEDES the postcode, so reverting to first-match
+# lets the floor number beat a real ordinal-shaped postcode and two different
+# postcodes collapse onto one key - the round-11 false MERGE.
+name = "R11 - the ordinal fallback keeps the LAST match (the postcode is the suffix)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "            ordinal_fallback = uk_match.group(1) + uk_match.group(2)\n            continue"
+replace = "            if ordinal_fallback is None:\n                ordinal_fallback = uk_match.group(1) + uk_match.group(2)\n            continue"
+must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_floor_ordinal_loses_to_an_ordinal_shaped_real_postcode"
+
+[[mutation]]
+# Round 11, P0.1 (related): an ordinal immediately followed by a floor word is a
+# FLOOR, never a postcode. Without the guard, a value with no postcode at all
+# mints a confident key that collides with a genuine client at that postcode.
+name = "R11 - a floor-word ordinal never becomes the postcode fallback"
+file = "src/bullet_api/worker/identity_key.py"
+find = "            if _FLOOR_AFTER.match(upper, uk_match.end()):\n                continue"
+replace = "            if False:\n                continue"
+must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_floor_ordinal_alone_does_not_mint_a_postcode_key"
 
 [[mutation]]
 name = "F3 - sequential-digit phone filler (round 4's one-liner)"
@@ -284,19 +305,90 @@ requires_db = true
 # disjunct waives bar 3 and re-opens the false MERGE.
 name = "R10 - the weak-anchor gate keeps bar 3 for a repdigit key (P0.1)"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "            not keyed_candidates_found or postcode_is_weak_anchor(client.postal_code)\n"
+find = "            not keyed_candidates_found or postcode_is_weak_anchor(anchor_postcode)\n"
 replace = "            not keyed_candidates_found\n"
 must_fail = "tests/test_ghl_subaccount.py::test_repdigit_postcode_key_does_not_waive_the_signer_bar"
 requires_db = true
 
 [[mutation]]
+# Round 11 (over-refusal at the WIRING): always requiring bar 3 on the keyed
+# path silently splits every genuine returning client whose rows carry no
+# signer names - which is most of them (`_seed_client`'s honest default is
+# None, and so is production's when the tokens are absent).
+name = "R11 - the keyed path must not demand bar 3 for a STRONG anchor"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            not keyed_candidates_found or postcode_is_weak_anchor(anchor_postcode)\n"
+replace = "            True\n"
+must_fail = "tests/test_ghl_subaccount.py::test_returning_client_links_parent_and_reuses_db_sibling"
+requires_db = true
+
+[[mutation]]
+# Round 11, P2: the gate must judge the postcode the keyed match ANCHORED on
+# (the key's postcode half), not the stored `postal_code` COALESCE drift can
+# leave disagreeing. Reverting to the stored value waives bar 3 exactly when
+# the stored value normalizes to "" while the key carries filler.
+name = "R11 - the weak-anchor gate reads the KEY's postcode, not the stored one"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    anchor_postcode = (\n        client.identity_key.partition(\"|\")[2] if client.identity_key else client.postal_code\n    )"
+replace = "    anchor_postcode = client.postal_code"
+must_fail = "tests/test_ghl_subaccount.py::test_weak_anchor_gate_reads_the_key_not_the_stored_postcode"
+requires_db = true
+
+[[mutation]]
+# Round 11, P0.2: the weak-anchor rule on the GHL leg. Without it,
+# `_classify_ghl_hit` counts "11111" == "11111" as postcode corroboration and
+# reuses an orphan on filler - the round-10 merge, alive on the second leg.
+name = "R11 - the GHL leg downgrades a weak-anchor postcode to UNDECIDABLE"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if postcode_is_weak_anchor(client_postcode) or postcode_is_weak_anchor(location_postcode):"
+replace = "        if False:"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_leg_filler_postcode_is_undecidable_not_reused"
+requires_db = true
+
+[[mutation]]
+# Round 11, P3: "two keyed rows never meet on an email query" is carried
+# entirely by this predicate, and four docstrings rest on it. Deleting the
+# IS NULL clause resurfaces the keyed sibling, bar 5 refuses on the divergent
+# postcode, and a spurious flag lands on a normal franchise signing.
+name = "R11 - the email fallback's IS NULL predicate keeps keyed siblings apart"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    _SIBLING_SELECT.format(predicate=\"lower(email) = lower(:email) AND identity_key IS NULL\")"
+replace = "    _SIBLING_SELECT.format(predicate=\"lower(email) = lower(:email)\")"
+must_fail = "tests/test_ghl_subaccount.py::test_two_keyed_sites_never_meet_on_the_email_query"
+requires_db = true
+
+[[mutation]]
 # Round 10, P0.1: the weak-anchor CLASSIFIER itself. Neutering it to always-False
 # makes a repdigit postcode look strong, so bar 3 is waived and the merge returns.
+# (Round 11 rebuilt the classifier as a leading-digit-block regex so filler with
+# adjacent text is caught too - the pinned line moved with it.)
 name = "R10 - postcode_is_weak_anchor classifies a repdigit as weak"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    return normalized == digits and len(set(digits)) == 1"
+find = "    return bool(_WEAK_POSTCODE.fullmatch(normalize_postcode(postcode)))"
 replace = "    return False"
 must_fail = "tests/test_identity_key.py::TestPostcodeIsWeakAnchor::test_purely_numeric_repdigit_is_weak"
+
+[[mutation]]
+# Round 11, P1.1: the shape the old `normalized == digits` test missed - filler
+# typed with a trailing country/town. Reintroducing the digits-only requirement
+# must fail the adjacent-text test, or the round-10 merge re-opens for exactly
+# that data-entry convention.
+name = "R11 - filler with adjacent text is still weak (the digits-only regression)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return bool(_WEAK_POSTCODE.fullmatch(normalize_postcode(postcode)))"
+replace = "    normalized = normalize_postcode(postcode)\n    digits = \"\".join(ch for ch in normalized if ch.isdigit())\n    return normalized == digits and len(set(digits)) == 1"
+must_fail = "tests/test_identity_key.py::TestPostcodeIsWeakAnchor::test_repdigit_with_adjacent_text_is_still_weak"
+
+[[mutation]]
+# Round 11 (the over-refusal DIRECTION, previously unpinned): a classifier that
+# calls EVERYTHING weak would silently demand bar 3 for every keyed client -
+# and a genuine returning client with no signer names on file would stop
+# linking. The strong-postcode unit test draws that boundary.
+name = "R11 - the weak-anchor classifier cannot call a real postcode weak"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return bool(_WEAK_POSTCODE.fullmatch(normalize_postcode(postcode)))"
+replace = "    return True"
+must_fail = "tests/test_identity_key.py::TestPostcodeIsWeakAnchor::test_a_postcode_with_real_entropy_is_strong"
 
 [[mutation]]
 # Round 10 (reviewer smaller item): bar 5's fail-open branch was killed only
@@ -426,8 +518,8 @@ requires_db = true
 [[mutation]]
 name = "R6 - ...and the fallback carries the UNKEYED bar, not the keyed one"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "            not keyed_candidates_found or postcode_is_weak_anchor(client.postal_code)\n"
-replace = "            not keyed or postcode_is_weak_anchor(client.postal_code)\n"
+find = "            not keyed_candidates_found or postcode_is_weak_anchor(anchor_postcode)\n"
+replace = "            not keyed or postcode_is_weak_anchor(anchor_postcode)\n"
 must_fail = "tests/test_ghl_subaccount.py::test_keyed_email_fallback_still_demands_the_contact_name"
 requires_db = true
 

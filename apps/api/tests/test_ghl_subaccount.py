@@ -65,6 +65,7 @@ async def _seed_client(
     created_at_offset_seconds: int = 0,
     address: str | None = None,
     force_null_identity_key: bool = False,
+    identity_key_override: str | None = None,
 ) -> uuid.UUID:
     """Insert a minimal `clients` row (as S1-25a would have created).
 
@@ -95,12 +96,20 @@ async def _seed_client(
     `postal_code` but a NULL `identity_key`, the shape 0013 leaves behind (it
     does no backfill). It is the only way to reach bar 5 (the postcode
     disqualifier), whose live path is a legacy sibling under the email fallback.
+
+    `identity_key_override` seeds COALESCE DRIFT (review round 11): the
+    `identity_key = COALESCE(clients.identity_key, EXCLUDED.identity_key)`
+    upsert can keep an OLD key while the stored `postal_code` moves on (or vice
+    versa), so the two can disagree. Passing an explicit key here models a row
+    in that drifted state, which is what the keyed-path bar-5 and
+    anchor-from-key tests need.
     """
-    identity_key = (
-        None
-        if force_null_identity_key
-        else compute_identity_key(identity_name(business_name, legal_entity), postal_code)
-    )
+    if identity_key_override is not None:
+        identity_key: str | None = identity_key_override
+    elif force_null_identity_key:
+        identity_key = None
+    else:
+        identity_key = compute_identity_key(identity_name(business_name, legal_entity), postal_code)
     result = await session.execute(
         text(
             "INSERT INTO clients ("
@@ -1662,6 +1671,303 @@ async def test_repdigit_postcode_still_links_a_genuine_returning_client(
         {"id": child_id},
     )
     assert flagged.scalar_one() is False
+
+
+@pytest.mark.db
+async def test_ghl_leg_filler_postcode_is_undecidable_not_reused(
+    async_session: AsyncSession,
+) -> None:
+    """Review round 11, P0.2 - the weak-anchor rule on the GHL leg.
+
+    Round 10 wired the weak-anchor gate into `_pick_sibling` only, so the
+    round-10 merge survived verbatim on the SECOND leg: `_classify_ghl_hit`
+    counted "11111" == "11111" as postcode corroboration with no signer bar at
+    all. Reachable through this module's own documented worst case - site A's
+    `create_location` succeeds but the response is lost, so A's row keeps
+    `ghl_subaccount_id IS NULL`, the DB leg cannot see it, and site B meets A's
+    orphan through the email lookup instead.
+
+    A weak (filler) postcode must downgrade the hit to UNDECIDABLE - own
+    sub-account plus a flag pointing at the location - matching the DB leg's
+    flag-and-create posture. Matching filler is not proof of one business.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@rep-brand.example.com",
+        business_name="Rep Brand Fitness",
+        legal_entity="Rep Brand Fitness",
+        postal_code="11111",  # filler: keys, but a weak anchor
+        phone="+44 20 7946 1000",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    # The orphan: same name, same filler postcode, same phone - every signal the
+    # classifier reads agrees, and before P0.2 that was a confident reuse.
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_own", name="Rep Brand Fitness", postal_code="11111"),
+        lookup_result=_ghl_location(
+            "loc_orphan",
+            name="Rep Brand Fitness",
+            postal_code="11111",
+            phone="+44 20 7946 1000",
+        ),
+    )
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # Its OWN sub-account - the filler-corroborated orphan is a human's call.
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_ghl_id FROM clients WHERE id = :id"),
+        {"id": client_id},
+    )
+    is_dup, dup_ghl = flagged.one()
+    assert is_dup is True
+    assert dup_ghl == "loc_orphan"
+
+
+@pytest.mark.db
+async def test_weak_anchor_gate_reads_the_key_not_the_stored_postcode(
+    async_session: AsyncSession,
+) -> None:
+    """Review round 11, P2 - the gate judges the postcode the key MATCHED on.
+
+    The keyed query anchors on the postcode INSIDE `identity_key`; under
+    COALESCE drift the stored `postal_code` can disagree with it. Normalizing
+    the stored value let the gate report STRONG (bar 3 waived) off a postcode
+    the match never used: here the child's stored postcode is a placeholder
+    that normalizes to "" while its KEY carries the filler "11111" - so bar 5
+    abstains AND the stored-value gate abstains, and two different signers'
+    sites merged. Reading the anchor from the key restores bar 3, and the
+    different signer splits-and-flags.
+    """
+    parent_id = await _seed_client(
+        async_session,
+        email="ops@rep-brand.example.com",
+        business_name="Rep Brand Fitness",
+        legal_entity="Rep Brand Fitness",
+        postal_code="11111",
+        identity_key_override="repbra|11111",
+        phone="+44 20 7946 1000",
+        contact_first_name="Alice",  # DIFFERENT signer from the child
+        contact_last_name="North",
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    child_id = await _seed_client(
+        async_session,
+        email="ops@rep-brand.example.com",
+        business_name="Rep Brand Fitness",
+        legal_entity="Rep Brand Fitness",
+        postal_code="TBA",  # drift: stored value normalizes to "" ...
+        identity_key_override="repbra|11111",  # ... but the KEY carries filler
+        phone="+44 20 7946 1000",
+        contact_first_name="Bob",  # bar 3 refuses: a different site's signer
+        contact_last_name="South",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=None)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=child_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    assert result.parent_client_id is None
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": child_id},
+    )
+    is_dup, dup_of = flagged.one()
+    assert is_dup is True
+    assert dup_of == parent_id
+
+
+@pytest.mark.db
+async def test_bar_5_fires_on_the_keyed_path_under_coalesce_drift(
+    async_session: AsyncSession,
+) -> None:
+    """Review round 11, P2 - the docstrings' "normally, NOT never" claim, tested.
+
+    Bar 5 is normally inert on the keyed path because candidates share the
+    key's normalized postcode - but the COALESCE upsert can keep an OLD stored
+    `postal_code` while the key says otherwise. Here the parent's key matches
+    the child's ("eurobr|E81AA") while its stored postcode is a genuinely
+    different site's ("CR0 2AB"). Every other bar clears - same brand, same
+    phone, bar 3 waived (strong anchor), address absent - so bar 5's refusal on
+    the stored contradiction is the SOLE thing separating the two rows.
+    """
+    parent_id = await _seed_client(
+        async_session,
+        email="ops@euro-brand.example.com",
+        business_name="Euro Brand Fitness",
+        legal_entity="Euro Brand Fitness",
+        postal_code="CR0 2AB",  # drift: the stored postcode disagrees ...
+        identity_key_override="eurobr|E81AA",  # ... with the key that matches
+        phone="+44 20 7946 2000",
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    child_id = await _seed_client(
+        async_session,
+        email="billing@euro-brand.example.com",
+        business_name="Euro Brand Fitness",
+        legal_entity="Euro Brand Fitness",
+        postal_code="E8 1AA",  # keys "eurobr|E81AA" -> keyed hit on the parent
+        phone="+44 20 7946 2000",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=None)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=child_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # Bar 5 refused the drifted candidate: own sub-account plus the flag.
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    assert result.parent_client_id is None
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": child_id},
+    )
+    is_dup, dup_of = flagged.one()
+    assert is_dup is True
+    assert dup_of == parent_id
+
+
+@pytest.mark.db
+async def test_two_keyed_sites_never_meet_on_the_email_query(
+    async_session: AsyncSession,
+) -> None:
+    """Review round 11, P3 - the claim four docstrings rest on, pinned.
+
+    "Two keyed rows never meet on an email query" is carried entirely by the
+    `identity_key IS NULL` predicate in `_SIBLING_BY_EMAIL_UNKEYED_SQL`. Two
+    sites of one brand at different real postcodes share a mailbox, a phone and
+    a signer; their keys differ, so the keyed query finds nothing and - because
+    of that predicate - the email fallback must NOT resurface the keyed
+    sibling. The child provisions cleanly with NO flag. Delete the predicate
+    and the sibling re-enters, bar 5 refuses on the divergent postcode, and a
+    spurious flag lands on a normal franchise signing - which is exactly what
+    this test would catch.
+    """
+    await _seed_client(
+        async_session,
+        email="ops@euro-brand.example.com",
+        business_name="Euro Brand Fitness",
+        legal_entity="Euro Brand Fitness",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 3000",
+        contact_first_name="Marie",
+        contact_last_name="Peeters",
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    child_id = await _seed_client(
+        async_session,
+        email="ops@euro-brand.example.com",
+        business_name="Euro Brand Fitness",
+        legal_entity="Euro Brand Fitness",
+        postal_code="CR0 2AB",  # a different REAL postcode -> a different key
+        phone="+44 20 7946 3000",
+        contact_first_name="Marie",
+        contact_last_name="Peeters",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=None)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=child_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # A clean, unflagged own sub-account: the keyed sibling stayed invisible.
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    assert result.parent_client_id is None
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :id"),
+        {"id": child_id},
+    )
+    assert flagged.scalar_one() is False
+
+
+@pytest.mark.db
+async def test_repdigit_postcode_with_absent_signer_splits_and_flags(
+    async_session: AsyncSession,
+) -> None:
+    """Review round 11, test gap 4 - the REAL shape of the P1.2 population.
+
+    The letterless-repdigit cohort is the non-UK cohort, and the INT PandaDoc
+    template is not confirmed to populate the signer tokens
+    (`clients_payload.py`). So the honest scenario is a repdigit postcode WITH
+    absent signer names: the weak anchor keeps bar 3 required, absent names
+    cannot satisfy it (absence is not agreement), and the signing splits and
+    flags rather than linking. Fail-safe (SPLIT, not MERGE) - and the pinned
+    cost of the weak-anchor trade until the INT template's tokens are
+    confirmed, at which point the same-signer path links (see the test above
+    with seeded signers).
+    """
+    parent_id = await _seed_client(
+        async_session,
+        email="ops@itegem-gym.example.com",
+        business_name="Itegem Gym",
+        legal_entity="Itegem Gym",
+        postal_code="2222",  # a real letterless postcode - and a weak anchor
+        phone="+32 15 00 00 00",
+        # NO contact names: the INT-template shape.
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    child_id = await _seed_client(
+        async_session,
+        email="billing@itegem-gym.example.com",
+        business_name="Itegem Gym",
+        legal_entity="Itegem Gym",
+        postal_code="2222",
+        phone="+32 15 00 00 00",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=None)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=child_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # Split and flagged, never merged on a filler-grade anchor alone.
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    assert result.parent_client_id is None
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": child_id},
+    )
+    is_dup, dup_of = flagged.one()
+    assert is_dup is True
+    assert dup_of == parent_id
 
 
 @pytest.mark.db

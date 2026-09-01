@@ -151,6 +151,18 @@ _UK_POSTCODE = re.compile(
 # group is always exactly `[0-9][A-Z]{2}` (three chars).
 _ORDINAL_INWARD = re.compile(r"[0-9](?:ST|ND|RD|TH)")
 
+# A unit/floor ordinal is never a postcode. When an ordinal-shaped inward half is
+# immediately followed by a floor word, skip it outright rather than keeping it as
+# the postcode fallback, so a value that is a floor with no postcode does not mint
+# a key (review round 11, P0.1). Matched from the position AFTER the ordinal.
+_FLOOR_AFTER = re.compile(r"[\s,.\-]*(?:FLOOR|FLR|FL)\b")
+
+# A WEAK-anchor postcode (see `postcode_is_weak_anchor`): a leading run of one
+# repeated NON-ZERO digit, then optional letters. Catches filler bare ("11111")
+# and filler with trailing text ("11111USA"); excludes every letter-first real
+# postcode and any code with a second distinct digit.
+_WEAK_POSTCODE = re.compile(r"([1-9])\1*[A-Z]*")
+
 # There is deliberately NO postcode denylist any more (review round 7 found
 # every membership check dead). The shape checks in `normalize_postcode`
 # subsume the old `_PLACEHOLDER_POSTCODES` set completely: its alphabetic
@@ -359,15 +371,22 @@ def normalize_postcode(postcode: str | None) -> str:
     # one. Skipping every ordinal match outright (round 9) discarded the ~1% of
     # real UK postcodes shaped that way and broke the town-invariant this probe
     # exists for - a value carrying the town must key the same as the bare
-    # postcode (round 10, P1.3). So prefer the first NON-ordinal match, but keep
-    # the first ordinal-shaped one and return it only when no non-ordinal match
-    # exists: a unit number still loses to the real later postcode, and an
-    # ordinal-shaped real postcode with no competitor is no longer thrown away.
+    # postcode (round 10, P1.3). So prefer the first NON-ordinal match, and keep
+    # an ordinal-shaped one only as a fallback. Two refinements were needed
+    # (round 11, P0.1), both because a unit/floor ordinal always PRECEDES the
+    # postcode in an address:
+    #   - keep the LAST ordinal-shaped match, not the first, so a real
+    #     ordinal-shaped postcode ("Unit A1, 1st Floor, B33 8TH") beats the floor
+    #     ordinal that precedes it instead of both collapsing onto one key;
+    #   - drop an ordinal that is immediately followed by a floor word entirely,
+    #     so an ordinal-only value with no postcode ("Unit B2, 1st Floor") falls
+    #     through to the token path rather than minting a spurious postcode key.
     ordinal_fallback = None
     for uk_match in _UK_POSTCODE.finditer(upper):
         if _ORDINAL_INWARD.fullmatch(uk_match.group(2)):
-            if ordinal_fallback is None:
-                ordinal_fallback = uk_match.group(1) + uk_match.group(2)
+            if _FLOOR_AFTER.match(upper, uk_match.end()):
+                continue
+            ordinal_fallback = uk_match.group(1) + uk_match.group(2)
             continue
         return uk_match.group(1) + uk_match.group(2)
     if ordinal_fallback is not None:
@@ -684,21 +703,30 @@ def postcode_is_weak_anchor(postcode: str | None) -> bool:
     anchor to make name + phone sufficient. When the shared postcode is a repdigit
     that anchor is fake: two different sites of one brand carrying the same filler
     would auto-MERGE (review round 10, P0.1). So a repdigit key is treated as a
-    WEAK anchor and the caller keeps requiring the signer bar (bar 3) for it,
-    exactly as the anchorless email fallback does - which still links the genuine
-    Itegem / Reykjavik returning client (same signer clears bar 3) while splitting
-    two filler-postcode sites that a different person signed for.
+    WEAK anchor and the caller keeps requiring the signer bar (bar 3) for it.
 
-    Weak means: the normalized postcode is purely numeric AND every digit is the
-    same ("11111", "2222", "111"). A UK postcode is never purely numeric, and any
-    postcode with a second distinct digit ("1000", "75008") carries real entropy,
-    so both stay STRONG anchors.
+    Weak means: `_WEAK_POSTCODE` matches - a LEADING run of one repeated non-zero
+    digit, optionally followed by letters. That is the bare filler ("11111",
+    "2222") AND filler typed with a trailing country or town ("11111 USA"
+    normalizes to "11111USA"), which the earlier `normalized == digits` test let
+    walk straight past the gate (review round 11, P1.1). A real postcode is
+    excluded by construction: UK postcodes start with a LETTER, and any code with
+    a second distinct digit ("1000", "75008") or interior structure ("SW1A 1AA",
+    "E1 1EE") never matches a leading single-digit run. The purely-numeric
+    repdigit real postcodes it does catch (Itegem, Reykjavik, Stockholm "111 11")
+    are classified weak in the SAFE direction - it only keeps bar 3 ON.
+
+    CAVEAT the caller must honour: keeping bar 3 on assumes bar 3 is SATISFIABLE,
+    i.e. the signing contact's first AND last name are populated. Those come from
+    the UK PandaDoc template tokens (`clients_payload._TOKEN_CLIENT_FIRST_NAME`
+    /`_LAST_NAME`); the International template's token names are NOT confirmed
+    (`clients_payload.py` says so). The letterless-repdigit cohort (Itegem,
+    Reykjavik, Rottum) IS the non-UK cohort, so if the INT template omits those
+    tokens, a returning client here would split-and-flag every time rather than
+    link. Fail-safe (SPLIT, not MERGE), but worth confirming against a real INT
+    document before relying on the returning-client link for that cohort.
     """
-    normalized = normalize_postcode(postcode)
-    if not normalized:
-        return False
-    digits = "".join(ch for ch in normalized if ch.isdigit())
-    return normalized == digits and len(set(digits)) == 1
+    return bool(_WEAK_POSTCODE.fullmatch(normalize_postcode(postcode)))
 
 
 def postcodes_materially_diverge(postcode_a: str | None, postcode_b: str | None) -> bool:
