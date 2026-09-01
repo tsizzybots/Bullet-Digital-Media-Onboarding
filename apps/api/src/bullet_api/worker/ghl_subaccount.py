@@ -153,6 +153,7 @@ from bullet_api.worker.identity_key import (
     names_materially_diverge,
     normalize_name,
     normalize_postcode,
+    postcodes_materially_diverge,
 )
 from bullet_api.worker.platform_actions import (
     begin_action,
@@ -290,7 +291,7 @@ _SIBLING_CANDIDATE_LIMIT = 50
 _SIBLING_SELECT = (
     "SELECT id, COALESCE(parent_client_id, id) AS root_id, "
     "       ghl_subaccount_id, business_name, legal_entity, phone, "
-    "       contact_first_name, contact_last_name, address "
+    "       contact_first_name, contact_last_name, address, postal_code "
     "FROM clients "
     "WHERE {predicate} AND id <> :client_id "
     "      AND ghl_subaccount_id IS NOT NULL "
@@ -355,6 +356,7 @@ def _pick_sibling(
     client_contact_first_name: str | None,
     client_contact_last_name: str | None,
     client_address: str | None,
+    client_postcode: str | None,
     require_contact_name: bool,
 ) -> tuple[Row | None, Row | None]:
     """Split candidates into (matched, collided).
@@ -381,6 +383,17 @@ def _pick_sibling(
     direction: it can only ever REFUSE a link, never grant one. Absence ABSTAINS
     rather than failing closed (see `addresses_materially_diverge` for why the
     two postures are opposite).
+
+    **Bar 5 (review round 9, P1.1) - the POSTCODE must not actively disagree.**
+    A disqualifier in the same posture as bar 4: both-present-and-unequal
+    REFUSES, absence abstains, and it can never grant a link. It exists for the
+    email-fallback paths, which key on a shared brand mailbox and - before this
+    - never fetched or compared the postcode, so two sites of one franchise
+    (Brussels "1000", Itegem "2222") false-merged. It is NOT a positive anchor
+    (bar 3 remains the anchor that GRANTS the email-fallback link); it only
+    subtracts a link the other bars would have granted. On the identity-key path
+    it cannot fire at all, since those candidates share the normalized postcode
+    by construction. See `postcodes_materially_diverge`.
 
     **WHAT BAR 4 DOES AND DOES NOT CLOSE - corrected, review round 6.** The
     round-5 wording claimed it closed the one-owner-two-sites case. It does not,
@@ -450,7 +463,16 @@ def _pick_sibling(
             else True
         )
         address_disqualifies = addresses_materially_diverge(client_address, candidate.address)
-        if phone_agrees and contact_ok and not address_disqualifies:
+        # Bar 5 (review round 9, P1.1) - the POSTCODE must not actively disagree.
+        # A disqualifier like bar 4: it can only ever REFUSE a link, never grant
+        # one, so absence abstains. It bites on the email-fallback paths, which
+        # key on the shared brand mailbox and never otherwise compared the
+        # postcode (`_SIBLING_SELECT` did not fetch it, and `identity_key IS NULL`
+        # is not proof of an absent postcode), so Brussels "1000" and Itegem
+        # "2222" false-merged. On the keyed path candidates share the normalized
+        # postcode by construction, so it can never fire there.
+        postcode_disqualifies = postcodes_materially_diverge(client_postcode, candidate.postal_code)
+        if phone_agrees and contact_ok and not address_disqualifies and not postcode_disqualifies:
             return candidate, None
         # Name matches but corroboration is incomplete. Remember the FIRST
         # such candidate as the flag target - it is a closer call for a human
@@ -918,6 +940,10 @@ async def create_ghl_subaccount_core(
         client_contact_first_name=client.contact_first_name,
         client_contact_last_name=client.contact_last_name,
         client_address=client.address,
+        # Bar 5 (review round 9, P1.1): a contradictory postcode refuses the
+        # link on the email-fallback paths. Harmless on the keyed path, where
+        # candidates share the normalized postcode by construction.
+        client_postcode=client.postal_code,
         # The email fallback ALWAYS carries the stronger bar, whether it ran
         # because the row is unkeyed or because the keyed query found nothing.
         require_contact_name=not keyed_candidates_found,

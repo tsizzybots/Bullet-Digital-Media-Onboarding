@@ -271,11 +271,24 @@ class TestOrderAxisIsDeliberatelyOpen:
 class TestPostcodeRoundSevenCases:
     """The exact values review round 7 reported, pinned by name."""
 
-    @pytest.mark.parametrize("value", ["00000-0000", "999999999", "111111111", "00000 ABC"])
+    @pytest.mark.parametrize("value", ["00000-0000", "00000 ABC"])
     def test_zip_plus_four_filler_is_rejected(self, value: str) -> None:
-        # The ZIP+4 reduction used to RETURN before the filler checks, so
-        # "00000-0000" minted the exact placeholder key "00000".
+        # The ZIP+4 reduction must FALL THROUGH to the filler checks, not return
+        # early: "00000-0000" reduces to "00000", which the all-zero check must
+        # still catch. (Round 9, P1.2: the old params "999999999"/"111111111"
+        # reduced to REAL repdigit ZIPs "99999"/"11111", now covered by
+        # test_zip_plus_four_reduces_a_real_repdigit_zip, so only the all-zero
+        # cases remain filler.)
         assert normalize_postcode(value) == ""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"), [("999999999", "99999"), ("111111111", "11111")]
+    )
+    def test_zip_plus_four_reduces_a_real_repdigit_zip(self, value: str, expected: str) -> None:
+        # A ZIP+4 whose 5-digit ZIP is a NONZERO repdigit ("99999" = Ketchikan,
+        # AK) reduces to a REAL postcode, not filler - it falls through the
+        # filler checks and survives (round 9, P1.2).
+        assert normalize_postcode(value) == expected
 
     def test_real_alternating_postcode_with_repeated_digits_survives(self) -> None:
         # Ottawa's K1K 1K1: a latent false-reject in rounds 5-6, found while

@@ -62,23 +62,15 @@ find = "    if not any(ch.isdigit() for ch in stripped):"
 replace = "    if False:"
 must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_no_digit_at_all_rejected"
 
-# Round 8 replaced the contiguity rule: it rejected REAL repdigit postcodes
-# (Diemen's "1111 AB", Valletta's "VLT 1111") to NULL. Filler is now: purely
-# numeric single-distinct, or all-ZERO digits beside letters. Three kills, one
-# per clause and one for the narrowing itself.
+# Round 8 replaced the contiguity rule (it rejected REAL repdigit postcodes,
+# Diemen's "1111 AB", Valletta's "VLT 1111", to NULL) but left the
+# purely-numeric branch rejecting LETTERLESS repdigits (Itegem "2222", Rottum
+# "9999") - review round 9, P1.2. That branch is now DELETED: the sole
+# single-repeated-digit filler shape is an all-ZERO block, classified by
+# `digits[0] == "0"` with or without letters.
 
 [[mutation]]
-name = "R8 - purely numeric repdigit is filler (99999, 1111)"
-file = "src/bullet_api/worker/identity_key.py"
-find = "        if stripped == digits:"
-replace = "        if False:"
-# NOT test_placeholders_rejected: its repdigit params are all-zero, which the
-# zeros clause catches with clause 1 disabled - the runner reported SURVIVED
-# on the first pointing. Only NONZERO pure repdigits die to this clause alone.
-must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_single_repeated_character_rejected"
-
-[[mutation]]
-name = "R8 - all-zero digits beside letters is filler (00000 ABC)"
+name = "R8 - all-zero digit block is filler (00000, 00000 ABC)"
 file = "src/bullet_api/worker/identity_key.py"
 find = '        if digits[0] == "0":'
 replace = "        if False:"
@@ -90,6 +82,16 @@ file = "src/bullet_api/worker/identity_key.py"
 find = '        if digits[0] == "0":'
 replace = "        if True:"
 must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_real_repdigit_postcodes_survive"
+
+[[mutation]]
+# Round 9, P1.2: the purely-numeric repdigit reject was DELETED because it
+# NULL-keyed real letterless postcodes. Reintroducing it (rejecting when the
+# stripped value is all digits) must fail the letterless-survives test.
+name = "R9 - the purely-numeric repdigit reject must stay DELETED (letterless postcodes are REAL)"
+file = "src/bullet_api/worker/identity_key.py"
+find = '        if digits[0] == "0":'
+replace = '        if digits[0] == "0" or stripped == digits:'
+must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_letterless_repdigit_postcodes_survive"
 
 [[mutation]]
 name = "R8 - the phone LENGTH gate (finding 1: it was revert-green)"
@@ -146,6 +148,16 @@ file = "src/bullet_api/worker/identity_key.py"
 find = "r\"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\\s,.\\-]*([0-9][A-Z]{2})(?![A-Z0-9])\""
 replace = "r\"([A-Z]{1,2}[0-9][A-Z0-9]?)[\\s,.\\-]*([0-9][A-Z]{2})\""
 must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey"
+
+[[mutation]]
+# Round 9, P1.3: the inward half `[0-9][A-Z]{2}` also matches "1ST"/"2ND", so a
+# unit number latches onto an ordinal ("B21ST") instead of the real postcode.
+# Disabling the ordinal skip returns the first (ordinal) match.
+name = "R9 - the ordinal-inward skip (1ST/2ND masquerading as the postcode probe)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        if _ORDINAL_INWARD.fullmatch(uk_match.group(2)):"
+replace = "        if False:"
+must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_english_ordinal_is_not_read_as_the_inward_half"
 
 [[mutation]]
 name = "F3 - sequential-digit phone filler (round 4's one-liner)"
@@ -233,11 +245,25 @@ must_fail = "tests/test_ghl_subaccount.py::test_null_identity_key_email_fallback
 requires_db = true
 
 [[mutation]]
+# Round 9, P1.1 added bar 5 (postcode) to the match condition, so the pinned
+# line now carries both disqualifiers. Dropping bar 4 (address) lets the two
+# same-phone studios merge on their identical head-office postcode.
 name = "F1 - address disqualifier wired into _pick_sibling"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "        if phone_agrees and contact_ok and not address_disqualifies:"
-replace = "        if phone_agrees and contact_ok:"
+find = "        if phone_agrees and contact_ok and not address_disqualifies and not postcode_disqualifies:"
+replace = "        if phone_agrees and contact_ok and not postcode_disqualifies:"
 must_fail = "tests/test_ghl_subaccount.py::test_franchisee_two_studios_same_phone_is_separated_by_address"
+requires_db = true
+
+[[mutation]]
+# Round 9, P1.1: the email-fallback paths never fetched or compared the
+# postcode, so two sites of one brand on a shared mailbox false-merged across
+# a 200km gap (Brussels "1000" vs Itegem "2222"). Deleting bar 5 reopens that.
+name = "R9 - the postcode disqualifier wired into _pick_sibling (P1.1 email-fallback false-merge)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if phone_agrees and contact_ok and not address_disqualifies and not postcode_disqualifies:"
+replace = "        if phone_agrees and contact_ok and not address_disqualifies:"
+must_fail = "tests/test_ghl_subaccount.py::test_email_fallback_refuses_a_contradictory_postcode"
 requires_db = true
 
 [[mutation]]

@@ -493,6 +493,32 @@ class TestMalformedPostcodeNeverMintsAUkKey:
         # postcode would merge two unrelated businesses.
         assert normalize_postcode("E81AAX") != normalize_postcode("E8 1AA")
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("Unit B2, 1st Floor, E8 1AA", "E81AA"),
+            ("Suite C3 2nd Floor London SW1A 1AA", "SW1A1AA"),
+        ],
+    )
+    def test_english_ordinal_is_not_read_as_the_inward_half(
+        self, value: str, expected: str
+    ) -> None:
+        # `[0-9][A-Z]{2}` matches "1ST"/"2ND"/"3RD"/"4TH", and the relaxed
+        # separator lets the outward half latch onto a preceding unit number, so
+        # the probe extracted "B21ST" instead of the real "E81AA" (round 9,
+        # P1.3). The ordinal match is skipped; the real postcode is a later one.
+        assert normalize_postcode(value) == expected
+
+    def test_two_sites_one_brand_do_not_collapse_via_the_ordinal(self) -> None:
+        # Worse than a split: without skipping the ordinal, both sites keyed
+        # "A11ST", so two genuinely different postcodes collapsed onto one key -
+        # the postcode axis stripped of its separating power (round 9, P1.3).
+        first = normalize_postcode("Unit A1, 1st Floor, E8 1AA")
+        second = normalize_postcode("Unit A1, 1st Floor, CR0 2AB")
+        assert first == "E81AA"
+        assert second == "CR02AB"
+        assert first != second
+
 
 class TestUnicodeFold:
     """Letters NFKD cannot decompose (review round 5).
@@ -684,9 +710,26 @@ class TestPostcodePlaceholderShapes:
     fails (review round 2, P2).
     """
 
-    @pytest.mark.parametrize("value", ["99999", "XXXX", "1111", "AAAA"])
-    def test_single_repeated_character_rejected(self, value: str) -> None:
+    @pytest.mark.parametrize("value", ["XXXX", "AAAA"])
+    def test_repeated_letters_with_no_digit_rejected(self, value: str) -> None:
+        # A repeated LETTER with no digit is filler by the no-digit shape.
         assert normalize_postcode(value) == ""
+
+    @pytest.mark.parametrize("value", ["00000", "0000", "000"])
+    def test_all_zero_purely_numeric_rejected(self, value: str) -> None:
+        # An all-ZERO block is the ONLY single-repeated-digit filler shape; no
+        # postal system issues one.
+        assert normalize_postcode(value) == ""
+
+    @pytest.mark.parametrize("value", ["2222", "111", "22222", "55555", "9999", "99999", "1111"])
+    def test_letterless_repdigit_postcodes_survive(self, value: str) -> None:
+        # Round 9, P1.2: real LETTERLESS repdigit postcodes - Itegem "2222",
+        # Reykjavik "111", Arlington "22222", Young America "55555", Rottum
+        # "9999" - were wrongly NULL-keyed by the purely-numeric branch, so the
+        # returning-client check self-skipped on EVERY signing for those clients.
+        # Round 8's fix spared only the letter-bearing spellings ("1111 AB"). A
+        # nonzero repdigit block is a real postcode with or without letters.
+        assert normalize_postcode(value) == value
 
     def test_filler_digits_beside_letters_still_reject(self) -> None:
         """ "00000 ABC" must not mint a key however many letters ride along.

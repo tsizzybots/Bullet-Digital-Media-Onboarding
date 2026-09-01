@@ -142,6 +142,17 @@ _UK_POSTCODE = re.compile(
     r"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\s,.\-]*([0-9][A-Z]{2})(?![A-Z0-9])"
 )
 
+# The inward half `[0-9][A-Z]{2}` also matches an English ORDINAL - "1ST",
+# "2ND", "3RD", "4TH" - and the relaxed separator lets the outward half latch
+# onto a preceding unit number, so "Unit B2, 1st Floor, E8 1AA" matched "B21ST"
+# instead of the real "E81AA" (review round 9, P1.3). Worse than a split: two
+# sites of one brand at genuinely different postcodes ("A1, 1st Floor, E8 1AA"
+# and "A1, 1st Floor, CR0 2AB") collapse onto one key. `normalize_postcode`
+# skips any match whose inward group is an ordinal and keeps looking - the real
+# postcode, when present, is a later non-ordinal match. `fullmatch` because the
+# inward group is always exactly `[0-9][A-Z]{2}` (three chars).
+_ORDINAL_INWARD = re.compile(r"[0-9](?:ST|ND|RD|TH)")
+
 # There is deliberately NO postcode denylist any more (review round 7 found
 # every membership check dead). The shape checks in `normalize_postcode`
 # subsume the old `_PLACEHOLDER_POSTCODES` set completely: its alphabetic
@@ -345,8 +356,11 @@ def normalize_postcode(postcode: str | None) -> str:
     # reject to NULL under the contiguity filler rule; with that rule narrowed
     # to spare real repdigit postcodes, the token path keys it as "B111AA" -
     # exactly what the probe would have extracted. Zero divergence remains.
-    uk_match = _UK_POSTCODE.search(upper)
-    if uk_match is not None:
+    for uk_match in _UK_POSTCODE.finditer(upper):
+        if _ORDINAL_INWARD.fullmatch(uk_match.group(2)):
+            # An ordinal ("1st Floor") that the inward half matched - not a
+            # postcode. Skip it; a real postcode is a later non-ordinal match.
+            continue
         return uk_match.group(1) + uk_match.group(2)
     stripped = flat
     zip_plus_four = _US_ZIP_PLUS_FOUR.match(stripped)
@@ -362,20 +376,19 @@ def normalize_postcode(postcode: str | None) -> str:
         return ""
     digits = "".join(ch for ch in stripped if ch.isdigit())
     if digits and len(set(digits)) == 1:
-        # One repeated digit is filler ONLY in two shapes (narrowed, review
-        # round 8 - the round-7 contiguity rule rejected REAL repdigit
-        # postcodes: Diemen's "1111 AB", "9999 VF", Valletta's "VLT 1111" all
-        # NULL-keyed, silently self-skipping the returning-client check for
-        # those INT clients):
-        if stripped == digits:
-            # Purely numeric: "00000", "99999", "1111". No letters to anchor
-            # it as a real code, and the classic filler shapes live here
-            # (review round 2, P2).
-            return ""
+        # A single-repeated-digit block is filler ONLY when the digit is ZERO
+        # ("00000", "0000", "00000 ABC"): no postal system issues an all-zero
+        # block. A NONZERO single-repeated block is a REAL postcode, whether it
+        # is purely numeric (Itegem "2222", Reykjavik "111", Arlington "22222",
+        # Rottum "9999") or letter-anchored (Diemen "1111 AB", Valletta
+        # "VLT 1111"). Round 8 narrowed the LETTER-bearing branch to spare those
+        # but left the purely-numeric branch rejecting the LETTERLESS ones to
+        # NULL, silently self-skipping the returning-client check on every
+        # signing for those clients (review round 9, P1.2). The two shapes are
+        # not distinct any more - all-zero is filler with or without letters,
+        # nonzero repdigits are real with or without letters - so the classifier
+        # is exactly `digits[0] == "0"`.
         if digits[0] == "0":
-            # All-ZERO digits beside letters: "00000 ABC". No postal system
-            # issues an all-zero numeric block, while NONZERO repdigit blocks
-            # beside letters are real ("1111 AB" is a Dutch postcode).
             return ""
     return stripped
 
@@ -649,6 +662,36 @@ def addresses_materially_diverge(address_a: str | None, address_b: str | None) -
     return stem_a != stem_b
 
 
+def postcodes_materially_diverge(postcode_a: str | None, postcode_b: str | None) -> bool:
+    """True ONLY when both postcodes are present and normalize differently.
+
+    A DISQUALIFIER on the email-fallback sibling paths (review round 9, P1.1),
+    the same posture as `addresses_materially_diverge`. Those paths key on the
+    literal email - shared across a brand's franchises - and never otherwise saw
+    the postcode: `_SIBLING_SELECT` did not fetch it. A NULL `identity_key` is
+    NOT proof of an absent postcode either - a row can carry a fully populated
+    CONTRADICTORY `postal_code` and still key NULL (e.g. its name yields no stem,
+    or its postcode was one of the letterless repdigits round 9 P1.2 had been
+    NULL-keying). So two genuinely different sites of one brand under one mailbox
+    - Brussels "1000" vs Itegem "2222" - cleared every email-path bar and
+    false-merged, both postcodes sitting readable in `clients.postal_code`, never
+    compared.
+
+    A DIFFERING postcode can only ever REFUSE a link, never cause one (exactly
+    like the address disqualifier), so reading it adds a separator without a
+    false-match risk. Absence ABSTAINS: a missing / placeholder postcode must
+    not veto an otherwise-corroborated link. Comparison is via
+    `normalize_postcode`, the same canonical form the identity key uses, so on
+    the KEYED path - where candidates share the key and therefore the normalized
+    postcode - it can never fire.
+    """
+    norm_a = normalize_postcode(postcode_a)
+    norm_b = normalize_postcode(postcode_b)
+    if not norm_a or not norm_b:
+        return False
+    return norm_a != norm_b
+
+
 __all__ = [
     "LEGAL_ENTITY_PLACEHOLDER",
     "addresses_materially_diverge",
@@ -660,4 +703,5 @@ __all__ = [
     "normalize_name",
     "normalize_phone",
     "normalize_postcode",
+    "postcodes_materially_diverge",
 ]
