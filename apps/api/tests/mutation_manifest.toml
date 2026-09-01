@@ -179,7 +179,11 @@ name = "R11 - the ordinal fallback keeps the LAST match (the postcode is the suf
 file = "src/bullet_api/worker/identity_key.py"
 find = "            ordinal_fallback = uk_match.group(1) + uk_match.group(2)\n            continue"
 replace = "            if ordinal_fallback is None:\n                ordinal_fallback = uk_match.group(1) + uk_match.group(2)\n            continue"
-must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_floor_ordinal_loses_to_an_ordinal_shaped_real_postcode"
+# The floor-params test CANNOT kill this: the floor-word guard removes those
+# ordinals from contention before first-vs-last is ever decided (CI run
+# 33512854854 proved it - SURVIVED). Only the two-non-floor-ordinals test
+# reaches the keep rule itself.
+must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_last_ordinal_wins_when_two_non_floor_ordinals_compete"
 
 [[mutation]]
 # Round 11, P0.1 (related): an ordinal immediately followed by a floor word is a
