@@ -153,6 +153,7 @@ from bullet_api.worker.identity_key import (
     names_materially_diverge,
     normalize_name,
     normalize_postcode,
+    postcode_is_weak_anchor,
     postcodes_materially_diverge,
 )
 from bullet_api.worker.platform_actions import (
@@ -386,14 +387,17 @@ def _pick_sibling(
 
     **Bar 5 (review round 9, P1.1) - the POSTCODE must not actively disagree.**
     A disqualifier in the same posture as bar 4: both-present-and-unequal
-    REFUSES, absence abstains, and it can never grant a link. It exists for the
-    email-fallback paths, which key on a shared brand mailbox and - before this
-    - never fetched or compared the postcode, so two sites of one franchise
-    (Brussels "1000", Itegem "2222") false-merged. It is NOT a positive anchor
-    (bar 3 remains the anchor that GRANTS the email-fallback link); it only
-    subtracts a link the other bars would have granted. On the identity-key path
-    it cannot fire at all, since those candidates share the normalized postcode
-    by construction. See `postcodes_materially_diverge`.
+    REFUSES, absence abstains, and it can never grant a link. Its live path is
+    narrow (corrected round 10, P1.2): it bites on DRIFT - a LEGACY NULL-keyed
+    sibling reached by the email fallback that still carries a real, divergent
+    postcode, or a COALESCE upsert that kept an old postcode while filling a key
+    - not on the "two keyed sites, one mailbox" story, because two keyed rows
+    never meet on an email query. It is NOT a positive anchor (bar 3 grants the
+    email-fallback link); it only subtracts one the other bars would have
+    granted. It is NORMALLY inert on the identity-key path, where candidates
+    share the normalized postcode - "normally" not "never", since the COALESCE
+    upsert can leave a keyed row's stored postcode disagreeing with its key. See
+    `postcodes_materially_diverge`.
 
     **WHAT BAR 4 DOES AND DOES NOT CLOSE - corrected, review round 6.** The
     round-5 wording claimed it closed the one-owner-two-sites case. It does not,
@@ -918,7 +922,8 @@ async def create_ghl_subaccount_core(
             },
         )
 
-    # S1-26c dedup guard, FOUR bars (see `_pick_sibling`). (1) The identity key
+    # S1-26c dedup guard, FIVE bars (see `_pick_sibling`; bar 5 is the postcode
+    # disqualifier added round 9 P1.1). (1) The identity key
     # truncates the name to 6 chars, so two DIFFERENT businesses sharing a name
     # prefix AND a postcode collide on it ("Fitness First" vs "Fitness Studio");
     # every candidate is scanned for a full-name match, not just the earliest.
@@ -941,12 +946,20 @@ async def create_ghl_subaccount_core(
         client_contact_last_name=client.contact_last_name,
         client_address=client.address,
         # Bar 5 (review round 9, P1.1): a contradictory postcode refuses the
-        # link on the email-fallback paths. Harmless on the keyed path, where
-        # candidates share the normalized postcode by construction.
+        # link. It bites on DRIFT (a legacy NULL-keyed sibling, or a COALESCE
+        # upsert that kept an old postcode) and is normally inert on the keyed
+        # path, where candidates share the normalized postcode - see
+        # `postcodes_materially_diverge`.
         client_postcode=client.postal_code,
-        # The email fallback ALWAYS carries the stronger bar, whether it ran
-        # because the row is unkeyed or because the keyed query found nothing.
-        require_contact_name=not keyed_candidates_found,
+        # The email fallback ALWAYS carries the stronger bar (unkeyed row OR
+        # keyed row whose key found nothing). AND a keyed row whose postcode is
+        # a WEAK anchor (a repdigit like "11111" that round 9 P1.2 lets key)
+        # keeps requiring bar 3 too: the keyed path's "shared postcode is the
+        # anchor" argument is void when the postcode is filler, so name + phone
+        # alone must not merge two sites of one brand (review round 10, P0.1).
+        require_contact_name=(
+            not keyed_candidates_found or postcode_is_weak_anchor(client.postal_code)
+        ),
     )
 
     if collision is not None:

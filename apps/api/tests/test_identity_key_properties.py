@@ -147,11 +147,14 @@ class TestTokenPathIsTheFlatString:
             digits = "".join(ch for ch in flat if ch.isdigit())
             if key == "":
                 # A rejection must be one of the three documented filler
-                # shapes - never a silent loss of a usable value.
+                # shapes - never a silent loss of a usable value. The old
+                # `flat == digits` disjunct is GONE (round 10): P1.2 stopped
+                # rejecting purely-numeric non-zero repdigits, so the only
+                # single-distinct-digit rejection left is an ALL-ZERO block.
                 assert (
                     len(flat) < 3
                     or not any(ch.isdigit() for ch in flat)
-                    or (len(set(digits)) == 1 and (flat == digits or digits.startswith("0")))
+                    or (len(set(digits)) == 1 and digits.startswith("0"))
                 ), f"{value!r} rejected without matching any documented filler shape"
             elif re.fullmatch(r"\d{5}-?\d{4}", flat) or re.fullmatch(r"\d{9}", flat):
                 assert key == flat[:5], f"{value!r}: ZIP+4 must reduce to its ZIP5"

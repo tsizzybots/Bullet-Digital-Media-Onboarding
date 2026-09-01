@@ -19,6 +19,8 @@ from bullet_api.worker.identity_key import (
     normalize_name,
     normalize_phone,
     normalize_postcode,
+    postcode_is_weak_anchor,
+    postcodes_materially_diverge,
 )
 
 
@@ -503,21 +505,51 @@ class TestMalformedPostcodeNeverMintsAUkKey:
     def test_english_ordinal_is_not_read_as_the_inward_half(
         self, value: str, expected: str
     ) -> None:
-        # `[0-9][A-Z]{2}` matches "1ST"/"2ND"/"3RD"/"4TH", and the relaxed
-        # separator lets the outward half latch onto a preceding unit number, so
-        # the probe extracted "B21ST" instead of the real "E81AA" (round 9,
-        # P1.3). The ordinal match is skipped; the real postcode is a later one.
+        # A unit ordinal (a floor number) whose inward half matched the regex is
+        # a fallback, not the answer: the real postcode is a later non-ordinal
+        # match and wins (round 9 P1.3, refined round 10). The unit number no
+        # longer latches onto the ordinal and keys instead of the postcode.
         assert normalize_postcode(value) == expected
 
     def test_two_sites_one_brand_do_not_collapse_via_the_ordinal(self) -> None:
-        # Worse than a split: without skipping the ordinal, both sites keyed
-        # "A11ST", so two genuinely different postcodes collapsed onto one key -
-        # the postcode axis stripped of its separating power (round 9, P1.3).
+        # Worse than a split: without preferring the real postcode over the
+        # ordinal, both sites keyed on the unit ordinal, so two genuinely
+        # different postcodes collapsed onto one key - the postcode axis stripped
+        # of its separating power (round 9, P1.3).
         first = normalize_postcode("Unit A1, 1st Floor, E8 1AA")
         second = normalize_postcode("Unit A1, 1st Floor, CR0 2AB")
         assert first == "E81AA"
         assert second == "CR02AB"
         assert first != second
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("E8 1ST", "E81ST"),
+            ("B33 8TH", "B338TH"),
+            ("E8 2ND", "E82ND"),
+            ("N7 3RD", "N73RD"),
+            ("E8 1ST, UK", "E81ST"),
+            ("Flat 2, 14 Mare St, E8 1ST", "E81ST"),
+        ],
+    )
+    def test_ordinal_shaped_real_postcode_is_not_discarded(self, value: str, expected: str) -> None:
+        # An inward half that looks like an ordinal ("1ST"/"2ND"/"3RD"/"4TH") can
+        # be a REAL postcode - "B33 8TH" is one of GOV.UK's six canonical
+        # examples. Skipping it outright (round 9) discarded ~1% of real UK
+        # postcodes; round 10 keeps it as a fallback and returns it when no
+        # non-ordinal match exists.
+        assert normalize_postcode(value) == expected
+
+    @pytest.mark.parametrize(
+        "postcode",
+        ["E8 1AA", "SW1A 1AA", "CR0 2AB", "E8 1ST", "B33 8TH", "N7 3RD"],
+    )
+    def test_town_prefix_does_not_change_the_key(self, postcode: str) -> None:
+        # The invariant the raw probe exists for (review round 10): a value
+        # carrying the town must key identically to the bare postcode, including
+        # ordinal-shaped ones like "B33 8TH" that round 9 regressed.
+        assert normalize_postcode("London " + postcode) == normalize_postcode(postcode)
 
 
 class TestUnicodeFold:
@@ -750,3 +782,49 @@ class TestPostcodePlaceholderShapes:
     @pytest.mark.parametrize("value", ["75008", "10115", "D02X285", "E81AA"])
     def test_real_postcodes_still_survive(self, value: str) -> None:
         assert normalize_postcode(value) != ""
+
+
+class TestPostcodeIsWeakAnchor:
+    """A repdigit postcode keys (P1.2) but is too low-entropy to anchor a keyed
+    merge on its own (review round 10, P0.1)."""
+
+    @pytest.mark.parametrize("value", ["11111", "2222", "111", "99999", "1111"])
+    def test_purely_numeric_repdigit_is_weak(self, value: str) -> None:
+        # These KEY (they are not filler), but a shared repdigit postcode is not
+        # proof of one business, so the caller must keep the signer bar.
+        assert postcode_is_weak_anchor(value) is True
+
+    @pytest.mark.parametrize("value", ["1000", "75008", "10115", "E8 1AA", "SW1A 1AA"])
+    def test_a_postcode_with_real_entropy_is_strong(self, value: str) -> None:
+        # A second distinct digit ("1000") or any letter ("E8 1AA") is a real
+        # anchor - a UK postcode is never purely numeric.
+        assert postcode_is_weak_anchor(value) is False
+
+    @pytest.mark.parametrize("value", [None, "", "TBA", "00000"])
+    def test_absent_or_filler_postcode_is_not_a_weak_anchor(self, value: str | None) -> None:
+        # Absence / filler normalizes to "" and is handled by the NULL-key path,
+        # not by the weak-anchor gate, so it reports False (there is no key to
+        # anchor at all).
+        assert postcode_is_weak_anchor(value) is False
+
+
+class TestPostcodesMateriallyDiverge:
+    """Bar 5 (review round 9 P1.1): a disqualifier - both-present-and-unequal
+    REFUSES, absence ABSTAINS, and it never grants a link."""
+
+    def test_two_different_real_postcodes_diverge(self) -> None:
+        assert postcodes_materially_diverge("E8 1AA", "SW1A 1AA") is True
+
+    def test_the_same_postcode_in_two_spellings_does_not_diverge(self) -> None:
+        # Normalized comparison, so separators and case do not create a false
+        # refusal for one real postcode.
+        assert postcodes_materially_diverge("e8 1aa", "E8 1AA") is False
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [(None, "E8 1AA"), ("E8 1AA", None), (None, None), ("TBA", "E8 1AA"), ("", "E8 1AA")],
+    )
+    def test_absence_abstains(self, a: str | None, b: str | None) -> None:
+        # The fail-open branch: if either side is missing or normalizes to "",
+        # bar 5 must abstain rather than veto an otherwise-corroborated link.
+        assert postcodes_materially_diverge(a, b) is False

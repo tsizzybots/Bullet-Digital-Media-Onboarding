@@ -160,6 +160,17 @@ replace = "        if False:"
 must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_english_ordinal_is_not_read_as_the_inward_half"
 
 [[mutation]]
+# Round 10, P1.3: an ordinal-SHAPED inward half can be a REAL postcode too
+# (E8 1ST, B33 8TH), so the skip keeps the first ordinal match as a fallback and
+# returns it when no non-ordinal match exists. Dropping the fallback discards
+# the real postcode and lets a value carrying a town key differently.
+name = "R10 - the ordinal fallback (an ordinal-shaped REAL postcode is not discarded)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if ordinal_fallback is not None:\n        return ordinal_fallback"
+replace = "    if False:\n        return ordinal_fallback"
+must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_ordinal_shaped_real_postcode_is_not_discarded"
+
+[[mutation]]
 name = "F3 - sequential-digit phone filler (round 4's one-liner)"
 file = "src/bullet_api/worker/identity_key.py"
 find = " or _is_sequential_digits(tail):"
@@ -265,6 +276,46 @@ find = "        if phone_agrees and contact_ok and not address_disqualifies and 
 replace = "        if phone_agrees and contact_ok and not address_disqualifies:"
 must_fail = "tests/test_ghl_subaccount.py::test_email_fallback_refuses_a_contradictory_postcode"
 requires_db = true
+
+[[mutation]]
+# Round 10, P0.1: a repdigit postcode ("11111") keys (P1.2) but is a WEAK
+# anchor, so `require_contact_name` stays on for it - name+phone alone must not
+# merge two sites of one brand on the keyed path. Dropping the weak-anchor
+# disjunct waives bar 3 and re-opens the false MERGE.
+name = "R10 - the weak-anchor gate keeps bar 3 for a repdigit key (P0.1)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            not keyed_candidates_found or postcode_is_weak_anchor(client.postal_code)\n"
+replace = "            not keyed_candidates_found\n"
+must_fail = "tests/test_ghl_subaccount.py::test_repdigit_postcode_key_does_not_waive_the_signer_bar"
+requires_db = true
+
+[[mutation]]
+# Round 10, P0.1: the weak-anchor CLASSIFIER itself. Neutering it to always-False
+# makes a repdigit postcode look strong, so bar 3 is waived and the merge returns.
+name = "R10 - postcode_is_weak_anchor classifies a repdigit as weak"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return normalized == digits and len(set(digits)) == 1"
+replace = "    return False"
+must_fail = "tests/test_identity_key.py::TestPostcodeIsWeakAnchor::test_purely_numeric_repdigit_is_weak"
+
+[[mutation]]
+# Round 10 (reviewer smaller item): bar 5's fail-open branch was killed only
+# incidentally. Neutering it makes an ABSENT postcode veto an otherwise
+# corroborated link (the unsafe over-refusal direction).
+name = "R10 - postcodes_materially_diverge ABSTAINS when either side is absent"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not norm_a or not norm_b:\n        return False"
+replace = "    if False:\n        return False"
+must_fail = "tests/test_identity_key.py::TestPostcodesMateriallyDiverge::test_absence_abstains"
+
+[[mutation]]
+# Round 10: bar 5's core comparison. Neutering it to always-False makes two
+# genuinely different postcodes stop refusing, so drift can no longer be caught.
+name = "R10 - postcodes_materially_diverge REFUSES two different postcodes"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return norm_a != norm_b"
+replace = "    return False"
+must_fail = "tests/test_identity_key.py::TestPostcodesMateriallyDiverge::test_two_different_real_postcodes_diverge"
 
 [[mutation]]
 name = "The empty-key RAISE SITES must use the narrow type, not bare RuntimeError"
@@ -375,8 +426,8 @@ requires_db = true
 [[mutation]]
 name = "R6 - ...and the fallback carries the UNKEYED bar, not the keyed one"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "        require_contact_name=not keyed_candidates_found,"
-replace = "        require_contact_name=not keyed,"
+find = "            not keyed_candidates_found or postcode_is_weak_anchor(client.postal_code)\n"
+replace = "            not keyed or postcode_is_weak_anchor(client.postal_code)\n"
 must_fail = "tests/test_ghl_subaccount.py::test_keyed_email_fallback_still_demands_the_contact_name"
 requires_db = true
 

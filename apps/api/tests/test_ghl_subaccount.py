@@ -64,6 +64,7 @@ async def _seed_client(
     parent_client_id: uuid.UUID | None = None,
     created_at_offset_seconds: int = 0,
     address: str | None = None,
+    force_null_identity_key: bool = False,
 ) -> uuid.UUID:
     """Insert a minimal `clients` row (as S1-25a would have created).
 
@@ -89,8 +90,17 @@ async def _seed_client(
     one transaction all take the same `now()`, so tests that assert "the
     earliest candidate wins" would otherwise be resolved by the `id` tiebreak
     (a random uuid) and could pass for the wrong reason.
+
+    `force_null_identity_key` seeds a LEGACY pre-0013 row: a populated
+    `postal_code` but a NULL `identity_key`, the shape 0013 leaves behind (it
+    does no backfill). It is the only way to reach bar 5 (the postcode
+    disqualifier), whose live path is a legacy sibling under the email fallback.
     """
-    identity_key = compute_identity_key(identity_name(business_name, legal_entity), postal_code)
+    identity_key = (
+        None
+        if force_null_identity_key
+        else compute_identity_key(identity_name(business_name, legal_entity), postal_code)
+    )
     result = await session.execute(
         text(
             "INSERT INTO clients ("
@@ -1458,30 +1468,33 @@ async def test_null_identity_key_email_fallback_flags_when_phone_disagrees(
 async def test_email_fallback_refuses_a_contradictory_postcode(
     async_session: AsyncSession,
 ) -> None:
-    """Review round 9, P1.1 - bar 5 (postcode) on the email-fallback path.
+    """Review round 9 P1.1, re-seeded round 10 - bar 5 (postcode) on its one
+    LIVE path: a legacy pre-0013 sibling under the email fallback.
 
-    Two sites of one brand sign with the SAME `ops@` mailbox, the same signer
-    and the same head-office number, but sit at genuinely different addresses:
-    Brussels (postcode "1000") and Itegem (postcode "2222"). Both postcodes are
-    real letterless European codes that P1.2 now normalizes, so each row mints
-    its OWN identity_key and site two's keyed query finds no sibling. The email
-    fallback then locates site one on the shared mailbox, and bars 1-4 all
-    clear: same brand, same phone, same contact, and the address bar abstains
-    because we seed no street line. Before bar 5, that false-merged site two
-    into site one's sub-account with no signal that the two are 200km apart -
-    `_SIBLING_SELECT` never fetched the postcode, so nothing could compare it.
+    Round 9's version seeded two KEYED rows and never reached bar 5: both "1000"
+    and "2222" key, so the child's keyed query missed and the email fallback -
+    filtered to `identity_key IS NULL` for a keyed client - excluded the keyed
+    parent, leaving zero candidates (nothing to compare, so `is_dup` was False;
+    CI caught it). The reachable shape is DRIFT: the parent is a legacy row with
+    a real, divergent `postal_code` but a NULL key (`force_null_identity_key`),
+    the state 0013 leaves behind. The child signs with a real UK postcode, its
+    keyed query finds nothing, and the email-unkeyed fallback surfaces the legacy
+    parent. Bars 1-4 all clear: same brand, same phone, same signer, address
+    abstains. Bar 5 is the SOLE refusal.
 
-    With bar 5 the divergent postcode REFUSES the link (own sub-account) while
-    still flagging for a human, and it is the SOLE refusal here - every other
-    bar is seeded to clear - so a revert that drops bar 5 fails exactly this.
+    Postcodes are alphanumeric UK codes ("E8 1AA" vs "SW1A 1AA"), NOT the
+    letterless repdigits P1.2 governs, so applying the P1.2 mutation cannot make
+    either normalize to "" and mask bar 5 by the wrong mechanism (review round
+    10 coupling note).
     """
     parent_id = await _seed_client(
         async_session,
         email="ops@euro-brand.example.com",
         business_name="Euro Brand Fitness",
         legal_entity="Euro Brand Fitness",
-        postal_code="1000",  # Brussels - a real letterless postcode (P1.2)
-        phone="+32 470 00 00 00",  # bar 2 clears
+        postal_code="SW1A 1AA",  # a real, DIVERGENT postcode on a legacy row
+        force_null_identity_key=True,  # legacy pre-0013 shape: real postcode, NULL key
+        phone="+44 20 7946 0000",  # bar 2 clears
         contact_first_name="Marie",  # bar 3 clears - the same signer both times
         contact_last_name="Peeters",
         address=None,  # bar 4 abstains, so bar 5 is the sole refusal
@@ -1493,8 +1506,8 @@ async def test_email_fallback_refuses_a_contradictory_postcode(
         email="ops@euro-brand.example.com",
         business_name="Euro Brand Fitness",
         legal_entity="Euro Brand Fitness",
-        postal_code="2222",  # Itegem - a DIFFERENT real letterless postcode
-        phone="+32 470 00 00 00",
+        postal_code="E8 1AA",  # a DIFFERENT real postcode - the child keys on it
+        phone="+44 20 7946 0000",
         contact_first_name="Marie",
         contact_last_name="Peeters",
         address=None,
@@ -1522,6 +1535,133 @@ async def test_email_fallback_refuses_a_contradictory_postcode(
     is_dup, dup_of = flagged.one()
     assert is_dup is True
     assert dup_of == parent_id
+
+
+@pytest.mark.db
+async def test_repdigit_postcode_key_does_not_waive_the_signer_bar(
+    async_session: AsyncSession,
+) -> None:
+    """Review round 10, P0.1 - a filler postcode must not auto-MERGE two sites.
+
+    Round 9 P1.2 lets a purely-numeric single-repeated-digit block ("11111")
+    mint a key so real letterless postcodes survive. But "11111" is also classic
+    data-entry filler, and a non-NULL key normally flips `require_contact_name`
+    off on the keyed path - whose whole safety argument is that the SHARED
+    postcode is a strong anchor. When that anchor is "11111" it is fake: two
+    different sites of one brand, same head-office number, no street line, both
+    entered "11111", share the key `eurobr|11111`. Before P0.1 they auto-linked
+    with bar 3 waived (a false MERGE, the expensive direction).
+
+    `postcode_is_weak_anchor` keeps bar 3 required for a repdigit key, so the two
+    DIFFERENT signers separate the sites. Bar 3 is the SOLE refusal here (name,
+    phone and postcode-key all agree), so dropping the weak-anchor gate fails
+    exactly this.
+    """
+    parent_id = await _seed_client(
+        async_session,
+        email="ops@rep-brand.example.com",
+        business_name="Rep Brand Fitness",
+        legal_entity="Rep Brand Fitness",
+        postal_code="11111",  # filler: keys, but a weak anchor (P1.2 + P0.1)
+        phone="+44 20 7946 1000",  # bar 2 clears
+        contact_first_name="Alice",  # DIFFERENT signer from the child
+        contact_last_name="North",
+        address=None,
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    child_id = await _seed_client(
+        async_session,
+        email="ops@rep-brand.example.com",
+        business_name="Rep Brand Fitness",
+        legal_entity="Rep Brand Fitness",
+        postal_code="11111",  # same filler -> same key `repbra|11111`
+        phone="+44 20 7946 1000",
+        contact_first_name="Bob",  # bar 3 refuses: a different site's signer
+        contact_last_name="South",
+        address=None,
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=None)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=child_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # Its OWN sub-account - a filler postcode is not proof of one business.
+    assert result.created is True
+    assert result.ghl_subaccount_id == "loc_own"
+    assert result.parent_client_id is None
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_of FROM clients WHERE id = :id"),
+        {"id": child_id},
+    )
+    is_dup, dup_of = flagged.one()
+    assert is_dup is True
+    assert dup_of == parent_id
+
+
+@pytest.mark.db
+async def test_repdigit_postcode_still_links_a_genuine_returning_client(
+    async_session: AsyncSession,
+) -> None:
+    """The weak-anchor gate must not OVER-refuse (review round 10, P0.1).
+
+    The same repdigit-postcode scenario, but the SAME person signs both times -
+    a genuine business re-signing (Itegem "2222" is a real postcode, so this is
+    not always filler). Bar 3 clears, every bar clears, and the returning client
+    links to the existing sub-account rather than getting a spare one. Without
+    this, a P0.1 fix that simply refused every repdigit key would pass the
+    separation test above while silently splitting every real returning client
+    at a numeric postcode.
+    """
+    parent_id = await _seed_client(
+        async_session,
+        email="ops@itegem-gym.example.com",
+        business_name="Itegem Gym",
+        legal_entity="Itegem Gym",
+        postal_code="2222",  # a REAL letterless postcode (Itegem, BE)
+        phone="+32 15 00 00 00",
+        contact_first_name="Sofie",  # the SAME signer both times
+        contact_last_name="Janssens",
+        address=None,
+        ghl_subaccount_id="loc_existing",
+        created_at_offset_seconds=-60,
+    )
+    child_id = await _seed_client(
+        async_session,
+        email="newbilling@itegem-gym.example.com",  # a different mailbox, same business
+        business_name="Itegem Gym",
+        legal_entity="Itegem Gym",
+        postal_code="2222",
+        phone="+32 15 00 00 00",
+        contact_first_name="Sofie",
+        contact_last_name="Janssens",
+        address=None,
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_unused"), lookup_result=None)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=child_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # Linked to the existing sub-account, NOT a spare one.
+    assert result.created is False
+    assert result.parent_client_id == parent_id
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :id"),
+        {"id": child_id},
+    )
+    assert flagged.scalar_one() is False
 
 
 @pytest.mark.db

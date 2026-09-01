@@ -142,15 +142,13 @@ _UK_POSTCODE = re.compile(
     r"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\s,.\-]*([0-9][A-Z]{2})(?![A-Z0-9])"
 )
 
-# The inward half `[0-9][A-Z]{2}` also matches an English ORDINAL - "1ST",
-# "2ND", "3RD", "4TH" - and the relaxed separator lets the outward half latch
-# onto a preceding unit number, so "Unit B2, 1st Floor, E8 1AA" matched "B21ST"
-# instead of the real "E81AA" (review round 9, P1.3). Worse than a split: two
-# sites of one brand at genuinely different postcodes ("A1, 1st Floor, E8 1AA"
-# and "A1, 1st Floor, CR0 2AB") collapse onto one key. `normalize_postcode`
-# skips any match whose inward group is an ordinal and keeps looking - the real
-# postcode, when present, is a later non-ordinal match. `fullmatch` because the
-# inward group is always exactly `[0-9][A-Z]{2}` (three chars).
+# The inward half `[0-9][A-Z]{2}` also matches an English ORDINAL, and the
+# relaxed separator lets the outward half latch onto a preceding unit number, so
+# a floor-number unit was read as the postcode (review round 9, P1.3). But an
+# ordinal-shaped inward can ALSO be a real postcode, so `normalize_postcode`
+# treats an ordinal match as a fallback rather than discarding it outright (see
+# the extraction loop for the ordering rule). `fullmatch` because the inward
+# group is always exactly `[0-9][A-Z]{2}` (three chars).
 _ORDINAL_INWARD = re.compile(r"[0-9](?:ST|ND|RD|TH)")
 
 # There is deliberately NO postcode denylist any more (review round 7 found
@@ -356,12 +354,24 @@ def normalize_postcode(postcode: str | None) -> str:
     # reject to NULL under the contiguity filler rule; with that rule narrowed
     # to spare real repdigit postcodes, the token path keys it as "B111AA" -
     # exactly what the probe would have extracted. Zero divergence remains.
+    # An ordinal-shaped inward half can be EITHER a unit floor-number OR a real
+    # postcode - "E8 1ST" and "B33 8TH" (a GOV.UK canonical example) both end in
+    # one. Skipping every ordinal match outright (round 9) discarded the ~1% of
+    # real UK postcodes shaped that way and broke the town-invariant this probe
+    # exists for - a value carrying the town must key the same as the bare
+    # postcode (round 10, P1.3). So prefer the first NON-ordinal match, but keep
+    # the first ordinal-shaped one and return it only when no non-ordinal match
+    # exists: a unit number still loses to the real later postcode, and an
+    # ordinal-shaped real postcode with no competitor is no longer thrown away.
+    ordinal_fallback = None
     for uk_match in _UK_POSTCODE.finditer(upper):
         if _ORDINAL_INWARD.fullmatch(uk_match.group(2)):
-            # An ordinal ("1st Floor") that the inward half matched - not a
-            # postcode. Skip it; a real postcode is a later non-ordinal match.
+            if ordinal_fallback is None:
+                ordinal_fallback = uk_match.group(1) + uk_match.group(2)
             continue
         return uk_match.group(1) + uk_match.group(2)
+    if ordinal_fallback is not None:
+        return ordinal_fallback
     stripped = flat
     zip_plus_four = _US_ZIP_PLUS_FOUR.match(stripped)
     if zip_plus_four is not None:
@@ -662,28 +672,70 @@ def addresses_materially_diverge(address_a: str | None, address_b: str | None) -
     return stem_a != stem_b
 
 
+def postcode_is_weak_anchor(postcode: str | None) -> bool:
+    """True when the normalized postcode is too low-entropy to anchor a keyed
+    match on its own.
+
+    Round 9 P1.2 stopped NULL-keying purely-numeric single-repeated-digit blocks
+    so real letterless postcodes (Itegem "2222", Reykjavik "111") could key. But
+    that same shape is also the classic data-entry filler ("11111", "99999"), and
+    a non-NULL key flips `require_contact_name` off on the keyed path - the path
+    whose ENTIRE safety argument is that a SHARED postcode is a strong enough
+    anchor to make name + phone sufficient. When the shared postcode is a repdigit
+    that anchor is fake: two different sites of one brand carrying the same filler
+    would auto-MERGE (review round 10, P0.1). So a repdigit key is treated as a
+    WEAK anchor and the caller keeps requiring the signer bar (bar 3) for it,
+    exactly as the anchorless email fallback does - which still links the genuine
+    Itegem / Reykjavik returning client (same signer clears bar 3) while splitting
+    two filler-postcode sites that a different person signed for.
+
+    Weak means: the normalized postcode is purely numeric AND every digit is the
+    same ("11111", "2222", "111"). A UK postcode is never purely numeric, and any
+    postcode with a second distinct digit ("1000", "75008") carries real entropy,
+    so both stay STRONG anchors.
+    """
+    normalized = normalize_postcode(postcode)
+    if not normalized:
+        return False
+    digits = "".join(ch for ch in normalized if ch.isdigit())
+    return normalized == digits and len(set(digits)) == 1
+
+
 def postcodes_materially_diverge(postcode_a: str | None, postcode_b: str | None) -> bool:
     """True ONLY when both postcodes are present and normalize differently.
 
-    A DISQUALIFIER on the email-fallback sibling paths (review round 9, P1.1),
-    the same posture as `addresses_materially_diverge`. Those paths key on the
-    literal email - shared across a brand's franchises - and never otherwise saw
-    the postcode: `_SIBLING_SELECT` did not fetch it. A NULL `identity_key` is
-    NOT proof of an absent postcode either - a row can carry a fully populated
-    CONTRADICTORY `postal_code` and still key NULL (e.g. its name yields no stem,
-    or its postcode was one of the letterless repdigits round 9 P1.2 had been
-    NULL-keying). So two genuinely different sites of one brand under one mailbox
-    - Brussels "1000" vs Itegem "2222" - cleared every email-path bar and
-    false-merged, both postcodes sitting readable in `clients.postal_code`, never
-    compared.
+    A DISQUALIFIER (review round 9, P1.1), the same posture as
+    `addresses_materially_diverge`: a differing postcode can only ever REFUSE a
+    link, never cause one, so reading it adds a separator with no false-match
+    risk, and absence ABSTAINS.
 
-    A DIFFERING postcode can only ever REFUSE a link, never cause one (exactly
-    like the address disqualifier), so reading it adds a separator without a
-    false-match risk. Absence ABSTAINS: a missing / placeholder postcode must
-    not veto an otherwise-corroborated link. Comparison is via
-    `normalize_postcode`, the same canonical form the identity key uses, so on
-    the KEYED path - where candidates share the key and therefore the normalized
-    postcode - it can never fire.
+    **Its real scope is narrow - DRIFT, not the general email fallback**
+    (corrected review round 10, P1.2). Case analysis of the three sibling
+    queries shows bar 5 has exactly one live path:
+
+    - `_SIBLING_BY_IDENTITY_KEY_SQL`: candidates share the client's key, hence
+      the same NORMALIZED postcode by construction - normally inert (but see the
+      COALESCE caveat below).
+    - `_SIBLING_BY_EMAIL_UNKEYED_SQL` (client is keyed): candidates are filtered
+      to `identity_key IS NULL`, so bar 5 fires only against a LEGACY pre-0013
+      row that carries a populated, divergent `postal_code` but no key (0013 does
+      no backfill).
+    - `_SIBLING_BY_EMAIL_SQL` (client is unkeyed): the client keys NULL only
+      because its name stem is empty (bar 1 then rejects every candidate first)
+      or because its own postcode is empty (bar 5 then abstains) - so bar 5 has
+      no live path here.
+
+    So the Brussels/Itegem "one shared mailbox, two keyed sites" story is NOT
+    what this guards - both of those rows KEY, so they never meet on an email
+    query. What bar 5 actually catches is DRIFT: a legacy NULL-keyed row with a
+    real postcode, plus the `identity_key = COALESCE(clients.identity_key,
+    EXCLUDED.identity_key)` upsert, which can keep an OLD `postal_code` while
+    filling a key from EXCLUDED - so even a keyed candidate's stored postcode can
+    disagree with its key. That is why "inert on the keyed path" is "normally",
+    not "never".
+
+    Comparison is via `normalize_postcode`, the same canonical form the identity
+    key uses.
     """
     norm_a = normalize_postcode(postcode_a)
     norm_b = normalize_postcode(postcode_b)
@@ -703,5 +755,6 @@ __all__ = [
     "normalize_name",
     "normalize_phone",
     "normalize_postcode",
+    "postcode_is_weak_anchor",
     "postcodes_materially_diverge",
 ]
