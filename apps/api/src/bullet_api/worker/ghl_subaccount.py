@@ -47,7 +47,7 @@ Correctness rules:
   its lookup key alone, because both keys are lossy: the identity key
   truncates the name to 6 chars (so "Fitness First" and "Fitness Studio" at
   one postcode collide), and email is shared across a brand's franchises (so
-  "Brand Gym" Hackney and Croydon collide). A DB sibling must clear FOUR bars:
+  "Brand Gym" Hackney and Croydon collide). A DB sibling must clear FIVE bars:
   the FULL normalized names agree - and every candidate at the key is scanned
   for that match, not just the earliest, so an unrelated business reaching the
   key first cannot hide a genuine returning client behind it - AND the PHONE
@@ -56,20 +56,29 @@ Correctness rules:
   the brand ("F45 Training") plus their head-office postcode produces an
   identical key AND identical names; without it, studio 2 is silently linked
   into studio 1's sub-account. Bar 3 (the SIGNING CONTACT's name) applies on
-  the unkeyed email-fallback path only, which has no postcode to anchor it.
-  Bar 4 is the ADDRESS, and it reads in ONE DIRECTION ONLY: it can refuse a
-  link, never grant one. Address cannot CORROBORATE, because it comes from the
-  same HubSpot company record as the postcode and so agrees exactly when the
-  key does - but a DIFFERING address is still the only thing that separates one
-  owner's two sites when brand, head-office postcode and phone are all
-  identical (review round 5, finding 1). Absence is NOT agreement on the
-  corroborating bars; on bar 4 absence ABSTAINS. This NARROWS the franchisee
-  case; it does not eliminate it, and no docstring here should claim
-  otherwise.
+  the email-fallback path, which has no postcode to anchor it - and, since
+  review round 10 (P0.1), on the keyed path too whenever the key's own
+  postcode is a WEAK anchor (a repdigit filler block): a fake anchor must not
+  buy the waiver a real one does. Bar 4 is the ADDRESS, and it reads in ONE
+  DIRECTION ONLY: it can refuse a link, never grant one. Address cannot
+  CORROBORATE, because it comes from the same HubSpot company record as the
+  postcode and so agrees exactly when the key does - but a DIFFERING address
+  is still the only thing that separates one owner's two sites when brand,
+  head-office postcode and phone are all identical (review round 5,
+  finding 1). Bar 5 (round 9, P1.1) is the stored POSTCODE, the same
+  refuse-only direction as bar 4; its live path is drift (a legacy NULL-keyed
+  sibling, or a COALESCE upsert that kept an old postcode) - see
+  `postcodes_materially_diverge`. Absence is NOT agreement on the
+  corroborating bars; on bars 4 and 5 absence ABSTAINS. This NARROWS the
+  franchisee case; it does not eliminate it, and no docstring here should
+  claim otherwise.
   A GHL hit is accepted only when the location's name, postcode AND PHONE all
-  agree, which is why `postalCode` and `phone` are both sent on create: it
-  makes our own locations self-identifying, so a later signing can prove a hit
-  is the same site. Name + postcode alone is exactly the bar round 2 rejected
+  agree - and, since round 11 (P0.2), only when that postcode is not
+  filler-grade: a weak anchor on either side downgrades the hit to
+  UNDECIDABLE instead of counting as corroboration. `postalCode` and `phone`
+  are both sent on create for exactly this reason: it makes our own locations
+  self-identifying, so a later signing can prove a hit is the same site.
+  Name + postcode alone is exactly the bar round 2 rejected
   for the DB leg, and the GHL leg carried it until round 5, finding 5.
   Anything short of full corroboration is NOT merged - the signing is
   provisioned its OWN sub-account. That direction is deliberate: a spare empty
