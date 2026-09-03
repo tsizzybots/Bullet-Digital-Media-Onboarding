@@ -35,11 +35,14 @@ Correctness rules:
 - **PandaDoc fetch happens OUTSIDE the DB session.** A signed PandaDoc
   fetch can take seconds; holding the pooled connection during that
   window would leak connections under a burst of signings.
-- The UPSERT uses ``ON CONFLICT (pandadoc_document_id) DO UPDATE SET
-  pandadoc_document_id = EXCLUDED.pandadoc_document_id`` - the SET is a
-  no-op but guarantees ``RETURNING id`` populates on both insert and
-  conflict, so the orchestrator always learns the surviving row's id in
-  a single round-trip. The unique index on `pandadoc_document_id`
+- The UPSERT uses ``ON CONFLICT (pandadoc_document_id) DO UPDATE`` so
+  ``RETURNING`` populates on both insert and conflict, and the orchestrator
+  always learns the SURVIVING row's id and identity_key in one round-trip.
+  The SET is no longer a no-op: `postal_code`, `address` and `identity_key`
+  are COALESCE-backfilled (fill-if-NULL, never overwrite), so a row written
+  before migration 0013 - or one whose first extraction could not compute a
+  key - gains one on replay instead of staying unmatched forever.
+  The unique index on `pandadoc_document_id`
   (migration 0007) is the structural idempotency guarantee: a replayed
   `pandadoc.signed` event never creates a second client.
 - `current_step = 'signed'` is set on INSERT only; ON CONFLICT DO UPDATE
@@ -87,6 +90,7 @@ from dataclasses import dataclass
 
 import inngest
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.config import get_settings
@@ -110,18 +114,23 @@ from bullet_api.worker.events import (
     EventEmitter,
     InngestEventEmitter,
 )
+from bullet_api.worker.identity_key import (
+    LEGAL_ENTITY_PLACEHOLDER,
+    compute_identity_key,
+    identity_name,
+)
 
 log = logging.getLogger(__name__)
 
-
-# Placeholder used when the legal-trading-name form field is missing AND
-# no business_name token was extracted either. The clients table requires
-# legal_entity NOT NULL, and we deliberately keep the orchestrator
-# insertable rather than dead-lettering on a soft field: the placeholder
-# is obvious in the dashboard so the team can correct it manually. Only
-# ever written to `legal_entity` - never to `business_name`, which is
-# NULL-able and stays NULL when missing.
-LEGAL_ENTITY_PLACEHOLDER = "Unknown - needs review"
+# LEGAL_ENTITY_PLACEHOLDER is the value written when the legal-trading-name form
+# field is missing AND no business_name token was extracted either. The clients
+# table requires legal_entity NOT NULL, and we deliberately keep the orchestrator
+# insertable rather than dead-lettering on a soft field: the placeholder is
+# obvious in the dashboard so the team can correct it manually. Only ever written
+# to `legal_entity` - never to `business_name`, which is NULL-able and stays NULL
+# when missing. It is DEFINED in `worker.identity_key` (and re-exported here for
+# the existing importers) because the identity helpers must reject it: it is a
+# marker, not a name, and keying on it would unite every unidentifiable signing.
 
 
 class OnboardingEventNotFoundError(LookupError):
@@ -301,10 +310,35 @@ async def create_client_record_core(
     legal_entity = fields.legal_entity or fields.business_name or LEGAL_ENTITY_PLACEHOLDER
     business_name = fields.business_name
 
-    # ON CONFLICT DO UPDATE with a no-op SET so RETURNING id populates on
-    # both insert and conflict. current_step is set only on INSERT (ON
-    # CONFLICT path does not touch it); a replay must not regress a
-    # downstream step.
+    # S1-26c: the returning-client identity key = first6(normalized name) +
+    # "|" + normalized postcode. None when it cannot be computed (no usable
+    # name, or no usable postcode) - the returning-client check (in the GHL
+    # worker) self-skips on a NULL key and falls back to an email-keyed sibling
+    # match, so an unidentifiable signing becomes a fresh client rather than
+    # being merged into the wrong one (fail-safe to CREATE).
+    #
+    # Keyed on `identity_name` (business_name, else the signed legal entity),
+    # NOT business_name alone: Bullet's template fills `Company.Name` from
+    # HubSpot but the legal-trading-name is a form field filled in during
+    # signing, so a document carrying only the latter would otherwise opt out
+    # of returning-client matching entirely. Same expression the GHL location
+    # `name` is built from, so the key, the divergence guard and what GHL sees
+    # all agree on who this client is.
+    identity_key = compute_identity_key(
+        identity_name(fields.business_name, legal_entity), fields.postal_code
+    )
+
+    # ON CONFLICT DO UPDATE so RETURNING id populates on both insert and
+    # conflict. current_step is set only on INSERT (ON CONFLICT path does not
+    # touch it); a replay must not regress a downstream step.
+    #
+    # `postal_code` / `identity_key` ARE refreshed on conflict, under COALESCE
+    # (fill-if-NULL, never overwrite). Without this they are written on first
+    # insert only, so a row that predates migration 0013 - or one whose first
+    # extraction could not compute a key - keeps a NULL key forever while the
+    # re-emitted event carries a real `dedup_key`, which silently disables the
+    # returning-client match for that client. COALESCE rather than a blind
+    # overwrite so a value corrected by hand is not clobbered by a replay.
     #
     # `(xmax = 0) AS inserted` reads the system column to detect insert
     # vs conflict in one round-trip. xmax is 0 for a fresh insert and
@@ -318,16 +352,21 @@ async def create_client_record_core(
             "  email, business_name, legal_entity,"
             "  contact_first_name, contact_last_name, phone,"
             "  pandadoc_document_id, hubspot_contact_id,"
+            "  postal_code, address, identity_key,"
             "  current_step"
             ") VALUES ("
             "  :email, :business_name, :legal_entity,"
             "  :contact_first_name, :contact_last_name, :phone,"
             "  :pandadoc_document_id, :hubspot_contact_id,"
+            "  :postal_code, :address, :identity_key,"
             "  :current_step"
             ") "
             "ON CONFLICT (pandadoc_document_id) DO UPDATE "
-            "  SET pandadoc_document_id = EXCLUDED.pandadoc_document_id "
-            "RETURNING id, (xmax = 0) AS inserted"
+            "  SET pandadoc_document_id = EXCLUDED.pandadoc_document_id, "
+            "      postal_code = COALESCE(clients.postal_code, EXCLUDED.postal_code), "
+            "      address = COALESCE(clients.address, EXCLUDED.address), "
+            "      identity_key = COALESCE(clients.identity_key, EXCLUDED.identity_key) "
+            "RETURNING id, (xmax = 0) AS inserted, identity_key"
         ),
         {
             "email": fields.email,
@@ -338,12 +377,28 @@ async def create_client_record_core(
             "phone": fields.phone,
             "pandadoc_document_id": document_id,
             "hubspot_contact_id": fields.hubspot_contact_id,
+            "postal_code": fields.postal_code,
+            # S1-26c review fix (finding 4): persisted because it is one of the
+            # two corroborating signals a returning-client auto-link requires.
+            "address": fields.address,
+            "identity_key": identity_key,
             "current_step": CURRENT_STEP_SIGNED,
         },
     )
     client_row = upserted.one()
     client_id: uuid.UUID = client_row.id
     created: bool = bool(client_row.inserted)
+    # The SURVIVING key, not the one just computed: on a conflict COALESCE
+    # keeps whatever the row already held, and the concurrency bucket below
+    # must name the same key the GHL worker's sibling query will match on.
+    identity_key = client_row.identity_key
+    # TWO tiers, not three (round 12, P3): `extract_client_fields` raises
+    # `PandaDocPayloadError` unless the email token is a non-empty trimmed
+    # string (`_stringy` returns None otherwise), so `normalized_email` cannot
+    # be empty here and the old `str(client_id)` third tier was unreachable -
+    # a guard no input can reach reads as coverage while providing none.
+    normalized_email = fields.email.strip().lower()
+    dedup_key = identity_key or f"email:{normalized_email}"
 
     # Backfill the audit row. `processed_at` uses COALESCE so a retry
     # preserves the first-success timestamp; bumping it on every retry
@@ -384,10 +439,36 @@ async def create_client_record_core(
             "client_id": str(client_id),
             "onboarding_event_id": str(onboarding_event_id),
             "document_id": document_id,
-            "email": fields.email,
+            # NORMALIZED, so this field and `dedup_key` below cannot disagree
+            # about one client (review round 5). Stated precisely, because the
+            # first version of this comment overclaimed: the consumer's CEL
+            # fallback `"email:" + event.data.email` only fires when `dedup_key`
+            # is ABSENT, and this producer sets it unconditionally - so for
+            # events emitted here the field is never read for bucketing at all.
+            # The legacy events that DO hit the fallback were emitted by the old
+            # producer with the raw address already baked into the queued
+            # payload, which this change cannot retroactively fix. So this is
+            # defence-in-depth against a future producer that omits `dedup_key`,
+            # not a live bug being closed. Nothing else reads the field
+            # (grepped: the CEL key is its only consumer).
+            "email": normalized_email,
             # Propagate the PandaDoc account (S1-25c) so the signed-PDF worker
             # downloads with the matching account's API key.
             "account": account,
+            # S1-26c: concurrency key for the GHL returning-client check. Two
+            # signings that share an identity must not run the sibling check
+            # concurrently (both would see "no sibling" and both create).
+            #
+            # Falls back through EMAIL before the per-row id. A NULL
+            # identity_key still has a DB-side dedup path (the GHL worker's
+            # email sibling query), so those signings must still serialise with
+            # each other - keying straight to the unique client_id would give
+            # every one its own bucket and reopen exactly the concurrent
+            # double-create the old `event.data.email` key used to close.
+            # `str(client_id)` is the last resort for the degenerate case where
+            # even the email is blank. Namespaced so an email can never collide
+            # with an identity_key.
+            "dedup_key": dedup_key,
         },
     )
 
@@ -417,10 +498,15 @@ async def create_client_record_core(
             "has_template_id": fields.pandadoc_template_id is not None,
             "has_monthly_service_fee": fields.monthly_service_fee is not None,
             "deal_currency": fields.deal_currency,
-            # Address fields are extracted but not yet persisted (no
-            # columns on `clients` for them); logging presence here so
-            # they are visible in production logs until the follow-up
-            # migration adds the columns.
+            # S1-26c: identity_key is NULL when name or postcode is missing;
+            # log its presence so a "why did this not match a returning
+            # client" question is answerable from production logs.
+            "has_identity_key": identity_key is not None,
+            # postal_code AND address are persisted (0013) - this comment
+            # claimed address was "extracted-but-not-stored" two rounds after
+            # 0013 added the column and the INSERT above started writing it
+            # (corrected round 7). state/country remain extracted-but-not-
+            # stored; logging presence until a follow-up migration adds them.
             "has_address": fields.address is not None,
             "has_state": fields.state is not None,
             "has_postal_code": fields.postal_code is not None,
@@ -501,6 +587,40 @@ async def create_client_record(ctx: inngest.Context) -> dict:
             # Structural data error - retry will not produce the missing
             # token. Dead-letter immediately.
             raise inngest.NonRetriableError(str(exc)) from exc
+        except ProgrammingError as exc:
+            # SCHEMA DRIFT - the deploy ran ahead of its migration, so the
+            # INSERT references a column that does not exist yet (S1-26c review
+            # round 2, finding 7). This MUST stay retriable and must be loud.
+            #
+            # It raises before `begin_action`, so there is no `platform_actions`
+            # row for the dashboard to show, and `reconcile_pandadoc` cannot
+            # re-emit the signing either - its `ON CONFLICT DO NOTHING` sees the
+            # `onboarding_events` row already present. Dead-lettering here would
+            # therefore lose the signing PERMANENTLY and SILENTLY, which the
+            # project constraints forbid outright.
+            #
+            # Retrying is the correct response because this IS self-healing: the
+            # window closes the moment the migration lands. `preDeployCommand`
+            # in render.yaml should prevent the window existing at all; this is
+            # the belt to that braces, for a manual deploy or a failed pre-deploy.
+            log.error(
+                "S1-25a schema drift - the deploy is ahead of its migration; "
+                "run `alembic upgrade head`. Retrying (NOT dead-lettering) so "
+                "the signing is not lost.",
+                extra={
+                    "document_id": document_id,
+                    "onboarding_event_id": str(onboarding_event_id),
+                    # `str(exc.orig)`, NOT `str(exc)` (round 12, P2): the
+                    # SQLAlchemy wrapper appends `[SQL: ...]` and
+                    # `[parameters: {...}]` - the whole client INSERT bind set,
+                    # names/emails/phones included - while the driver's own
+                    # message ("column X does not exist") carries no bind
+                    # values. The engine also sets `hide_parameters=True` as
+                    # the belt to this braces.
+                    "error": str(exc.orig) if exc.orig is not None else type(exc).__name__,
+                },
+            )
+            raise
         # OnboardingEventNotFoundError propagates: Inngest's default
         # retry policy absorbs the producer's emit-before-commit
         # visibility race (the row exists, our separate transaction

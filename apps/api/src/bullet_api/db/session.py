@@ -29,6 +29,12 @@ engine = create_async_engine(
     get_async_database_url(),
     pool_pre_ping=True,
     future=True,
+    # No bind parameters in error messages (round 12, P2): a StatementError's
+    # str() otherwise appends `[parameters: {...}]` - for the client upsert
+    # that is the full PII bind set - and error strings travel into logs and
+    # `platform_actions.last_error`. The SQL text itself still appears; only
+    # the values are hidden.
+    hide_parameters=True,
     connect_args={
         "ssl": get_settings().database_ssl_mode,
         "server_settings": {"statement_timeout": "5000"},

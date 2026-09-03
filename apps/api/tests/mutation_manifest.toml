@@ -1,0 +1,1250 @@
+# G2 - the mutation manifest.
+#
+# Every guard names the test that KILLS it. `review_gate_mutate.py` breaks each
+# guard in turn, runs only the named test, and asserts that test FAILS. A guard
+# whose test still passes while the guard is broken is revert-green: it looks
+# defended and is not.
+#
+# This exists because five consecutive review rounds landed the same finding -
+# the fix was right, the test proving it was missing or could not fail. Round 5
+# put it plainly: "Delete all three guards and 609 tests still pass."
+#
+# Adding an entry is cheap. Skipping one costs a review round.
+
+# --- normalize_postcode, specified in round 7 ---------------------------------
+# This function produced a blocking finding in FOUR consecutive rounds (4-7),
+# each fix trading one axis for another until round 7 proved the axes jointly
+# unsatisfiable and specified the token path as the flat ordered string. Each
+# mutation below reintroduces the EXACT form some earlier round shipped, and
+# each is killed by a property test whose oracle is independent of the
+# implementation - the round-7 diagnosis was that the previous property file's
+# oracle was the implementation's own transform, a tautology.
+
+[[mutation]]
+name = "R7 - reintroduce round 6's SORT: the anagram collide comes back"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    stripped = flat"
+replace = '    stripped = "".join(sorted(re.findall(r"[A-Z]+|[0-9]+", flat)))'
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeInjectivity::test_named_near_misses_stay_apart"
+
+[[mutation]]
+name = "R7 - reintroduce round 5's DROP: the 1011 AB == 1011 CD collide comes back"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    stripped = flat"
+replace = '    stripped = "".join(t for t in re.findall(r"[A-Z]+|[0-9]+", flat) if any(c.isdigit() for c in t)) or flat'
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeInjectivity::test_named_near_misses_stay_apart"
+
+[[mutation]]
+name = "R7 - the token path must BE the flat string (the spec property bites)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    stripped = flat"
+replace = '    stripped = "".join(sorted(re.findall(r"[A-Z]+|[0-9]+", flat)))'
+must_fail = "tests/test_identity_key_properties.py::TestTokenPathIsTheFlatString"
+
+[[mutation]]
+name = "R7 - ZIP+4 reduces to ZIP5 (the reduction itself)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    zip_plus_four = _US_ZIP_PLUS_FOUR.match(stripped)"
+replace = "    zip_plus_four = None"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_zip5_and_zip_plus_four_are_one_business"
+
+[[mutation]]
+name = "R7 - ZIP+4 must FALL THROUGH to the filler checks, not return"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        stripped = zip_plus_four.group(1)"
+replace = "        return zip_plus_four.group(1)"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_zip_plus_four_filler_is_rejected"
+
+[[mutation]]
+name = "R7 - the no-digit filler shape (replaces the dead alpha denylist)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not any(ch.isdigit() for ch in stripped):"
+replace = "    if False:"
+must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_no_digit_at_all_rejected"
+
+# Round 8 replaced the contiguity rule (it rejected REAL repdigit postcodes,
+# Diemen's "1111 AB", Valletta's "VLT 1111", to NULL) but left the
+# purely-numeric branch rejecting LETTERLESS repdigits (Itegem "2222", Rottum
+# "9999") - review round 9, P1.2. That branch is now DELETED: the sole
+# single-repeated-digit filler shape is an all-ZERO block, classified by
+# `digits[0] == "0"` with or without letters.
+
+[[mutation]]
+name = "R8 - all-zero digit block is filler (00000, 00000 ABC)"
+file = "src/bullet_api/worker/identity_key.py"
+find = '        if digits[0] == "0":'
+replace = "        if False:"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_all_zero_digits_beside_letters_still_reject"
+
+[[mutation]]
+name = "R8 - ...and the narrowing itself: NONZERO repdigit postcodes are REAL"
+file = "src/bullet_api/worker/identity_key.py"
+find = '        if digits[0] == "0":'
+replace = "        if True:"
+must_fail = "tests/test_identity_key_properties.py::TestPostcodeRoundSevenCases::test_real_repdigit_postcodes_survive"
+
+[[mutation]]
+# Round 9, P1.2: the purely-numeric repdigit reject was DELETED because it
+# NULL-keyed real letterless postcodes. Reintroducing it (rejecting when the
+# stripped value is all digits) must fail the letterless-survives test.
+name = "R9 - the purely-numeric repdigit reject must stay DELETED (letterless postcodes are REAL)"
+file = "src/bullet_api/worker/identity_key.py"
+find = '        if digits[0] == "0":'
+replace = '        if digits[0] == "0" or stripped == digits:'
+must_fail = "tests/test_identity_key.py::TestPostcodePlaceholderShapes::test_letterless_repdigit_postcodes_survive"
+
+[[mutation]]
+name = "R8 - the phone LENGTH gate (finding 1: it was revert-green)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(digits) < _PHONE_MIN_DIGITS:"
+replace = "    if False:"
+must_fail = "tests/test_identity_key.py::TestNormalizePhone::test_short_numbers_die_to_the_length_gate_alone"
+
+[[mutation]]
+name = "R8 - contact-name parts fold and tokenize before EVERY comparison"
+file = "src/bullet_api/worker/identity_key.py"
+find = '        return _ALNUM_TOKEN.findall(_fold_unicode(value or "").casefold())'
+replace = '        return [(value or "").strip().casefold()] if (value or "").strip() else []'
+must_fail = "tests/test_identity_key.py::TestContactNameAgrees::test_trailing_punctuation_cannot_bypass_the_placeholder_set"
+
+[[mutation]]
+name = "R7 - the minimum-length filler shape"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(stripped) < _MIN_POSTCODE_LEN:"
+replace = "    if False:"
+must_fail = "tests/test_identity_key.py::TestNormalizePostcode::test_too_short_rejected"
+
+[[mutation]]
+# The R7 "single-repeated-digit shape" entry is GONE (round 8): deleting
+# `_is_repeating_pair`'s set-size gate made it subsume the caller's
+# `len(set(tail)) == 1` clause, the runner reported that clause's kill
+# SURVIVED, and the clause was deleted per the module's bar. The repdigit case
+# is now owned by `_is_repeating_pair`, killed below.
+name = "R8 - _is_repeating_pair owns single-AND-double-digit filler"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return all(ch == digits[index % 2] for index, ch in enumerate(digits))"
+replace = "    return len(set(digits)) == 2 and all(ch == digits[index % 2] for index, ch in enumerate(digits))"
+must_fail = "tests/test_identity_key.py::TestRealLandlinesSurvive::test_shape_filler_is_still_rejected"
+
+# Round 6 named both of these as revert-green with no manifest entry.
+
+[[mutation]]
+name = "R6 - names_materially_diverge treats an EMPTY stem as divergence"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not stem_a or not stem_b:\n        return True"
+replace = "    if False:\n        return True"
+must_fail = "tests/test_identity_key.py::TestNamesMateriallyDiverge::test_empty_stem_is_divergence_not_agreement"
+
+[[mutation]]
+name = "F2 - relaxed UK separator (round 4's whitespace-only form)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "[\\s,.\\-/]*([0-9][A-Z]{2})"
+replace = "\\s*([0-9][A-Z]{2})"
+must_fail = "tests/test_identity_key.py::TestPostcodeFormInvariance"
+
+[[mutation]]
+name = "F3 - anchored _UK_POSTCODE (round 4's one-liner)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "r\"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\\s,.\\-/]*([0-9][A-Z]{2})(?![A-Z0-9])\""
+replace = "r\"([A-Z]{1,2}[0-9][A-Z0-9]?)[\\s,.\\-/]*([0-9][A-Z]{2})\""
+must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey"
+
+[[mutation]]
+# Round 9, P1.3: the inward half `[0-9][A-Z]{2}` also matches "1ST"/"2ND", so a
+# unit number latches onto an ordinal ("B21ST") instead of the real postcode.
+# Disabling the ordinal skip returns the first (ordinal) match.
+name = "R9 - the ordinal-inward skip (1ST/2ND masquerading as the postcode probe)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        if _ORDINAL_INWARD.fullmatch(uk_match.group(2)):"
+replace = "        if False:"
+must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_english_ordinal_is_not_read_as_the_inward_half"
+
+[[mutation]]
+# Round 10, P1.3: an ordinal-SHAPED inward half can be a REAL postcode too
+# (E8 1ST, B33 8TH), so the loop keeps an ordinal match as a fallback and
+# returns it when no non-ordinal match exists. Dropping the fallback discards
+# the real postcode and lets a value carrying a town key differently.
+name = "R10 - an ordinal-shaped REAL postcode is not discarded (the sole-survivor rule)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(distinct_ordinal) == 1:\n        return ordinal_candidates[0]"
+replace = "    if False:\n        return ordinal_candidates[0]"
+must_fail = "tests/test_identity_key.py::TestMalformedPostcodeNeverMintsAUkKey::test_ordinal_shaped_real_postcode_is_not_discarded"
+
+[[mutation]]
+# Round 12, P0.1/P0.2: when two ordinal-shaped candidates survive every
+# contextual drop, position PROVABLY cannot decide (round 10 disproved
+# keep-first, round 11 disproved keep-last) - the rule is SPLIT, never a
+# positional guess. Reverting to keep-either must fail the ambiguity test.
+name = "R12 - two undecidable ordinal candidates SPLIT instead of guessing"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(distinct_ordinal) >= 2:\n        return \"\""
+replace = "    if len(ordinal_candidates) >= 2:\n        return ordinal_candidates[-1]"
+must_fail = "tests/test_identity_key.py::TestPostcodeCandidateSpec::test_two_undecidable_ordinals_split"
+
+[[mutation]]
+# Round 11 P0.1, widened round 12 P0.1: an ordinal followed by an
+# address-STRUCTURE word (floor, street, avenue...) is never a postcode.
+# Without the guard, "C3 2nd Street" mints the key of the genuine client at
+# "C3 2ND". The must_fail deliberately has NO unit designator in it - the
+# unit-before guard would otherwise mask this one (the exact masking round 11
+# hit with its floor params, CI run 33512854854).
+name = "R12 - a structure-word ordinal never becomes a postcode candidate"
+file = "src/bullet_api/worker/identity_key.py"
+find = "            if _STRUCTURE_AFTER.match(upper, uk_match.end()):\n                continue"
+replace = "            if False:\n                continue"
+must_fail = "tests/test_identity_key.py::TestPostcodeCandidateSpec::test_structure_word_ordinal_without_unit_prefix_mints_no_postcode_key"
+
+[[mutation]]
+name = "F3 - sequential-digit phone filler (round 4's one-liner)"
+file = "src/bullet_api/worker/identity_key.py"
+find = " or _is_sequential_digits(tail):"
+replace = ":"
+must_fail = "tests/test_identity_key.py::TestSequentialDigitFiller"
+
+[[mutation]]
+name = "F5 area - landline rejection (the pre-round-5 distinct-digit floor)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if _is_repeating_pair(tail) or _is_sequential_digits(tail):"
+replace = "    if len(set(tail)) <= 2 or _is_sequential_digits(tail):"
+must_fail = "tests/test_identity_key.py::TestRealLandlinesSurvive"
+
+[[mutation]]
+name = "F4 - contact name requires both parts (the concatenate-and-strip form)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not (first_tokens_a and last_tokens_a and first_tokens_b and last_tokens_b):\n        return False"
+replace = "    if not (first_tokens_a or last_tokens_a):\n        return False"
+must_fail = "tests/test_identity_key.py::TestContactNameAgrees::test_blank_surname_does_not_collapse_to_a_first_name_match"
+
+[[mutation]]
+# Round 12, P1.1: a role noun in EITHER part marks a job title, not a person.
+# The enumerated two-word denylist this replaces was bypassed by
+# ("Club", "Manager") - round 2's franchise conflation re-entered through the
+# field introduced to close it.
+name = "R12 - a role noun in either contact-name part refuses bar 3"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        if any(token in _ROLE_NOUNS for token in first_tokens + last_tokens):\n            return False\n"
+replace = ""
+must_fail = "tests/test_identity_key.py::TestContactNameShapes::test_role_titles_and_placeholders_never_corroborate"
+
+[[mutation]]
+name = "Unicode transliteration for letters NFKD cannot decompose"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    translated = value.translate(_TRANSLITERATIONS)"
+replace = "    translated = value"
+must_fail = "tests/test_identity_key.py::TestUnicodeFold"
+
+[[mutation]]
+name = "F1 - address disqualifier (pure helper)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not stem_a or not stem_b:\n        return False\n    return stem_a != stem_b"
+replace = "    return False"
+must_fail = "tests/test_identity_key.py::TestAddressesMateriallyDiverge::test_different_addresses_diverge"
+
+# --- DB-marked: these need Docker/Postgres up. They SKIP without it, and a
+# skipped test cannot fail, so the runner reports them as UNPROVEN rather than
+# passing them. A skipped run reporting green is exactly what let rounds 1-2
+# ship.
+
+# Bars 1 and 3 had NO manifest entry, which is why nobody noticed that removing
+# `_seed_client`'s shared phone default disarmed both: with no phone on either
+# row, bar 2 refuses first and neither the name check nor the contact-name check
+# ever decides anything. Deleting `names_materially_diverge` from `_pick_sibling`
+# left all 672 tests passing. Declared now.
+
+[[mutation]]
+name = "Numeric postcode from JSON is coerced, not read as absent"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    if isinstance(candidate, int):\n        # A numeric postcode (75008) can arrive unquoted from JSON, where it"
+replace = "    if False:\n        # A numeric postcode (75008) can arrive unquoted from JSON, where it"
+must_fail = "tests/test_ghl_subaccount.py::test_numeric_phone_and_postcode_from_json_still_corroborate"
+requires_db = true
+
+[[mutation]]
+name = "Numeric phone from JSON is coerced, not read as absent"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    if isinstance(candidate, int) and not isinstance(candidate, bool):\n        # A phone can arrive unquoted from JSON, same as a numeric postcode.\n        candidate = str(candidate)"
+replace = "    pass"
+must_fail = "tests/test_ghl_subaccount.py::test_numeric_phone_and_postcode_from_json_still_corroborate"
+requires_db = true
+
+[[mutation]]
+name = "Bar 1 - the full-name divergence check in _pick_sibling"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if names_materially_diverge(client_name, candidate_name):\n            continue"
+replace = "        if False:\n            continue"
+must_fail = "tests/test_ghl_subaccount.py::test_prefix_collision_divergent_names_flags_possible_duplicate"
+requires_db = true
+
+[[mutation]]
+name = "Bar 3 - the require_contact_name WIRING (not just the helper)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            if require_contact_name\n            else True"
+replace = "            if False\n            else True"
+must_fail = "tests/test_ghl_subaccount.py::test_null_identity_key_email_fallback_flags_when_contact_name_disagrees"
+requires_db = true
+
+[[mutation]]
+# Round 9, P1.1 added bar 5 (postcode) to the match condition, so the pinned
+# line now carries both disqualifiers. Dropping bar 4 (address) lets the two
+# same-phone studios merge on their identical head-office postcode.
+name = "F1 - address disqualifier wired into _pick_sibling"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if phone_agrees and contact_ok and not address_disqualifies and not postcode_disqualifies:"
+replace = "        if phone_agrees and contact_ok and not postcode_disqualifies:"
+must_fail = "tests/test_ghl_subaccount.py::test_franchisee_two_studios_same_phone_is_separated_by_address"
+requires_db = true
+
+[[mutation]]
+# Round 9, P1.1: the email-fallback paths never fetched or compared the
+# postcode, so two sites of one brand on a shared mailbox false-merged across
+# a 200km gap (Brussels "1000" vs Itegem "2222"). Deleting bar 5 reopens that.
+name = "R9 - the postcode disqualifier wired into _pick_sibling (P1.1 email-fallback false-merge)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if phone_agrees and contact_ok and not address_disqualifies and not postcode_disqualifies:"
+replace = "        if phone_agrees and contact_ok and not address_disqualifies:"
+must_fail = "tests/test_ghl_subaccount.py::test_email_fallback_refuses_a_contradictory_postcode"
+requires_db = true
+
+[[mutation]]
+# Round 10, P0.1: a repdigit postcode ("11111") keys (P1.2) but is a WEAK
+# anchor, so `require_contact_name` stays on for it - name+phone alone must not
+# merge two sites of one brand on the keyed path. Dropping the weak-anchor
+# disjunct waives bar 3 and re-opens the false MERGE.
+name = "R10 - the weak-anchor gate keeps bar 3 for a repdigit key (P0.1)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            require_contact_name=postcode_is_weak_anchor(anchor_postcode),"
+replace = "            require_contact_name=False,"
+must_fail = "tests/test_ghl_subaccount.py::test_repdigit_postcode_key_does_not_waive_the_signer_bar"
+requires_db = true
+
+[[mutation]]
+# Round 11 (over-refusal at the WIRING): always requiring bar 3 on the keyed
+# path silently splits every genuine returning client whose rows carry no
+# signer names - which is most of them (`_seed_client`'s honest default is
+# None, and so is production's when the tokens are absent).
+name = "R11 - the keyed path must not demand bar 3 for a STRONG anchor"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            require_contact_name=postcode_is_weak_anchor(anchor_postcode),"
+replace = "            require_contact_name=True,"
+must_fail = "tests/test_ghl_subaccount.py::test_returning_client_links_parent_and_reuses_db_sibling"
+requires_db = true
+
+[[mutation]]
+# Round 11, P2: the gate must judge the postcode the keyed match ANCHORED on
+# (the key's postcode half), not the stored `postal_code` COALESCE drift can
+# leave disagreeing. Reverting to the stored value waives bar 3 exactly when
+# the stored value normalizes to "" while the key carries filler.
+name = "R11 - the weak-anchor gate reads the KEY's postcode, not the stored one"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    anchor_postcode = (\n        client.identity_key.partition(KEY_SEPARATOR)[2]\n        if client.identity_key\n        else client.postal_code\n    )"
+replace = "    anchor_postcode = client.postal_code"
+must_fail = "tests/test_ghl_subaccount.py::test_weak_anchor_gate_reads_the_key_not_the_stored_postcode"
+requires_db = true
+
+[[mutation]]
+# Round 11, P0.2: the weak-anchor rule on the GHL leg. Without it,
+# `_classify_ghl_hit` counts "11111" == "11111" as postcode corroboration and
+# reuses an orphan on filler - the round-10 merge, alive on the second leg.
+name = "R11 - the GHL leg downgrades a weak-anchor postcode to UNDECIDABLE"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if postcode_is_weak_anchor(client_postcode) or postcode_is_weak_anchor(location_postcode):"
+replace = "        if False:"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_leg_filler_postcode_is_undecidable_not_reused"
+requires_db = true
+
+[[mutation]]
+# Round 11, P3: "two keyed rows never meet on an email query" is carried
+# entirely by this predicate, and four docstrings rest on it. Deleting the
+# IS NULL clause resurfaces the keyed sibling, bar 5 refuses on the divergent
+# postcode, and a spurious flag lands on a normal franchise signing.
+name = "R11 - the email fallback's IS NULL predicate keeps keyed siblings apart"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    _SIBLING_SELECT.format(predicate=\"email = :email AND identity_key IS NULL\")"
+replace = "    _SIBLING_SELECT.format(predicate=\"email = :email\")"
+must_fail = "tests/test_ghl_subaccount.py::test_two_keyed_sites_never_meet_on_the_email_query"
+requires_db = true
+
+[[mutation]]
+# Round 10, P0.1: the weak-anchor CLASSIFIER itself. Neutering it to always-False
+# makes a repdigit postcode look strong, so bar 3 is waived and the merge returns.
+# (Round 11 rebuilt the classifier as a leading-digit-block regex so filler with
+# adjacent text is caught too - the pinned line moved with it.)
+name = "R10 - postcode_is_weak_anchor classifies a repdigit as weak"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return _digits_are_low_entropy(digits)"
+replace = "    return False"
+must_fail = "tests/test_identity_key.py::TestPostcodeIsWeakAnchor::test_purely_numeric_repdigit_is_weak"
+
+[[mutation]]
+# Round 11, P1.1: the shape the old `normalized == digits` test missed - filler
+# typed with a trailing country/town. Reintroducing the digits-only requirement
+# must fail the adjacent-text test, or the round-10 merge re-opens for exactly
+# that data-entry convention.
+name = "R11 - filler with adjacent text is still weak (the digits-only regression)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    digits = \"\".join(ch for ch in normalized if ch.isdigit())\n    if len(digits) < 3:"
+replace = "    digits = re.match(r\"[0-9]*\", normalized).group(0)\n    if len(digits) < 3:"
+must_fail = "tests/test_identity_key.py::TestWeakAnchorDigitContent::test_weakness_is_position_independent"
+
+[[mutation]]
+# Round 11 (the over-refusal DIRECTION, previously unpinned): a classifier that
+# calls EVERYTHING weak would silently demand bar 3 for every keyed client -
+# and a genuine returning client with no signer names on file would stop
+# linking. The strong-postcode unit test draws that boundary.
+name = "R11 - the weak-anchor classifier cannot call a real postcode weak"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(digits) < 3:\n        return False\n    return _digits_are_low_entropy(digits)"
+replace = "    return bool(digits)"
+must_fail = "tests/test_identity_key.py::TestWeakAnchorDigitContent::test_real_postcodes_stay_strong"
+
+[[mutation]]
+# Round 10 (reviewer smaller item): bar 5's fail-open branch was killed only
+# incidentally. Neutering it makes an ABSENT postcode veto an otherwise
+# corroborated link (the unsafe over-refusal direction).
+name = "R10 - postcodes_materially_diverge ABSTAINS when either side is absent"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not norm_a or not norm_b:\n        return False"
+replace = "    if False:\n        return False"
+must_fail = "tests/test_identity_key.py::TestPostcodesMateriallyDiverge::test_absence_abstains"
+
+[[mutation]]
+# Round 10: bar 5's core comparison. Neutering it to always-False makes two
+# genuinely different postcodes stop refusing, so drift can no longer be caught.
+name = "R10 - postcodes_materially_diverge REFUSES two different postcodes"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return norm_a != norm_b"
+replace = "    return False"
+must_fail = "tests/test_identity_key.py::TestPostcodesMateriallyDiverge::test_two_different_real_postcodes_diverge"
+
+[[mutation]]
+name = "The empty-key RAISE SITES must use the narrow type, not bare RuntimeError"
+file = "src/bullet_api/ghl/client.py"
+find = "            raise GhlNotConfiguredError(\n                \"GHL_AGENCY_API_KEY is empty; cannot create sub-account. \""
+replace = "            raise RuntimeError(\n                \"GHL_AGENCY_API_KEY is empty; cannot create sub-account. \""
+must_fail = "tests/test_ghl_client.py::test_empty_api_key_raises_not_configured"
+
+[[mutation]]
+name = "...and the lookup raise site too (it runs first on every attempt)"
+file = "src/bullet_api/ghl/client.py"
+find = "            raise GhlNotConfiguredError(\n                \"GHL_AGENCY_API_KEY is empty; cannot look up sub-account. \""
+replace = "            raise RuntimeError(\n                \"GHL_AGENCY_API_KEY is empty; cannot look up sub-account. \""
+must_fail = "tests/test_ghl_client.py::test_find_location_by_email_empty_api_key_raises_not_configured"
+
+[[mutation]]
+name = "A transport StreamError must not be dead-lettered as a config error"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        except GhlNotConfiguredError as exc:"
+replace = "        except RuntimeError as exc:"
+must_fail = "tests/test_ghl_subaccount.py::test_handler_never_dead_letters_a_bare_runtime_error"
+
+[[mutation]]
+name = "Producer and CEL must agree on the email bucket (raw vs lowercased)"
+file = "src/bullet_api/worker/client_record.py"
+find = '            "email": normalized_email,'
+replace = '            "email": fields.email,'
+must_fail = "tests/test_create_client_record.py::test_dedup_key_falls_back_to_email_when_key_is_null"
+requires_db = true
+
+[[mutation]]
+name = "A missing location name is unknown, not a confident negative"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if not name_known:\n            # Nothing known on either signal - the most ambiguous case there\n            # is, so it must not be a confident verdict in either direction.\n            return _GHL_HIT_UNDECIDABLE\n"
+replace = ""
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_with_no_name_is_undecidable_not_a_confident_negative"
+requires_db = true
+
+[[mutation]]
+name = "The failure recorder must recover a deactivated transaction (the zombie)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        except SQLAlchemyError:\n            await session.rollback()\n            await fail_action(session, action_id=begun.action_id, last_error=str(exc))"
+replace = "        except SQLAlchemyError:\n            raise"
+must_fail = "tests/test_ghl_subaccount.py::test_db_error_while_flagging_still_records_the_action_failed"
+requires_db = true
+
+# The PAIR to the one above. Recovering the zombie by rolling back
+# UNCONDITIONALLY silently discarded the possible-duplicate flag on every
+# ordinary failure - a regression introduced BY the first fix and caught by
+# this gate, not by review. Both directions need a killing test or the next
+# edit picks whichever one is unguarded.
+[[mutation]]
+name = "...without discarding the possible-duplicate flag on ordinary failures"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        try:\n            await fail_action(session, action_id=begun.action_id, last_error=str(exc))\n            await session.commit()\n        except SQLAlchemyError:\n            await session.rollback()"
+replace = "        if True:\n            await session.rollback()"
+must_fail = "tests/test_ghl_subaccount.py::test_possible_duplicate_flag_survives_an_ordinary_create_failure"
+requires_db = true
+
+[[mutation]]
+name = "F5 - GHL leg requires phone (the round-2 bar it was still using)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if not phone_agrees:\n            return _GHL_HIT_UNDECIDABLE"
+replace = "        if False:\n            return _GHL_HIT_UNDECIDABLE"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_orphan_of_another_franchisee_is_not_reused"
+requires_db = true
+
+[[mutation]]
+name = "F5 - absence is not agreement on the GHL leg"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    candidate = raw.get(\"phone\")\n    if not candidate:\n        business = raw.get(\"business\")\n        if isinstance(business, dict):\n            candidate = business.get(\"phone\")"
+replace = "    candidate = raw.get(\"phone\")"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_reads_postcode_nested_under_business"
+requires_db = true
+
+[[mutation]]
+name = "F5 - the phone bar must not break the at-least-once backstop"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        phone_agrees = corroborating_signal_agrees(\n            phone_a=client_phone, phone_b=_location_phone(location)\n        )"
+replace = "        phone_agrees = False"
+must_fail = "tests/test_ghl_subaccount.py::test_lost_response_orphan_is_reused_when_the_lookup_returns_it"
+requires_db = true
+
+[[mutation]]
+name = "F1 - address must not break the genuine returning client"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        address_disqualifies = addresses_materially_diverge(client_address, candidate.address)"
+replace = "        address_disqualifies = bool(client_address) or bool(candidate.address)"
+must_fail = "tests/test_ghl_subaccount.py::test_returning_client_same_address_still_links"
+requires_db = true
+
+# Review round 6, P1: the keyed path selected strictly one query, so every
+# pre-0013 row (NULL identity_key, no backfill) was permanently invisible.
+
+[[mutation]]
+name = "R6 - keyed path falls back to the email query when it finds nothing"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+# Models the ACTUAL pre-round-6 behaviour: email consulted only when the row is
+# unkeyed, so a keyed client never reaches a pre-0013 sibling. (The first
+# attempt at this entry mutated to `if keyed:`, which still runs the fallback
+# for a keyed client and therefore disabled nothing - it SURVIVED, and the
+# runner said so.)
+find = "    if sibling is None and collision is None:"
+replace = "    if sibling is None and collision is None and not keyed:"
+must_fail = "tests/test_ghl_subaccount.py::test_keyed_client_falls_back_to_email_for_a_pre_0013_sibling"
+requires_db = true
+
+[[mutation]]
+name = "R6 - ...and the fallback carries the UNKEYED bar, not the keyed one"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            require_contact_name=True,"
+replace = "            require_contact_name=postcode_is_weak_anchor(anchor_postcode),"
+must_fail = "tests/test_ghl_subaccount.py::test_keyed_email_fallback_still_demands_the_contact_name"
+requires_db = true
+
+[[mutation]]
+name = "R6 - ...and the fallback NEVER reconsiders a row the key already separated"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "                _SIBLING_BY_EMAIL_UNKEYED_SQL if keyed else _SIBLING_BY_EMAIL_SQL,"
+replace = "                _SIBLING_BY_EMAIL_SQL,"
+must_fail = "tests/test_ghl_subaccount.py::test_email_fallback_never_reconsiders_a_row_the_key_already_separated"
+requires_db = true
+
+# Review round 6, P1: the subordination guard cannot engage on an empty
+# candidate set, so the GHL leg needed bar 4 of its own.
+
+[[mutation]]
+name = "R6 - the GHL leg applies bar 4 (address disqualifier)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if addresses_materially_diverge(client_address, location_address):\n            return _GHL_HIT_UNDECIDABLE"
+replace = "        if False:\n            return _GHL_HIT_UNDECIDABLE"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_leg_applies_bar_4_when_the_db_leg_saw_no_candidates"
+requires_db = true
+
+# Round 7 INVERTED the round-6 "ours only -> undecidable" veto (it doomed the
+# whole legacy cohort behind an unclearable flag); the guard is now the ABSTAIN
+# posture plus the nested-payload read, each with its own kill below.
+
+[[mutation]]
+name = "R7 - bar-4 absence ABSTAINS on the GHL leg (the legacy cohort stays reusable)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if addresses_materially_diverge(client_address, location_address):\n            return _GHL_HIT_UNDECIDABLE"
+replace = "        if not (client_address and location_address) or addresses_materially_diverge(client_address, location_address):\n            return _GHL_HIT_UNDECIDABLE"
+must_fail = "tests/test_ghl_subaccount.py::test_legacy_location_with_no_address_is_still_reused_when_corroborated"
+requires_db = true
+
+[[mutation]]
+name = "R7 - _location_address reads the business-nested payload shape"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    candidate = raw.get(\"address\")\n    if not candidate:\n        business = raw.get(\"business\")\n        if isinstance(business, dict):\n            candidate = business.get(\"address\")"
+replace = "    candidate = raw.get(\"address\")"
+must_fail = "tests/test_ghl_subaccount.py::test_divergent_address_nested_under_business_still_vetoes"
+requires_db = true
+
+[[mutation]]
+name = "R7 - a success with NO recoverable id must fall through, never report clean"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if recovered:"
+replace = "        if True:"
+must_fail = "tests/test_ghl_subaccount.py::test_torn_action_with_no_id_anywhere_falls_through_and_self_heals"
+requires_db = true
+
+[[mutation]]
+name = "R6 - address is SENT on create, or the GHL leg is blind to bar 4"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = '''    if address:
+        payload["address"] = address'''
+replace = '''    if False:
+        pass'''
+must_fail = "tests/test_ghl_subaccount.py::test_create_payload_carries_the_address_so_our_own_locations_self_identify"
+requires_db = true
+
+# Review round 6: a pure prefix collision flagged an INNOCENT client against a
+# row positively established as a different business, and suppressed that
+# client's own GHL lookup behind the collision guard.
+
+[[mutation]]
+name = "R6 - a pure prefix collision must not flag anyone"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    return None, collided"
+replace = "    return None, collided or (candidates[0] if candidates else None)"
+must_fail = "tests/test_ghl_subaccount.py::test_prefix_collision_divergent_names_flags_possible_duplicate"
+requires_db = true
+
+[[mutation]]
+name = "R6 - a torn action never reports success with no sub-account id"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if recovered:\n            repaired = await session.execute("
+replace = "        if True:\n            repaired = await session.execute("
+# Round 12 retarget, caught by the runner itself (SURVIVED): the round-6 test
+# seeds an action row that HOLDS the id, so `recovered` is truthy there and
+# the mutation is a no-op for it. Only the no-id-ANYWHERE test reaches the
+# guard's False side.
+must_fail = "tests/test_ghl_subaccount.py::test_torn_action_with_no_id_anywhere_falls_through_and_self_heals"
+requires_db = true
+
+[[mutation]]
+name = "R6 - a corroborated link CLEARS an earlier possible-duplicate flag"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        # otherwise saturate the board before S1-26e lands and stop being read).\n        await _clear_possible_duplicate(session, client_id=client_id)"
+replace = "        # otherwise saturate the board before S1-26e lands and stop being read).\n        pass"
+must_fail = "tests/test_ghl_subaccount.py::test_a_confident_link_clears_an_earlier_possible_duplicate_flag"
+requires_db = true
+
+# --- the gate's own detectors (round 7: "the gate itself has no self-tests") --
+
+[[mutation]]
+name = "R7 gate - G1 must demand an exact QUOTED literal, not a substring"
+file = "scripts/review_gate.py"
+find = "    return f'\"{literal}\"' in corpus or f\"'{literal}'\" in corpus"
+replace = "    return literal in corpus"
+must_fail = "tests/test_review_gate.py::TestG1QuotedLiteralRule"
+
+[[mutation]]
+name = "R7 gate - G4 must search the WHOLE branch subtree for asserts"
+file = "scripts/review_gate.py"
+find = "        return any(isinstance(inner, ast.Assert) for stmt in body for inner in ast.walk(stmt))"
+replace = "        return any(isinstance(stmt, ast.Assert) for stmt in body)"
+must_fail = "tests/test_review_gate.py::TestG4ConditionalAssertShapes::test_assert_nested_in_a_for_loop_is_flagged"
+
+[[mutation]]
+name = "R7 gate - G4 must see subscript/attribute reads, not only calls"
+file = "scripts/review_gate.py"
+find = "isinstance(n, ast.Call | ast.Subscript | ast.Attribute) for n in ast.walk(test)"
+replace = "isinstance(n, ast.Call) for n in ast.walk(test)"
+must_fail = "tests/test_review_gate.py::TestG4ConditionalAssertShapes::test_subscript_condition_is_flagged"
+
+[[mutation]]
+name = "R7 gate - G6 must scan yaml/ts/json surfaces, not only py/md"
+file = "scripts/review_gate.py"
+find = '_PII_SCAN_SUFFIXES = (".py", ".md", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml")'
+replace = '_PII_SCAN_SUFFIXES = (".py", ".md")'
+must_fail = "tests/test_review_gate.py::TestG6ScanScope"
+
+# --- round 8: the classify guards the reviewer could not settle read-only, the
+# success-path terminal-commit guard, and the sharpened name kill.
+
+[[mutation]]
+name = "R8 - name divergence vetoes a postcode-and-phone-corroborated GHL hit"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if not name_agrees:\n            return _GHL_HIT_UNDECIDABLE"
+replace = "        if False:\n            return _GHL_HIT_UNDECIDABLE"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_with_divergent_name_is_not_reused"
+requires_db = true
+
+[[mutation]]
+name = "R8 - an unknown postcode on either side is never a confident reuse"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        return _GHL_HIT_UNDECIDABLE if name_agrees else _GHL_HIT_DIFFERENT_BUSINESS"
+replace = "        return _GHL_HIT_SAME_BUSINESS if name_agrees else _GHL_HIT_DIFFERENT_BUSINESS"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_hit_without_postcode_is_not_reused"
+requires_db = true
+
+[[mutation]]
+name = "R8 - the success-path terminal commit routes failures through the recorder"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        await session.commit()\n    except Exception as exc:\n        await _record_failure(exc)\n        raise\n\n    log.info(\n        \"S1-25 GHL sub-account created\","
+replace = "        await session.commit()\n    except GhlNotConfiguredError as exc:\n        await _record_failure(exc)\n        raise\n\n    log.info(\n        \"S1-25 GHL sub-account created\","
+must_fail = "tests/test_ghl_subaccount.py::test_commit_failure_after_successful_create_still_records_failed"
+requires_db = true
+
+# Round 8: "the gate built to end revert-green guards has revert-green
+# detectors" - every detector the review listed as wholesale-neuterable now has
+# a kill of its own, including the runner's exit-code table and the
+# merge-base refusal whose docstring says it closes the vacuous-pass hole.
+
+[[mutation]]
+name = "R8 gate - _is_comment_or_prose cannot be neutered (disables G1 entirely)"
+file = "scripts/review_gate.py"
+find = "    stripped = text.strip()\n    if stripped.startswith(\"#\"):\n        return True"
+replace = "    return False\n    stripped = text.strip()\n    if stripped.startswith(\"#\"):\n        return True"
+must_fail = "tests/test_review_gate.py::TestG1DetectorInternals::test_comment_or_prose_detection"
+
+[[mutation]]
+name = "R8 gate - _looks_like_example_data cannot be neutered (disables G1 entirely)"
+file = "scripts/review_gate.py"
+find = "def _looks_like_example_data(literal: str) -> bool:\n    if _IDENTIFIER_ISH.match(literal):"
+replace = "def _looks_like_example_data(literal: str) -> bool:\n    return False\n    if _IDENTIFIER_ISH.match(literal):"
+must_fail = "tests/test_review_gate.py::TestG1DetectorInternals::test_example_data_heuristic"
+
+[[mutation]]
+name = "R8 gate - _QUOTED extracts real literals, not a poisoned pattern"
+file = "scripts/review_gate.py"
+find = "_QUOTED = re.compile(r'\"([^\"\\n]{2,60})\"|\\'([^\\'\\n]{2,60})\\'')"
+replace = "_QUOTED = re.compile(r'\"(zzzneverzzz)\"|\\'(zzzneverzzz)\\'')"
+must_fail = "tests/test_review_gate.py::TestG1DetectorInternals::test_quoted_literal_regex_extracts_both_quote_styles"
+
+[[mutation]]
+name = "R8 gate - the G1 corpus keeps excluding docstrings (AST scoping holds)"
+file = "scripts/review_gate.py"
+find = "            if (\n                body\n                and isinstance(body[0], ast.Expr)\n                and isinstance(body[0].value, ast.Constant)\n                and isinstance(body[0].value.value, str)\n            ):\n                body = body[1:]"
+replace = "            if False:\n                body = body[1:]"
+must_fail = "tests/test_review_gate.py::TestG1DetectorInternals::test_corpus_excludes_docstrings_but_keeps_bodies_and_decorators"
+
+[[mutation]]
+name = "R8 gate - G5's discriminating-param set cannot be emptied"
+file = "scripts/review_gate.py"
+find = "_DISCRIMINATING_PARAMS = {\n    \"phone\","
+replace = "_DISCRIMINATING_PARAMS = {\n    \"zzz_never\","
+must_fail = "tests/test_review_gate.py::TestG5Detector::test_seed_helper_with_pinned_corroborator_default_is_flagged"
+
+[[mutation]]
+name = "R8 gate - G5's _seed name coupling cannot be retargeted"
+file = "scripts/review_gate.py"
+find = "        if not node.name.startswith(\"_seed\"):"
+replace = "        if not node.name.startswith(\"_zzznever\"):"
+must_fail = "tests/test_review_gate.py::TestG5Detector::test_seed_helper_with_pinned_corroborator_default_is_flagged"
+
+[[mutation]]
+name = "R8 gate - G6's net-new comparison cannot be neutered"
+file = "scripts/review_gate.py"
+find = "        was = before.get(value, 0)\n        if count > was:"
+replace = "        was = before.get(value, 0)\n        if False:"
+must_fail = "tests/test_review_gate.py::TestG6Detector::test_net_new_value_is_flagged_and_preexisting_is_not"
+
+[[mutation]]
+name = "R8 gate - G6's allowlist branch cannot become allow-everything"
+file = "scripts/review_gate.py"
+find = "        if value in allowlist or _CAMEL_CASE.match(value):"
+replace = "        if True:"
+must_fail = "tests/test_review_gate.py::TestG6Detector::test_net_new_value_is_flagged_and_preexisting_is_not"
+
+[[mutation]]
+name = "R8 gate - the service-account pattern stays in the PII set"
+file = "scripts/review_gate.py"
+find = "    \"GCP service account\": re.compile(r\"[\\w.-]+@[\\w-]+\\.iam\\.gserviceaccount\\.com\"),"
+replace = ""
+must_fail = "tests/test_review_gate.py::TestG6Detector::test_service_account_pattern_matches_the_round8_live_instance_shape"
+
+[[mutation]]
+name = "R8 gate - _merge_base REFUSES an unresolvable base (the vacuous-pass hole)"
+file = "scripts/review_gate.py"
+# Reinstates the ORIGINAL round-5 hole verbatim: fall back to the unvalidated
+# ref string, empty diff, vacuous pass. (The first attempt gutted only the
+# first of the two exit layers and SURVIVED - the second layer still exited
+# for a bogus ref, which is the layers being deliberately redundant.)
+find = "    probe = subprocess.run(\n        [\"git\", \"rev-parse\", \"--verify\", f\"{base}^{{commit}}\"],"
+replace = "    return base\n    probe = subprocess.run(\n        [\"git\", \"rev-parse\", \"--verify\", f\"{base}^{{commit}}\"],"
+must_fail = "tests/test_review_gate.py::TestMergeBaseRefusal::test_unresolvable_base_exits_instead_of_passing_vacuously"
+
+[[mutation]]
+name = "R8 runner - non-answer exit codes are ERROR, never KILLED"
+file = "scripts/review_gate_mutate.py"
+find = "    if returncode in _PYTEST_NON_ANSWERS:"
+replace = "    if False:"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerClassification::test_the_full_table"
+
+[[mutation]]
+name = "R8 runner - a skipped-only run is UNPROVEN, never a pass"
+file = "scripts/review_gate_mutate.py"
+find = "    if \" skipped\" in output and \" passed\" not in output and \" failed\" not in output:"
+replace = "    if False:"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerClassification::test_the_full_table"
+
+# ---------------------------------------------------------------------------
+# Round 12 guards. Every entry below was added WITH its guard, per the
+# contract ("a new guard without a manifest entry is not finished"), and each
+# must_fail was chosen so no sibling guard can mask the kill (the round-11
+# floor-params lesson).
+# ---------------------------------------------------------------------------
+
+[[mutation]]
+# Round 12, P0.2: an ordinal candidate whose outward half sits right after a
+# unit designator is a unit number ("Unit B2 1st"), not a postcode. The
+# must_fail row "B33 8TH, Unit A1 1st" has no structure word after the unit
+# ordinal, so the structure guard cannot mask this kill: without the
+# unit-before guard the value has TWO surviving ordinals and SPLITS to ""
+# instead of keying "B338TH".
+name = "R12 - a unit-prefixed ordinal never becomes a postcode candidate"
+file = "src/bullet_api/worker/identity_key.py"
+find = "            if _UNIT_BEFORE.search(upper, 0, uk_match.start()):\n                continue"
+replace = "            if False:\n                continue"
+must_fail = "tests/test_identity_key.py::TestPostcodeCandidateSpec::test_trailing_unit_ordinal_never_beats_the_real_postcode"
+
+[[mutation]]
+# Round 12: exactly one REAL candidate wins. Deleting the rule sends every
+# town-carrying value ("London E8 1AA") to the token path, keying it
+# differently from the bare postcode - the invariant the raw probe exists for.
+name = "R12 - a single REAL candidate is returned (the town invariant's engine)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(distinct_real) == 1:\n        return real_candidates[0]"
+replace = "    if False:\n        return real_candidates[0]"
+must_fail = "tests/test_identity_key.py::TestPostcodeCandidateSpec::test_previously_verified_rows_unchanged"
+
+[[mutation]]
+# Round 12: two REAL candidates is ambiguity, and ambiguity SPLITS. Reverting
+# to first-match-wins silently guesses which site a two-postcode value means.
+name = "R12 - two REAL candidates SPLIT instead of guessing"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(distinct_real) >= 2:\n        return \"\""
+replace = "    if real_candidates:\n        return real_candidates[0]"
+must_fail = "tests/test_identity_key.py::TestPostcodeCandidateSpec::test_two_real_postcodes_are_ambiguous_and_split"
+
+[[mutation]]
+# Round 12, P1.1: a part carrying 2+ tokens is department-shaped, not a
+# personal name part. The must_fail pair ("Mary Jane", "Smith") contains NO
+# role noun, so the role-noun guard cannot mask this kill.
+name = "R12 - a multi-token contact-name part refuses bar 3"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        if len(first_tokens) >= 2 or len(last_tokens) >= 2:\n            return False"
+replace = "        if False:\n            return False"
+must_fail = "tests/test_identity_key.py::TestContactNameShapes::test_multi_token_part_refuses_toward_split"
+
+[[mutation]]
+# Round 12, P1.1: first == last is the placeholder echo shape ("Unknown
+# Unknown"). The must_fail params are not role nouns and not in the pair set,
+# so only this rule refuses them.
+name = "R12 - an echoed contact name (first == last) refuses bar 3"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if first_norm_a == last_norm_a:\n        return False"
+replace = "    if False:\n        return False"
+must_fail = "tests/test_identity_key.py::TestContactNameShapes::test_role_titles_and_placeholders_never_corroborate"
+
+[[mutation]]
+# Round 12, P1.1: "John Doe" is name-shaped by construction - no shape rule
+# can recognise it, only membership. Sole rule refusing that pair.
+name = "R12 - the canonical dummy-name pairs refuse bar 3"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if (first_norm_a, last_norm_a) in _PLACEHOLDER_NAME_PAIRS:\n        return False"
+replace = "    if False:\n        return False"
+must_fail = "tests/test_identity_key.py::TestContactNameShapes::test_role_titles_and_placeholders_never_corroborate"
+
+[[mutation]]
+# Round 12, P1.3: the tokenizer keeps non-Latin letters. Reverting to the
+# ASCII-only class collapses every Cyrillic/Greek/CJK business onto its Latin
+# remnant and NULL-keys fully non-Latin names - bar 1 dead for the cohort.
+name = "R12 - the tokenizer keeps non-Latin scripts"
+file = "src/bullet_api/worker/identity_key.py"
+find = "_ALNUM_TOKEN = re.compile(r\"[^\\W_]+\")"
+replace = "_ALNUM_TOKEN = re.compile(r\"[a-z0-9]+\")"
+must_fail = "tests/test_identity_key.py::TestNonLatinScripts::test_distinct_cyrillic_names_diverge"
+
+[[mutation]]
+# Round 12, P1.2 - the low-entropy clauses, one entry per clause, each with a
+# param no sibling clause catches (verified by hand before landing):
+# "13579" (constant step 2) is caught ONLY by the uniform-diff rule.
+name = "R12 - weak anchor: constant-step digit runs are filler"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(diffs) == 1:\n        return True"
+replace = "    if False:\n        return True"
+must_fail = "tests/test_identity_key.py::TestWeakAnchorDigitContent::test_placeholder_shaped_digit_content_is_weak"
+
+[[mutation]]
+# "121" is caught ONLY by the repeating-pair rule - the runner itself proved
+# "1212" was masked (SURVIVED: any length-4+ pair also trips the
+# two-distinct-digits rule by construction; only a length-3 alternation is
+# exempt from every sibling clause).
+name = "R12 - weak anchor: repeating-pair digit runs are filler"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if _is_repeating_pair(digits):\n        return True"
+replace = "    if False:\n        return True"
+must_fail = "tests/test_identity_key.py::TestWeakAnchorDigitContent::test_placeholder_shaped_digit_content_is_weak"
+
+[[mutation]]
+# "1121" (added as a param with this entry) is caught ONLY by the
+# two-distinct-digits rule.
+name = "R12 - weak anchor: two distinct digits over four-plus positions is filler"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(digits) >= 4 and len(set(digits)) <= 2:\n        return True"
+replace = "    if False:\n        return True"
+must_fail = "tests/test_identity_key.py::TestWeakAnchorDigitContent::test_placeholder_shaped_digit_content_is_weak"
+
+[[mutation]]
+# "11123" (added as a param with this entry) is caught ONLY by the
+# three-same-digit-run rule.
+name = "R12 - weak anchor: a run of three-plus of one digit is filler"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if re.search(r\"(\\d)\\1\\1\", digits):\n        return True"
+replace = "    if False:\n        return True"
+must_fail = "tests/test_identity_key.py::TestWeakAnchorDigitContent::test_placeholder_shaped_digit_content_is_weak"
+
+[[mutation]]
+# "12321" is caught ONLY by the palindrome rule.
+name = "R12 - weak anchor: palindromic digit blocks are filler"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if len(digits) >= 4 and digits == digits[::-1]:\n        return True"
+replace = "    if False:\n        return True"
+must_fail = "tests/test_identity_key.py::TestWeakAnchorDigitContent::test_placeholder_shaped_digit_content_is_weak"
+
+[[mutation]]
+# "11223" is caught ONLY by the doubled-run rule.
+name = "R12 - weak anchor: doubled-run digit structure is filler"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        if len(runs) >= 2 and all(length >= 2 for length in runs[:-1]):\n            return True"
+replace = "        if False:\n            return True"
+must_fail = "tests/test_identity_key.py::TestWeakAnchorDigitContent::test_placeholder_shaped_digit_content_is_weak"
+
+[[mutation]]
+# Round 12, P2: a 2xx with an unparseable body must be NON-retriable - the
+# location likely exists, the mismatch is deterministic, and a retriable error
+# re-POSTs one orphan per attempt. Rerouting to the retriable type must fail
+# the parse-guard test.
+name = "R12 - unparseable 2xx create response is non-retriable"
+file = "src/bullet_api/ghl/client.py"
+find = "                raise GhlClientError(\n                    response.status_code,\n                    \"2xx create-location response could not be parsed \""
+replace = "                raise GhlServerError(\n                    response.status_code,\n                    \"2xx create-location response could not be parsed \""
+must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_2xx_with_unparseable_body_is_non_retriable"
+
+[[mutation]]
+# Round 12, P2: the schema-drift branch's "MUST stay retriable" contract.
+# Routing it to NonRetriableError dead-letters the signing with no
+# platform_actions row and no reconcile path - a permanent silent loss.
+name = "R12 - schema drift stays retriable (never NonRetriable)"
+file = "src/bullet_api/worker/client_record.py"
+find = "                    \"error\": str(exc.orig) if exc.orig is not None else type(exc).__name__,\n                },\n            )\n            raise"
+replace = "                    \"error\": str(exc.orig) if exc.orig is not None else type(exc).__name__,\n                },\n            )\n            raise inngest.NonRetriableError(str(exc)) from exc"
+must_fail = "tests/test_create_client_record.py::test_schema_drift_stays_retriable_and_logs_no_bind_params"
+
+[[mutation]]
+# Round 12, P2 (same test, the PII property): reverting the drift log to
+# `str(exc)` reattaches `[parameters: {...}]` - the full client bind set.
+name = "R12 - the schema-drift log carries no bind parameters"
+file = "src/bullet_api/worker/client_record.py"
+find = "                    \"error\": str(exc.orig) if exc.orig is not None else type(exc).__name__,"
+replace = "                    \"error\": str(exc),"
+must_fail = "tests/test_create_client_record.py::test_schema_drift_stays_retriable_and_logs_no_bind_params"
+
+[[mutation]]
+# Round 12, P2: DB bar 2 (phone) was the ONLY dedup bar with no manifest
+# entry - dropping `phone_agrees and` from the match condition was reported
+# clean by the gate built to catch exactly that.
+name = "R12 - DB bar 2: dropping the phone requirement must fail"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if phone_agrees and contact_ok and not address_disqualifies and not postcode_disqualifies:"
+replace = "        if contact_ok and not address_disqualifies and not postcode_disqualifies:"
+must_fail = "tests/test_ghl_subaccount.py::test_changed_phone_no_longer_links_now_that_address_does_not_vote"
+requires_db = true
+
+# ---------------------------------------------------------------------------
+# Round 12, P1.5: the gate's COMPOSITION ROOTS. Round 8 mutated the leaves;
+# every root below was still revert-green.
+# ---------------------------------------------------------------------------
+
+[[mutation]]
+name = "R12 gate - check_g4 actually walks the tests root"
+file = "scripts/review_gate.py"
+find = "    for path in TESTS_ROOT.rglob(\"test_*.py\"):"
+replace = "    for path in []:"
+must_fail = "tests/test_review_gate.py::TestCheckRootsAreWired::test_check_g4_scans_the_tests_root"
+
+[[mutation]]
+name = "R12 gate - check_g5 actually walks the tests root"
+file = "scripts/review_gate.py"
+find = "def check_g5_fixture_defaults(result: GateResult) -> None:\n    for path in TESTS_ROOT.rglob(\"*.py\"):"
+replace = "def check_g5_fixture_defaults(result: GateResult) -> None:\n    for path in []:"
+must_fail = "tests/test_review_gate.py::TestCheckRootsAreWired::test_check_g5_scans_the_tests_root"
+
+[[mutation]]
+name = "R12 gate - check_g1 actually reads the added comment lines"
+file = "scripts/review_gate.py"
+find = "    for file, line, text in _added_comment_lines(base):"
+replace = "    for file, line, text in []:"
+must_fail = "tests/test_review_gate.py::TestCheckRootsAreWired::test_check_g1_reports_an_uncovered_literal"
+
+[[mutation]]
+name = "R12 gate - check_g6 actually walks every PII pattern"
+file = "scripts/review_gate.py"
+find = "    for label, pattern in _PII_PATTERNS.items():"
+replace = "    for label, pattern in {}.items():"
+must_fail = "tests/test_review_gate.py::TestCheckRootsAreWired::test_check_g6_walks_every_pattern"
+
+[[mutation]]
+name = "R12 gate - the diff parser actually reads added lines"
+file = "scripts/review_gate.py"
+find = "        if raw.startswith(\"+\") and not raw.startswith(\"+++\"):"
+replace = "        if False:"
+must_fail = "tests/test_review_gate.py::TestCheckRootsAreWired::test_added_comment_lines_parses_the_diff"
+
+[[mutation]]
+# G7 arrived WITH its manifest entry, per the contract.
+name = "R12 gate - G7 cannot be neutered to always-equal fingerprints"
+file = "scripts/review_gate.py"
+find = "    if _normalizer_fingerprint(base_source) == _normalizer_fingerprint(current_source):\n        return"
+replace = "    if True:\n        return"
+must_fail = "tests/test_review_gate.py::TestG7NormalizerMigration::test_semantic_change_without_migration_fails"
+
+[[mutation]]
+# The single highest-leverage revert-green line in the tool: `return 0` here
+# passed every SURVIVED guard through CI while the report printed the failure.
+name = "R12 gate - the mutate runner's exit aggregation cannot be neutered"
+file = "scripts/review_gate_mutate.py"
+find = "    return 1 if (survived or errored or unproven_fails) else 0"
+replace = "    return 0"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerFlowGuards::test_exit_code_full_table"
+
+[[mutation]]
+name = "R12 gate - _apply refuses an ambiguous find pattern"
+file = "scripts/review_gate_mutate.py"
+find = "    if occurrences > 1:"
+replace = "    if False:"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerFlowGuards::test_apply_refuses_an_ambiguous_pattern"
+
+[[mutation]]
+name = "R12 gate - _restore refuses to clobber a concurrent edit"
+file = "scripts/review_gate_mutate.py"
+find = "    if _digest(current) != _digest(mutated):"
+replace = "    if False:"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerFlowGuards::test_restore_refuses_to_clobber_a_concurrent_edit"
+
+[[mutation]]
+name = "R12 gate - _node_id_resolves reads the collect outcome"
+file = "scripts/review_gate_mutate.py"
+find = "    return proc.returncode == 0 and \" no tests ran\" not in (proc.stdout + proc.stderr)"
+replace = "    return True"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerFlowGuards::test_node_id_resolution_reads_the_collect_outcome"
+
+[[mutation]]
+name = "R12 gate - a red baseline is an ERROR, never clean"
+file = "scripts/review_gate_mutate.py"
+find = "            _BASELINE_CACHE[node_id] = (\n                False,\n                f\"does NOT pass on unmutated source ({status}) - a kill would be spurious\",\n            )"
+replace = "            _BASELINE_CACHE[node_id] = (True, \"\")"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerFlowGuards::test_baseline_reads_the_unmutated_run"
+
+[[mutation]]
+# Under this mutation the flow proceeds to REAL node resolution, whose output
+# lacks the word "escapes" - the self-test asserts the specific detail.
+name = "R12 gate - the path-containment guard cannot be neutered"
+file = "scripts/review_gate_mutate.py"
+find = "        if not path.resolve().is_relative_to(API_ROOT):"
+replace = "        if False:"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerFlowGuards::test_main_refuses_a_file_escaping_the_api_root"
+
+[[mutation]]
+# Under this mutation the flow proceeds to the baseline check, whose ERROR
+# detail says "does NOT pass", not "selects no test" - asserted specifically.
+name = "R12 gate - the must_fail resolution guard cannot be neutered"
+file = "scripts/review_gate_mutate.py"
+find = "        if not _node_id_resolves(entry[\"must_fail\"]):"
+replace = "        if False:"
+must_fail = "tests/test_review_gate.py::TestMutateRunnerFlowGuards::test_main_refuses_a_must_fail_that_selects_no_test"
+
+[[mutation]]
+# Round 12, P1.4: the phase-2 sibling RE-CHECK is what turns the advisory lock
+# into a closed race - the second racer must SEE the winner, not scan stale
+# emptiness. Neutering the link path must mint the duplicate the test forbids.
+name = "R12 - the phase-2 sibling re-check links the racer's committed row"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    if recheck_sibling is not None:"
+replace = "    if False:"
+must_fail = "tests/test_ghl_subaccount.py::test_sibling_recheck_links_a_racer_committed_mid_flight"
+requires_db = true
+
+[[mutation]]
+# Round 12, P1.4: the lock SQL itself. Swapping it for a no-op leaves two
+# same-email sessions unserialised - the two-connection test times out on
+# nothing and fails.
+name = "R12 - the dedup lock actually locks on the email"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "_DEDUP_LOCK_SQL = text(\"SELECT pg_advisory_xact_lock(hashtext('dedup:' || lower(:email)))\")"
+replace = "_DEDUP_LOCK_SQL = text(\"SELECT lower(:email)\")"
+must_fail = "tests/test_ghl_subaccount.py::test_dedup_lock_serialises_same_email_runs"
+requires_db = true
+
+[[mutation]]
+# Round 12, P2: the create write-back's rowcount guard. Ignoring it returns
+# the orphan's id as a clean success while the row holds another.
+name = "R12 - a lost create write-back race flags the orphan"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        surviving_id = location.id\n        if written.rowcount == 0:"
+replace = "        surviving_id = location.id\n        if False:"
+must_fail = "tests/test_ghl_subaccount.py::test_create_write_back_losing_the_race_flags_the_orphan"
+requires_db = true
+
+[[mutation]]
+# Round 12, P2: placeholder-SHAPED names must not key. Neutering the stem
+# check lets "TBC" mint an identity again.
+name = "R12 - placeholder-shaped names yield no identity"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        if normalize_name(candidate) in _PLACEHOLDER_NAME_STEMS:\n            continue"
+replace = "        if False:\n            continue"
+must_fail = "tests/test_identity_key.py::TestPlaceholderShapedNames::test_placeholder_shaped_name_yields_no_identity"
+
+[[mutation]]
+# Round 12, P2: the tail match alone let Malta and US numbers corroborate.
+# Reverting the country-conflict rule to always-True must fail the Malta test.
+name = "R13 - phone corroboration requires a shared real-number reading"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return any(reading in readings_b for reading in readings_a)"
+replace = "    return True"
+must_fail = "tests/test_identity_key.py::TestPhoneCountryCodeConflict::test_malta_and_us_numbers_sharing_a_tail_do_not_agree"
+
+[[mutation]]
+# Round 12, P2: the address normal form keeps token boundaries. Reverting the
+# space join to concatenation re-erases them.
+name = "R12 - address comparison keeps token boundaries"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return \" \".join(_ALNUM_TOKEN.findall(_fold_unicode(value).casefold()))"
+replace = "    return \"\".join(_ALNUM_TOKEN.findall(_fold_unicode(value).casefold()))"
+must_fail = "tests/test_identity_key.py::TestAddressBoundaryShifts::test_boundary_shifted_addresses_diverge"
+
+# ---------------------------------------------------------------------------
+# Round 13: findings from the pre-PR-review adversarial audit (four parallel
+# agents: pure-logic execution hunter, concurrency/DB attacker, and two that
+# hit a session rate limit before completing). Every guard below shipped
+# WITH its manifest entry per the project's own contract.
+# ---------------------------------------------------------------------------
+
+[[mutation]]
+# The worst finding: an ordinal-shaped extraction is weak REGARDLESS of its
+# digit content, closing the class of unit words `_UNIT_BEFORE` will always
+# be able to miss (STUDIO was the concrete miss; the fix does not depend on
+# enumerating the next one).
+name = "R13 - an ordinal-shaped postcode extraction is unconditionally weak"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if uk_match is not None and _ORDINAL_INWARD.fullmatch(uk_match.group(2)):\n        return True"
+replace = "    if False:\n        return True"
+must_fail = "tests/test_identity_key.py::TestOrdinalHijackViaUnenumeratedUnitWord::test_the_class_fix_holds_even_for_an_unenumerated_word"
+
+[[mutation]]
+name = "R13 - gym-industry unit words are recognised (defense in depth)"
+file = "src/bullet_api/worker/identity_key.py"
+find = "|BUILDING|OFFICE|LOT|NO|NUMBER|STUDIO|GYM|BAY|POD|KIOSK|CABIN|STALL)[\\s,.\\-/#]*$"
+replace = "|BUILDING|OFFICE|LOT|NO|NUMBER)[\\s,.\\-/#]*$"
+must_fail = "tests/test_identity_key.py::TestOrdinalHijackViaUnenumeratedUnitWord::test_gym_industry_unit_words_do_not_mint_a_postcode_key"
+
+[[mutation]]
+name = "R13 - the fitness-industry role-noun lexicon refuses corroboration"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        \"personal\",\n        \"fitness\",\n        \"studio\","
+replace = "        \"fitness\","
+must_fail = "tests/test_identity_key.py::TestFitnessIndustryRoleTitles::test_fitness_titles_never_corroborate"
+
+[[mutation]]
+# The commutativity fix itself: running the shape checks on BOTH sides,
+# not just A. Reverting to side-A-only must fail the fused-title test.
+name = "R13 - contact-name shape checks run on both sides, not side A alone"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    both_sides = ((first_tokens_a, last_tokens_a), (first_tokens_b, last_tokens_b))\n    for first_tokens, last_tokens in both_sides:"
+replace = "    both_sides = ((first_tokens_a, last_tokens_a),)\n    for first_tokens, last_tokens in both_sides:"
+must_fail = "tests/test_identity_key.py::TestContactNameShapeCheckIsCommutative::test_fused_role_title_on_either_side_refuses"
+
+[[mutation]]
+# Dedupe-by-value: a copy-pasted duplicate postcode is one value, not two.
+name = "R13 - duplicate real-postcode candidates are not ambiguous"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    distinct_real = set(real_candidates)"
+replace = "    distinct_real = real_candidates"
+must_fail = "tests/test_identity_key.py::TestPostcodeDuplicateCandidateNotAmbiguous::test_duplicated_postcode_still_keys"
+
+[[mutation]]
+# The separator class widening: "/" recognised as a postcode separator.
+name = "R13 - a slash-separated postcode still matches the UK probe"
+file = "src/bullet_api/worker/identity_key.py"
+find = "r\"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\\s,.\\-/]*([0-9][A-Z]{2})(?![A-Z0-9])\""
+replace = "r\"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\\s,.\\-]*([0-9][A-Z]{2})(?![A-Z0-9])\""
+must_fail = "tests/test_identity_key.py::TestSlashSeparatedPostcodes::test_town_prefixed_slash_postcode_matches_the_bare_form"
+
+[[mutation]]
+# The torn-state repair on the SIBLING branch (proven live against the DB by
+# the concurrency audit): a replay through this branch must actually write
+# the id back, not just report success from every surface while leaving the
+# row NULL forever.
+name = "R13 - a torn sibling-link replay repairs the client row"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            repaired = await session.execute(\n                text(\n                    \"UPDATE clients \"\n                    \"SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id \"\n                    \"WHERE id = :client_id AND ghl_subaccount_id IS NULL\"\n                ),\n                {\n                    \"root_id\": sibling.root_id,\n                    \"ghl_id\": sibling.ghl_subaccount_id,\n                    \"client_id\": client_id,\n                },\n            )\n            if repaired.rowcount > 0:"
+replace = "            repaired = None\n            if False:"
+must_fail = "tests/test_ghl_subaccount.py::test_torn_sibling_repair_writes_the_id_back_with_no_racer"
+requires_db = true
+
+[[mutation]]
+# That same repair's own rowcount guard: a racer beating it must not be
+# reported as success with the SIBLING's id.
+name = "R13 - a torn sibling-link repair race returns the row's id, not the sibling's"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "                if surviving and surviving != sibling.ghl_subaccount_id:\n                    await session.commit()\n                    log.warning(\n                        \"S1-26 torn sibling repair lost a write race; returning the row's id\","
+replace = "                if False:\n                    await session.commit()\n                    log.warning(\n                        \"S1-26 torn sibling repair lost a write race; returning the row's id\","
+must_fail = "tests/test_ghl_subaccount.py::test_torn_sibling_repair_losing_the_race_does_not_overwrite_the_racer"
+requires_db = true
+
+[[mutation]]
+# The dedup lock + re-check is now UNCONDITIONAL. Reverting to the
+# collision-gated version reopens the unflagged-duplicate hole the
+# concurrency audit found on the collision path.
+name = "R13 - the phase-2 dedup lock and re-check run even on a phase-1 collision"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        recheck_sibling, recheck_collision = await _db_sibling_check(\n            session, client=client, client_id=client_id, client_name=client_name\n        )"
+replace = "        recheck_sibling, recheck_collision = (\n            (None, None)\n            if collision is not None\n            else await _db_sibling_check(\n                session, client=client, client_id=client_id, client_name=client_name\n            )\n        )"
+must_fail = "tests/test_ghl_subaccount.py::test_phase2_lock_and_recheck_run_even_after_a_phase1_collision"
+requires_db = true
+[[mutation]]
+name = "R13 - the DB-sibling link UPDATE's rowcount guard (forced, not just present)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            if linked.rowcount == 0:\n                surviving = (\n                    await session.execute(\n                        text(\"SELECT ghl_subaccount_id FROM clients WHERE id = :client_id\"),\n                        {\"client_id\": client_id},\n                    )\n                ).scalar_one_or_none()\n                if surviving and surviving != sibling.ghl_subaccount_id:"
+replace = "            if False:\n                surviving = (\n                    await session.execute(\n                        text(\"SELECT ghl_subaccount_id FROM clients WHERE id = :client_id\"),\n                        {\"client_id\": client_id},\n                    )\n                ).scalar_one_or_none()\n                if surviving and surviving != sibling.ghl_subaccount_id:"
+must_fail = "tests/test_ghl_subaccount.py::test_sibling_link_update_losing_the_race_returns_the_rows_id"
+requires_db = true
+
+[[mutation]]
+name = "R13 - the GHL-lookup adoption UPDATE's rowcount guard (forced, not just present)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if adopted.rowcount == 0:"
+replace = "        if False:"
+must_fail = "tests/test_ghl_subaccount.py::test_ghl_lookup_adoption_losing_the_race_returns_the_rows_id"
+requires_db = true
+
+[[mutation]]
+name = "R13 - the create-path torn-repair UPDATE's rowcount guard (forced, not just present)"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            surviving = recovered\n            if repaired.rowcount == 0:"
+replace = "            surviving = recovered\n            if False:"
+must_fail = "tests/test_ghl_subaccount.py::test_create_path_torn_repair_losing_the_race_does_not_overwrite_the_racer"
+requires_db = true
+
+[[mutation]]
+# Round 13: the candidate-region fallback loop is what fixes the short-NSN
+# cohort at all - without it, a non-"+" number never gets a second reading
+# to compare against a "+"-prefixed one.
+name = "R13 - ambiguous phone numbers are tried against the candidate regions"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    readings: list[tuple[int, int]] = []\n    for region in _PHONE_CANDIDATE_REGIONS:"
+replace = "    readings: list[tuple[int, int]] = []\n    for region in ():"
+must_fail = "tests/test_identity_key.py::TestPhoneRealNumberStructure::test_short_nsn_countries_now_corroborate_across_forms"
+requires_db = true
+
+[[mutation]]
+# Round 13: Italy is deliberately absent from the candidate-region list -
+# the mechanism that closes the merge-direction finding. Restoring it (as
+# if it were a confirmed market) must fail the scope-boundary test.
+name = "R13 - the candidate-region list stays bounded to confirmed/named markets"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    \"DK\",\n    \"NO\",\n    \"SG\",\n    \"LU\",\n)"
+replace = "    \"DK\",\n    \"NO\",\n    \"SG\",\n    \"LU\",\n    \"IT\",\n)"
+must_fail = "tests/test_identity_key.py::TestPhoneRealNumberStructure::test_a_country_outside_the_region_list_cannot_self_corroborate_without_a_plus"
+
+[[mutation]]
+# Round 13: filler must be rejected BEFORE any real-number interpretation is
+# attempted - a placeholder that happens to be digit-count-plausible for
+# some real country must not be able to corroborate on that basis.
+name = "R13 - placeholder phone numbers are filtered before real-number parsing"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    if not normalize_phone(phone_a) or not normalize_phone(phone_b):"
+replace = "    if False:"
+must_fail = "tests/test_identity_key.py::TestPhoneRealNumberStructure::test_placeholder_shaped_numbers_never_reach_real_number_interpretation"

@@ -381,3 +381,38 @@ async def test_requires_authentication(
 ) -> None:
     resp = await anon_client.get("/clients")
     assert resp.status_code == 401
+
+
+@pytest.mark.db
+async def test_list_surfaces_possible_duplicate_for_the_board_badge(
+    authed_client: AsyncClient, async_session: AsyncSession
+) -> None:
+    """S1-26c: the board badge binds to `possible_duplicate`, so the list
+    endpoint must actually send it - a badge bound to a field the API never
+    returns is a silently dead warning, which is the state this column was in
+    before the dashboard surface was added."""
+    run = uuid.uuid4().hex[:8]
+    now = datetime.now(UTC)
+    flagged_id = await _seed_client(
+        async_session,
+        email=f"flagged-{run}@example.com",
+        current_step="signed",
+        step_entered_at=now,
+    )
+    clean_id = await _seed_client(
+        async_session,
+        email=f"clean-{run}@example.com",
+        current_step="signed",
+        step_entered_at=now - timedelta(minutes=1),
+    )
+    await async_session.execute(
+        text("UPDATE clients SET possible_duplicate = true WHERE id = :id"),
+        {"id": flagged_id},
+    )
+
+    response = await authed_client.get("/clients")
+
+    assert response.status_code == 200
+    by_id = {row["id"]: row for row in response.json()["clients"]}
+    assert by_id[str(flagged_id)]["possible_duplicate"] is True
+    assert by_id[str(clean_id)]["possible_duplicate"] is False

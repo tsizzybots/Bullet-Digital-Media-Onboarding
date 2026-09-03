@@ -169,6 +169,30 @@ services:
     plan: starter
     branch: main
     buildCommand: pip install uv && uv sync --frozen
+    # Migrations run BEFORE the new code serves traffic (S1-26c review round 2,
+    # finding 7). Without this there is a window between deploy and a manual
+    # `make db-upgrade` where the new code queries columns that do not exist
+    # yet, and a signing landing in it is lost PERMANENTLY: the clients INSERT
+    # raises `UndefinedColumn` before `begin_action`, so there is no
+    # `platform_actions` row to show the failure, the run burns its retries into
+    # dead-letter, and `reconcile_pandadoc` cannot re-emit it because its
+    # `ON CONFLICT DO NOTHING` sees the onboarding_events row already present.
+    # Render aborts the deploy if this command fails, so a bad migration keeps
+    # the OLD code serving rather than half-migrating.
+    #
+    # DELIBERATELY ON THIS SERVICE ONLY, and the reason is worth stating because
+    # review round 6 asked (the worker runs the INSERT of the new columns and
+    # deploys in parallel with no cross-service ordering). Render runs the hook
+    # per service, so putting it on both means two concurrent
+    # `alembic upgrade head` calls, and alembic takes no lock by default - the
+    # collision is a worse failure than the one being prevented. The two
+    # services also have different failure modes: an un-migrated API 500s at
+    # view-time and a signing landing in that window is lost permanently, while
+    # an un-migrated worker raises a RETRYABLE Inngest error that self-heals the
+    # moment the API's hook lands. The asymmetry is the point, not an oversight.
+    # If the worker ever needs ordering of its own, the answer is a release
+    # phase both services wait on, not a second racing hook.
+    preDeployCommand: uv run alembic upgrade head
     startCommand: uv run uvicorn bullet_api.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /healthz
     envVars:

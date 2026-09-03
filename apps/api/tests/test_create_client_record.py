@@ -32,6 +32,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.pandadoc.client import FakePandaDocClient, PandaDocNotFound
@@ -54,6 +55,7 @@ def _detail_body(
     business_name: str = "Sample Gym Ltd",
     legal_entity: str = "Sample Gym Ltd",
     hubspot_contact_id: str = "hs-contact-1234",
+    postal_code: str = "M1 1AA",
 ) -> dict:
     """Build a PandaDoc document detail body matching Bullet's UK template shape.
 
@@ -72,7 +74,7 @@ def _detail_body(
             {"name": "Company.Name", "value": business_name},
             {"name": "Company.Address", "value": "123 High Street"},
             {"name": "Company.State", "value": "Greater Manchester"},
-            {"name": "Company.Zip", "value": "M1 1AA"},
+            {"name": "Company.Zip", "value": postal_code},
             {"name": "Company.Country", "value": "United Kingdom"},
             {"name": "Deal.Currency", "value": "GBP"},
             {"name": "Deal.MonthlyServiceFee", "value": "2500"},
@@ -152,7 +154,8 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
     client_row = await async_session.execute(
         text(
             "SELECT id, email, business_name, legal_entity, contact_first_name, "
-            "  contact_last_name, phone, hubspot_contact_id, current_step::text AS step "
+            "  contact_last_name, phone, hubspot_contact_id, postal_code, address, "
+            "  identity_key, current_step::text AS step "
             "FROM clients WHERE pandadoc_document_id = :doc"
         ),
         {"doc": document_id},
@@ -167,6 +170,14 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
     assert row.phone == "+447000000000"
     assert row.hubspot_contact_id == "hs-contact-1234"
     assert row.step == "signed"
+    # S1-26c: postcode is now persisted, and identity_key is computed from
+    # first6(normalize("Sample Gym Ltd")) + "|" + normalize("M1 1AA").
+    # "Sample Gym Ltd" -> drop "ltd" -> "samplegym" -> first6 "sample".
+    assert row.postal_code == "M1 1AA"
+    assert row.identity_key == "sample|M11AA"
+    # Persisted for audit + for whoever resolves a duplicate flag. Nothing
+    # asserted this before, so dropping `address` from the INSERT stayed green.
+    assert row.address == "123 High Street"
 
     # The onboarding_events row is backfilled with client_id + processed_at.
     event_row = await async_session.execute(
@@ -187,6 +198,9 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
     assert data["email"] == "signer@example.com"
     # account defaults to uk when not supplied (back-compat for pre-S1-25c events).
     assert data["account"] == "uk"
+    # S1-26c: dedup_key = identity_key (present here) drives the GHL worker's
+    # per-identity concurrency guard.
+    assert data["dedup_key"] == "sample|M11AA"
 
 
 @pytest.mark.db
@@ -572,3 +586,263 @@ def test_create_client_record_declares_per_document_concurrency_cap() -> None:
     assert cap.limit == 1
     assert cap.key == "event.data.document_id"
     assert cap.scope == "fn"
+
+
+# --------------------------------------------------------------------------- #
+# S1-26c review fixes: identity-key persistence + the dedup_key fallback chain
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.db
+async def test_replay_backfills_a_null_identity_key(async_session: AsyncSession) -> None:
+    """A replay fills `identity_key`/`postal_code` on a row that has NULL for them.
+
+    The ON CONFLICT SET used to be a pure no-op, so these two columns were only
+    ever written on the FIRST insert. A row that predates migration 0013 - or
+    one whose first extraction could not compute a key - would keep a NULL key
+    forever while the re-emitted event carried a real `dedup_key`, silently
+    disabling the returning-client match for that client. The seeded row below
+    reproduces exactly that state.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    await async_session.execute(
+        text(
+            "INSERT INTO clients (email, business_name, legal_entity, "
+            "  pandadoc_document_id, postal_code, identity_key, current_step, step_entered_at) "
+            "VALUES ('signer@example.com', 'Sample Gym Ltd', 'Sample Gym Ltd', :doc, "
+            "  NULL, NULL, 'signed', now())"
+        ),
+        {"doc": document_id},
+    )
+    emitter = FakeEventEmitter()
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id),
+        emitter=emitter,
+    )
+
+    row = await async_session.execute(
+        text("SELECT postal_code, identity_key FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    postal_code, identity_key = row.one()
+    assert postal_code == "M1 1AA"
+    assert identity_key == "sample|M11AA"
+    # And the emitted concurrency key names the SAME key the GHL worker will
+    # match on - not the pre-conflict computed value.
+    _, data = emitter.sent[0]
+    assert data["dedup_key"] == "sample|M11AA"
+
+
+@pytest.mark.db
+async def test_replay_does_not_overwrite_an_existing_identity_key(
+    async_session: AsyncSession,
+) -> None:
+    """COALESCE, not a blind overwrite: a value corrected by hand survives a replay."""
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    await async_session.execute(
+        text(
+            "INSERT INTO clients (email, business_name, legal_entity, "
+            "  pandadoc_document_id, postal_code, identity_key, current_step, step_entered_at) "
+            "VALUES ('signer@example.com', 'Sample Gym Ltd', 'Sample Gym Ltd', :doc, "
+            "  'CORRECTED', 'humanfix|CORRECTED', 'signed', now())"
+        ),
+        {"doc": document_id},
+    )
+
+    emitter = FakeEventEmitter()
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id),
+        emitter=emitter,
+    )
+
+    row = await async_session.execute(
+        text("SELECT postal_code, identity_key FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    assert row.one() == ("CORRECTED", "humanfix|CORRECTED")
+    # The emitted key must be the SURVIVING one, not the freshly-computed one -
+    # otherwise the concurrency bucket names a key the sibling query will never
+    # match. Discarding the emitter here left that line unpinned: reverting it
+    # kept the suite green.
+    _, data = emitter.sent[0]
+    assert data["dedup_key"] == "humanfix|CORRECTED"
+
+
+@pytest.mark.db
+async def test_dedup_key_falls_back_to_email_when_key_is_null(
+    async_session: AsyncSession,
+) -> None:
+    """No usable postcode -> NULL identity_key -> the concurrency key is the
+    EMAIL, not the per-row client_id.
+
+    A NULL-key client still has a DB-side dedup path (the GHL worker's email
+    sibling query), so two such signings must serialise with each other.
+    Keying straight to the unique client_id would give each its own bucket and
+    reopen the concurrent double-create the old `event.data.email` key closed.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    emitter = FakeEventEmitter()
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id, postal_code="N/A", client_email="Mixed@Example.com"),
+        emitter=emitter,
+    )
+
+    row = await async_session.execute(
+        text("SELECT identity_key FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    assert row.scalar_one() is None
+
+    _, data = emitter.sent[0]
+    # Lowercased, so two signings whose emails differ only in case land in the
+    # SAME bucket - the residual the raw-string email key used to leave open.
+    assert data["dedup_key"] == "email:mixed@example.com"
+
+    # THE PRODUCER AND THE CONSUMER MUST AGREE (review round 5). The consumer's
+    # CEL fallback is `"email:" + event.data.email`, so if this payload carried
+    # the RAW address the two would compute different buckets for one client
+    # and `Concurrency(limit=1)` would serialise nothing between a legacy event
+    # and a fresh one. Asserting the identity directly, rather than each side
+    # separately, is what makes a future divergence fail here.
+    assert data["email"] == "mixed@example.com"
+    assert f"email:{data['email']}" == data["dedup_key"]
+
+
+@pytest.mark.db
+async def test_identity_key_uses_legal_entity_when_no_business_name(
+    async_session: AsyncSession,
+) -> None:
+    """A document carrying only the signed legal-trading-name still gets a key.
+
+    Keying on `business_name` alone meant such a document silently opted out of
+    returning-client matching entirely - it could never match anyone, and no
+    later signing could match it.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    document = _detail_body(document_id, legal_entity="Legal Only Gym")
+    document["tokens"] = [t for t in document["tokens"] if t["name"] != "Company.Name"]
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+    )
+
+    row = await async_session.execute(
+        text(
+            "SELECT business_name, legal_entity, identity_key "
+            "FROM clients WHERE pandadoc_document_id = :doc"
+        ),
+        {"doc": document_id},
+    )
+    business_name, legal_entity, identity_key = row.one()
+    assert business_name is None
+    assert legal_entity == "Legal Only Gym"
+    assert identity_key == "legalo|M11AA"
+
+
+@pytest.mark.db
+async def test_placeholder_legal_entity_yields_no_identity_key(
+    async_session: AsyncSession,
+) -> None:
+    """The "unknown" placeholder is a marker, not a name: keying on it would
+    unite every unidentifiable signing under one identity."""
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    document = _detail_body(document_id)
+    document["tokens"] = [t for t in document["tokens"] if t["name"] != "Company.Name"]
+    document["fields"] = []
+
+    await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+    )
+
+    row = await async_session.execute(
+        text("SELECT legal_entity, identity_key FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    legal_entity, identity_key = row.one()
+    assert legal_entity == LEGAL_ENTITY_PLACEHOLDER
+    assert identity_key is None
+
+
+# --------------------------------------------------------------------------- #
+# Round 12, P2: the schema-drift "MUST stay retriable" contract, now pinned
+# --------------------------------------------------------------------------- #
+
+
+async def test_schema_drift_stays_retriable_and_logs_no_bind_params(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ProgrammingError from the core must PROPAGATE (retriable), never be
+    translated to NonRetriableError - dead-lettering schema drift loses the
+    signing permanently (no platform_actions row exists yet, and the reconcile
+    cron's ON CONFLICT sees the onboarding_events row as already handled). The
+    contract lived only in a comment until round 12 found that routing it to
+    NonRetriableError left the whole suite green.
+
+    Same test, second property (round 12, P2): the drift log line must not
+    carry the INSERT's bind parameters - `str(exc)` on a StatementError appends
+    `[parameters: {...}]`, the full client PII set.
+    """
+    import contextlib
+    from unittest.mock import Mock
+
+    from bullet_api.worker import client_record as module
+
+    async def _fake_fetch(pandadoc_client: object, document_id: str) -> dict:  # noqa: ARG001
+        return {"id": document_id}
+
+    @contextlib.asynccontextmanager
+    async def _fake_session_cm():
+        yield Mock()
+
+    drift = ProgrammingError(
+        "INSERT INTO clients (...)",
+        {"email": "leaked-bind-param@example.com"},
+        Exception('column "identity_key" of relation "clients" does not exist'),
+    )
+
+    async def _raising_core(*args: object, **kwargs: object) -> object:
+        raise drift
+
+    monkeypatch.setattr(module, "fetch_document_for_orchestrator", _fake_fetch)
+    monkeypatch.setattr(module, "AsyncSessionLocal", _fake_session_cm)
+    monkeypatch.setattr(module, "create_client_record_core", _raising_core)
+
+    ctx = Mock()
+    ctx.event.data = {
+        "onboarding_event_id": "00000000-0000-0000-0000-000000000001",
+        "document_id": "doc-drift",
+    }
+
+    handler = module.create_client_record._handler  # type: ignore[attr-defined]
+    with caplog.at_level("ERROR"):
+        with pytest.raises(ProgrammingError):
+            await handler(ctx)
+
+    drift_lines = [r for r in caplog.records if "schema drift" in r.getMessage()]
+    assert drift_lines, "the drift branch must log loudly"
+    for record in caplog.records:
+        assert "leaked-bind-param@example.com" not in str(record.__dict__)

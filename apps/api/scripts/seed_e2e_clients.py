@@ -30,7 +30,18 @@ E2E_CLIENTS: list[tuple[str, str, str, str]] = [
     ("e2e-alpha", "E2E Alpha Gym", "alpha@e2e.example", "sales_call"),
     ("e2e-bravo", "E2E Bravo Fitness", "bravo@e2e.example", "signed"),
     ("e2e-charlie", "E2E Charlie Studio", "charlie@e2e.example", "live"),
+    # S1-26c dashboard fixtures (review round 7: the badge, the duplicate
+    # notice and the parent-client link had no test of any kind). Delta is
+    # FLAGGED possible_duplicate pointing at Alpha + a suspected GHL location;
+    # Echo is LINKED to Alpha via parent_client_id.
+    ("e2e-delta", "E2E Delta Gym", "delta@e2e.example", "signed"),
+    ("e2e-echo", "E2E Echo Gym", "echo@e2e.example", "signed"),
 ]
+
+FLAGGED_CLIENT_DOC_ID = "e2e-delta"
+LINKED_CLIENT_DOC_ID = "e2e-echo"
+FLAG_TARGET_DOC_ID = "e2e-alpha"
+E2E_SUSPECT_GHL_ID = "e2e-suspect-loc-1"
 
 # Charlie carries a dead_lettered last action so the clients-list spec (S1-31)
 # can assert the format.ts status->badge mapping (dead_lettered -> danger) live
@@ -139,9 +150,33 @@ async def seed_detail_fixtures(session: AsyncSession, client_id: uuid.UUID) -> N
     )
 
 
+async def seed_duplicate_and_parent_fixtures(
+    session: AsyncSession, ids: dict[str, uuid.UUID]
+) -> None:
+    """Flag Delta against Alpha (+ a suspected GHL location); link Echo to
+    Alpha. Idempotent: plain UPDATEs re-assert the same state every run."""
+    await session.execute(
+        text(
+            "UPDATE clients SET possible_duplicate = true, "
+            "  possible_duplicate_of = :target, possible_duplicate_ghl_id = :ghl "
+            "WHERE id = :cid"
+        ),
+        {
+            "cid": ids[FLAGGED_CLIENT_DOC_ID],
+            "target": ids[FLAG_TARGET_DOC_ID],
+            "ghl": E2E_SUSPECT_GHL_ID,
+        },
+    )
+    await session.execute(
+        text("UPDATE clients SET parent_client_id = :parent WHERE id = :cid"),
+        {"cid": ids[LINKED_CLIENT_DOC_ID], "parent": ids[FLAG_TARGET_DOC_ID]},
+    )
+
+
 async def seed_e2e_clients() -> int:
     try:
         async with AsyncSessionLocal() as session:
+            ids: dict[str, uuid.UUID] = {}
             for doc_id, business_name, email, step in E2E_CLIENTS:
                 client_id = await upsert_client(
                     session,
@@ -150,10 +185,12 @@ async def seed_e2e_clients() -> int:
                     email=email,
                     current_step=step,
                 )
+                ids[doc_id] = client_id
                 if doc_id == DEAD_LETTER_CLIENT_DOC_ID:
                     await seed_dead_lettered_action(session, client_id)
                 if doc_id == SUMMARY_CLIENT_DOC_ID:
                     await seed_detail_fixtures(session, client_id)
+            await seed_duplicate_and_parent_fixtures(session, ids)
             await session.commit()
     finally:
         await engine.dispose()

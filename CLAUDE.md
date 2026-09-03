@@ -107,7 +107,11 @@ Every ticket follows the same documentation touchpoints. Skipping any of these b
 ### When CODE-COMPLETE (ready for review)
 
 8. **Local verification before push.** Run the full local equivalents of CI: `uv run pytest apps/api -q`, `uv run ruff check apps/api`, `uv run ruff format --check apps/api`, `make typecheck`. The first three are the must-pass gates; `make lint` overall is currently red on a pre-existing dashboard issue (see CHANGELOG entry on 02/06/2026 for context) so check the Python half only.
-9. **Run the `/pre-pr-review` hardening gate — REQUIRED, do not skip.** This is a deep, adversarial self-review of the diff (see `.claude/skills/pre-pr-review/SKILL.md`). It applies the project's hardening lenses: shared/reused seams judged against ALL callers + concurrent use (not just the first caller or its protective cap), failure paths INCLUDING transport-level errors (timeouts/resets, not only typed errors), idempotency / replay / at-least-once windows, and a success-AND-failure-AND-replay test matrix. **Every finding is FIXED (or consciously deferred with a logged reason + owning ticket) and the full suite re-run green before proceeding.** The bar: a diff that has already been stress-tested for the failure and concurrency cases, not just the happy path.
+
+   **Docker must be UP for this to mean anything.** Without Postgres the DB-marked tests SKIP and the run still reports green - that is exactly how two review rounds shipped (~223 tests silently became skips). Confirm `docker info` succeeds and the run reports **0 skipped** before treating a green suite as verification.
+
+8a. **Run `make review-gate` - REQUIRED, must be clean.** See "The review gate" section below. With Postgres up also run `make review-gate-db`, which mutation-tests the db-marked guards. `UNPROVEN` is not a pass.
+9. **Run the `/pre-pr-review` hardening gate - REQUIRED, do not skip.** (Complementary to step 8a, not replaced by it: the gate catches the mechanical classes, this catches the ones needing judgement.) This is a deep, adversarial self-review of the diff (see `.claude/skills/pre-pr-review/SKILL.md`). It applies the project's hardening lenses: shared/reused seams judged against ALL callers + concurrent use (not just the first caller or its protective cap), failure paths INCLUDING transport-level errors (timeouts/resets, not only typed errors), idempotency / replay / at-least-once windows, and a success-AND-failure-AND-replay test matrix. **Every finding is FIXED (or consciously deferred with a logged reason + owning ticket) and the full suite re-run green before proceeding.** The bar: a diff that has already been stress-tested for the failure and concurrency cases, not just the happy path.
 10. **Append the per-ticket entry to `docs/CHANGELOG.md`** under `[Unreleased]` with date heading `### DD/MM/YYYY - <ticket>: <short title>`. Bullets tagged Added / Changed / Removed / Decision / Discovery / Fixed / Verified, matching the format every prior ticket uses (read the latest 2-3 entries before writing to keep the voice consistent).
 11. **Push the branch** as `feat/<ticket-id>-<slug>` (or `fix/...`, `docs/...`, etc.). Open a PR against `main` using the project's PR template (Summary / StrikeFlow card / Test plan / Checklist sections).
 12. **Move the Flow card to "To Review"** via `mcp__flow__cards_move`.
@@ -130,6 +134,32 @@ Every ticket follows the same documentation touchpoints. Skipping any of these b
 - **Never ask permission to update the changelog, the Flow card, or `project_active_state.md`.** Logging is unconditional and automatic; these three sources of truth must reflect reality at all times.
 - **The active-state file is the index; CHANGELOG is the prose; Flow is the human-visible status.** When the three disagree, the active-state file is the most likely to be wrong (it can drift if a step is skipped) — fix it first, then update whichever others lag.
 - **External-system writes are reversible-low-blast-radius.** Flow card moves, card comments, changelog appends, and memory-file overwrites do not require explicit user confirmation; they are part of the operating contract.
+
+## The review gate (`make review-gate`)
+
+Five consecutive review rounds on S1-26b/c returned the same shape of finding: **the fix was right, and the test proving it was missing or could not fail.** Round 5 stated it as a procedure - *"Delete all three guards and 609 tests still pass."* The gate mechanizes the reviewer's own catch techniques so a finding of that class fails locally instead of in a review round.
+
+Added 25/08/2026. `apps/api/scripts/review_gate.py` (static) + `apps/api/scripts/review_gate_mutate.py` (mutation). **`make review-gate` runs BOTH halves, and the mutation half includes the db-marked guards by default, so Postgres must be up.** Without it those tests skip, a skipped test cannot fail, so it cannot prove a guard - the runner reports `UNPROVEN` and FAILS the build. On a laptop with no Postgres, `make review-gate MUTATE_ARGS=--allow-unproven` exits 0, knowing those guards are then unverified.
+
+**The four static checks** (fast, no DB needed):
+
+- **G1 comment-literal coverage** - a comment naming example data (`"1234567890"`, `"AB12 3CDE"`) must have that literal in a test. Our own fix comments tell a reviewer exactly what string to grep for; this greps first.
+- **G4 no conditional assertions** - an `assert` behind an `if` that reads the system under test passes silently in the exact case it exists to catch.
+- **G5 no defaults on discriminating fixture params** - a fixture defaulting `phone`/`contact_*`/`address` makes every seeded row agree for free, pinning a matching bar open so mutating it to a constant passes the whole suite.
+- **G6 diff-scoped PII** - live ids / client emails counted against the merge base, net-new only.
+
+**The mutation manifest** (`make review-gate-db` runs it alone; needs Postgres): `apps/api/tests/mutation_manifest.toml`. **Every guard you add must declare the test that kills it.** The runner breaks the guard, runs only that test, and asserts it FAILS. Outcomes: `KILLED` (defended), `SURVIVED` (revert-green - a finding), `UNPROVEN` (the named test skipped, so it cannot prove anything - **not** a pass, and it fails the build), `ERROR` (the `find` pattern went stale, or `must_fail` names a test that no longer exists - both mean the guard is unprotected while looking guarded).
+
+**The contract: a new guard without a manifest entry is not finished.** Adding an entry is a two-line diff. Skipping one has cost a review round every time.
+
+**What it cannot check**, and therefore goes in the PR body as answered questions:
+
+- **Invariant statement** for any normalizer change: what must hold regardless of input form, and which axes you checked (order, separator, case, extra tokens). Round 4 fixed the order axis and broke the separator axis - the same class of bug it was fixing.
+- **Source trace** for any new decision signal: which template populates it, and does it hold on **both** PandaDoc accounts (UK and INT)?
+- **Sequence walk** per handler: lost response, retry, concurrent signing. Bugs live in histories, not states.
+- **Docstring claim audit**: every "never / cannot / guarantees / prevents" needs a test named after it, or the claim gets softened. Treat every docstring as falsifiable - the reviewer does.
+
+The gate is **additive to `/pre-pr-review`, not a replacement**. It catches the mechanical classes; the skill catches the ones needing judgement. Both run.
 
 ## Changelog Discipline
 

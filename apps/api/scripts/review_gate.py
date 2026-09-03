@@ -1,0 +1,660 @@
+"""Run the reviewer's own techniques against our diff, before they do.
+
+Five rounds of review on S1-26b/c produced the same shape of finding every
+time: the fix was right, the test proving it was missing or could not fail.
+The reviewer catches these with a small set of repeatable moves. This script
+mechanizes the ones that are mechanizable, so a finding of that class fails
+here rather than in a review round.
+
+    G1  comment-literal coverage   - a fix comment naming example data must
+                                     have that data in a test
+    G4  no conditional assertions  - an `assert` behind an `if` reading the
+                                     system under test passes silently
+    G5  no defaults on identity    - fixture defaults that pin a discriminating
+        fixture params               signal in one direction
+    G6  diff-scoped PII            - live ids / client emails net-new vs the
+                                     merge base
+
+G2 (mutation manifest) lives in `review_gate_mutate.py` because it has to run
+pytest repeatedly. G3/G7-G10 are reasoning checks and ride in the PR body.
+
+Exit code 0 = clean, 1 = findings. `--json` for machine-readable output.
+
+NOT a substitute for `/pre-pr-review`. This catches the mechanical classes;
+that catches the ones needing judgement.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import re
+import subprocess
+import sys
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+API_ROOT = REPO_ROOT / "apps" / "api"
+TESTS_ROOT = API_ROOT / "tests"
+ALLOWLIST_PATH = Path(__file__).parent / "review_gate_allowlist.json"
+
+
+@dataclass
+class Finding:
+    check: str
+    location: str
+    message: str
+
+    def render(self) -> str:
+        return f"  {self.location}\n      {self.message}"
+
+
+@dataclass
+class GateResult:
+    findings: list[Finding] = field(default_factory=list)
+
+    def add(self, check: str, location: str, message: str) -> None:
+        self.findings.append(Finding(check, location, message))
+
+
+def _git(*args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=False
+    ).stdout
+
+
+def _merge_base(base: str) -> str:
+    """Resolve `base` to a commit, or exit.
+
+    Never falls back to the unvalidated ref string. It used to, and an
+    unresolvable base then produced an EMPTY diff, so G1 reported `clean` over
+    the entire change - silently, and exactly where it matters: a shallow CI
+    checkout (`actions/checkout` defaults to `fetch-depth: 1`, so `main` is
+    absent), a fork whose default branch is `master`, or `BASE=origin/main`
+    with no prior fetch.
+    """
+    probe = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{base}^{{commit}}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        sys.exit(
+            f"review gate: base ref {base!r} does not resolve to a commit "
+            f"({probe.stderr.strip()}).\nIn CI, checkout with fetch-depth: 0. "
+            f"Refusing to report a vacuous pass against an empty diff."
+        )
+    resolved = _git("merge-base", base, "HEAD").strip()
+    if not resolved:
+        sys.exit(
+            f"review gate: no merge base between {base!r} and HEAD - unrelated "
+            f"histories or a shallow clone. Refusing to report a vacuous pass."
+        )
+    return resolved
+
+
+def _load_allowlist() -> dict[str, list[str]]:
+    if not ALLOWLIST_PATH.exists():
+        return {}
+    return json.loads(ALLOWLIST_PATH.read_text())
+
+
+# ---------------------------------------------------------------------------
+# G1 - comment-literal coverage
+#
+# The reviewer's cheapest move: our own fix comments name the exact string to
+# grep for. `_is_sequential_digits`'s comment names "1234567890"; the suite
+# contains zero occurrences of it. The comment hands them the query.
+# ---------------------------------------------------------------------------
+
+_QUOTED = re.compile(r'"([^"\n]{2,60})"|\'([^\'\n]{2,60})\'')
+
+# A literal worth checking looks like EXAMPLE DATA, not a code reference.
+# Either it carries a digit ("E81AAX", "+44 7700 900123") or it is a
+# capitalised phrase ("Café Gym"). Identifiers, dotted paths and event names
+# are excluded by construction - they have no space and no leading capital.
+_IDENTIFIER_ISH = re.compile(r"^[a-z_][a-z0-9_]*$|^[a-z_.]+$|^[A-Z_]+$")
+
+
+def _looks_like_example_data(literal: str) -> bool:
+    if _IDENTIFIER_ISH.match(literal):
+        return False
+    if "." in literal and " " not in literal:  # dotted paths: event names, attrs
+        return False
+    if "_" in literal and " " not in literal:  # snake_case identifiers
+        return False
+    # A literal truncated by a docstring boundary keeps its trailing space and
+    # runs to prose length. Real example data is short and self-contained.
+    if literal != literal.strip() or literal.count(" ") > 3:
+        return False
+    words = literal.split()
+    if not words:
+        return False
+    has_digit = any(ch.isdigit() for ch in literal)
+    # "Café Gym" / "Brand Gym Hackney" are data; "I cannot tell" is prose. Data
+    # reads as a proper noun - every word capitalised or numeric.
+    proper_noun_phrase = len(words) > 1 and all(
+        word[:1].isupper() or word[:1].isdigit() for word in words
+    )
+    return has_digit or proper_noun_phrase
+
+
+def _is_comment_or_prose(text: str) -> bool:
+    """A comment, or docstring prose - a line with no code punctuation that
+    sits inside a triple-quoted block, approximated by "no assignment, no call,
+    starts with a word or quote"."""
+    stripped = text.strip()
+    if stripped.startswith("#"):
+        return True
+    if not stripped or not re.match(r"^[A-Za-z`\"']", stripped):
+        return False
+    return not re.search(r"[=(){}\[\]]|^(def|class|import|from|return|if|for)\b", stripped)
+
+
+def _strip_docstring_delimiters(text: str) -> str:
+    """Else `\"\"\"Text ... or \"` reads as one literal spanning the whole line."""
+    return text.replace('"""', "").replace("'''", "")
+
+
+def _added_comment_lines(base: str) -> list[tuple[str, int, str]]:
+    """(file, approximate line, text) for added comment/docstring-prose lines.
+
+    Diffs the WORKING TREE against the merge base, not `base...HEAD`. The gate's
+    whole purpose is to run before a commit, so scanning only committed history
+    would report findings the author has already fixed and miss the ones they
+    just introduced.
+    """
+    diff = _git("diff", base, "--unified=0", "--", "apps/api/src")
+    out: list[tuple[str, int, str]] = []
+
+    # UNTRACKED files are not in `git diff` at all, so a brand-new module's fix
+    # comments were never scanned - and "brand new, not yet added" is precisely
+    # the pre-commit state this gate exists to cover. Every line of one counts
+    # as added.
+    untracked = _git(
+        "ls-files", "--others", "--exclude-standard", "--", "apps/api/src"
+    ).splitlines()
+    for name in untracked:
+        path = REPO_ROOT / name
+        if not path.is_file() or path.suffix != ".py":
+            continue
+        for index, text in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+            if _is_comment_or_prose(text):
+                out.append((name, index, _strip_docstring_delimiters(text)))
+
+    current_file = ""
+    line_no = 0
+    for raw in diff.splitlines():
+        if raw.startswith("+++ b/"):
+            current_file = raw[6:]
+            continue
+        if raw.startswith("@@"):
+            m = re.search(r"\+(\d+)", raw)
+            line_no = int(m.group(1)) if m else 0
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            text = raw[1:]
+            if _is_comment_or_prose(text):
+                out.append((current_file, line_no, _strip_docstring_delimiters(text)))
+            line_no += 1
+    return out
+
+
+def _test_corpus() -> str:
+    """String constants from inside test FUNCTION BODIES, quoted for matching.
+
+    AST-scoped (review round 8, asked twice): the corpus used to be every test
+    file concatenated raw, so a literal quoted in a test's DOCSTRING counted as
+    coverage - deleting the real assertion under it kept G1 clean. Now only
+    string constants that sit inside a `test_*` function body (docstrings
+    excluded) count, re-quoted so `_literal_is_covered`'s exact-quote rule
+    keeps rejecting prefix matches.
+    """
+    parts: list[str] = []
+    for path in TESTS_ROOT.rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if not node.name.startswith("test_"):
+                continue
+            body = node.body
+            # Skip the docstring expression - quoting a literal in prose is
+            # not testing it.
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                body = body[1:]
+            # Decorators count: parametrize values ARE the test's inputs.
+            for stmt in [*body, *node.decorator_list]:
+                for inner in ast.walk(stmt):
+                    if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                        parts.append(f'"{inner.value}"')
+    return "\n".join(parts)
+
+
+def _literal_is_covered(literal: str, corpus: str) -> bool:
+    """The literal must appear as an exact QUOTED string, not a substring.
+
+    Review round 7: a plain `in` let "1 Mare St" report covered because
+    "1 Mare Street" appears in a test - the abbreviated form was never tested
+    at all. Requiring the closing quote makes prefix-of-a-longer-literal
+    misses visible. Pure and extracted so `test_review_gate.py` exercises THIS
+    code rather than a re-implementation of the rule (the oracle lesson).
+    """
+    return f'"{literal}"' in corpus or f"'{literal}'" in corpus
+
+
+def check_g1_comment_literals(result: GateResult, base: str, allowlist: list[str]) -> None:
+    corpus = _test_corpus()
+    seen: set[str] = set()
+    for file, line, text in _added_comment_lines(base):
+        for match in _QUOTED.finditer(text):
+            literal = match.group(1) or match.group(2)
+            if not literal or literal in seen or literal in allowlist:
+                continue
+            if not _looks_like_example_data(literal):
+                continue
+            seen.add(literal)
+            if not _literal_is_covered(literal, corpus):
+                result.add(
+                    "G1",
+                    f"{file}:{line}",
+                    f'comment names example data "{literal}" but no test contains it '
+                    f"as an exact quoted literal - the guard it documents is "
+                    f"revert-green",
+                )
+
+
+# ---------------------------------------------------------------------------
+# G4 - assertions must not hide behind a condition read from the system
+# ---------------------------------------------------------------------------
+
+
+class _ConditionalAssertVisitor(ast.NodeVisitor):
+    def __init__(self, path: Path, result: GateResult) -> None:
+        self.path = path
+        self.result = result
+
+    def visit_If(self, node: ast.If) -> None:
+        # ONE-SIDED asserts only (review round 7): an assert in the body with
+        # none in the else (or vice versa) can be skipped silently; asserts on
+        # BOTH branches always run one of them, which is the legitimate
+        # branch-per-expectation pattern, not a hole.
+        body_asserts = self._contains_assert(node.body)
+        else_asserts = self._contains_assert(node.orelse)
+        if (body_asserts != else_asserts) and self._condition_reads_system(node.test):
+            try:
+                rel = str(self.path.relative_to(REPO_ROOT))
+            except ValueError:
+                # Outside the repo (the synthetic self-test trees) - same
+                # fallback `_scan_seed_defaults` already carries.
+                rel = str(self.path)
+            self.result.add(
+                "G4",
+                f"{rel}:{node.lineno}",
+                "assertions are gated behind a condition read from the system under "
+                "test - this passes silently in exactly the case it exists to catch",
+            )
+        self.generic_visit(node)
+
+    @staticmethod
+    def _contains_assert(body: list[ast.stmt]) -> bool:
+        # The WHOLE subtree, not just top-level statements (review round 7):
+        # `if hits: for h in hits: assert ...` is the commonest real shape in
+        # this suite, and the old top-level scan missed the assert one indent
+        # down - along with `with`-wrapped and `else:`-branch asserts.
+        return any(isinstance(inner, ast.Assert) for stmt in body for inner in ast.walk(stmt))
+
+    @staticmethod
+    def _condition_reads_system(test: ast.expr) -> bool:
+        """True when the condition derives a value rather than reading a plain
+        parametrized flag. `if flagged.scalar_one():`, `if rows[0]:` and
+        `if row.linked_client_id:` all qualify (review round 7 added the
+        subscript and attribute forms - `if rows[0]:` was invisible);
+        `if expect_link:` does not."""
+        return any(isinstance(n, ast.Call | ast.Subscript | ast.Attribute) for n in ast.walk(test))
+
+
+def check_g4_conditional_assertions(result: GateResult) -> None:
+    for path in TESTS_ROOT.rglob("test_*.py"):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        _ConditionalAssertVisitor(path, result).visit(tree)
+
+
+# ---------------------------------------------------------------------------
+# G5 - fixture helpers must not default a discriminating signal
+#
+# `_seed_client(contact_first_name="Sample", contact_last_name="Signer")` makes
+# every seeded row agree on the signal, so a bar that reads it is pinned in one
+# direction and mutating it to a constant passes the whole suite.
+# ---------------------------------------------------------------------------
+
+# Only the CORROBORATING signals - the fields a matching bar reads to decide
+# link-vs-flag. A shared `business_name`/`postal_code`/`email` default is
+# usually the deliberate setup for a sibling test (it is how two rows come to
+# share an identity key at all), but a shared PHONE or CONTACT NAME silently
+# satisfies a bar the test never mentions, so the bar is pinned open and
+# mutating it to a constant passes the whole suite.
+_DISCRIMINATING_PARAMS = {
+    "phone",
+    "contact_first_name",
+    "contact_last_name",
+    "address",
+}
+
+
+def _scan_seed_defaults(tree: ast.AST, path: Path, result: GateResult) -> None:
+    """Per-tree G5 scan, extracted pure so the self-tests can feed synthetic
+    ASTs (review round 8: every detector outside the three self-tested helpers
+    could be neutered wholesale with the whole self-test file green)."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+            continue
+        if not node.name.startswith("_seed"):
+            continue
+        kwonly = node.args.kwonlyargs
+        defaults = node.args.kw_defaults
+        for arg, default in zip(kwonly, defaults, strict=False):
+            if arg.arg not in _DISCRIMINATING_PARAMS or default is None:
+                continue
+            if isinstance(default, ast.Constant) and default.value is None:
+                continue  # None default is "absent", not a pinned value
+            try:
+                rel = str(path.relative_to(REPO_ROOT))
+            except ValueError:
+                rel = str(path)
+            result.add(
+                "G5",
+                f"{rel}:{node.lineno}",
+                f"`{node.name}` defaults the discriminating signal "
+                f"`{arg.arg}` - every seeded row agrees on it, so a bar "
+                f"reading it is pinned in one direction",
+            )
+
+
+def check_g5_fixture_defaults(result: GateResult) -> None:
+    for path in TESTS_ROOT.rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        _scan_seed_defaults(tree, path, result)
+
+
+# ---------------------------------------------------------------------------
+# G6 - diff-scoped PII: net-new live identifiers vs the merge base
+# ---------------------------------------------------------------------------
+
+# A GHL location id is 20-22 chars of mixed case WITH digits and irregular
+# casing (shaped like `aB3cD4eF5gH6iJ7kL8mN`). Requiring a digit and rejecting CamelCase
+# keeps Python class names (`ExtractedClientFields`) out of the results.
+_CAMEL_CASE = re.compile(r"^(?:[A-Z][a-z0-9]+){2,}$")
+_GHL_ID_SHAPE = re.compile(
+    r"\b(?=[A-Za-z0-9]{20,22}\b)(?=[^\s]*[a-z])(?=[^\s]*[A-Z])(?=[^\s]*[0-9])[A-Za-z0-9]{20,22}\b"
+)
+
+_PII_PATTERNS = {
+    "client-domain email": re.compile(r"[\w.+-]+@(?:bulletdigitalmedia)\.com"),
+    # GCP service accounts are live identifiers too (round 8: one landed in a
+    # net-new CHANGELOG entry on a public repo and no pattern matched it).
+    "GCP service account": re.compile(r"[\w.-]+@[\w-]+\.iam\.gserviceaccount\.com"),
+    "Render id": re.compile(r"\b(?:srv|dep|evg|crn)-[a-z0-9]{15,}\b"),
+    "GHL location id": _GHL_ID_SHAPE,
+}
+
+# WIDENED in review round 7: the old scope (apps/api/*.py + docs/*.md) left
+# `render.yaml`, `ci.yml`, the dashboard TS and every JSON fixture outside the
+# PII gate on a public repo - and a captured GHL response landing in a JSON
+# fixture is the single most likely leak vector.
+_PII_SCAN_ROOTS = ("apps/", "docs/", "packages/", ".github/", "render.yaml")
+_PII_SCAN_SUFFIXES = (".py", ".md", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml")
+_PII_SCAN_EXCLUDE = ("node_modules/", ".venv/", ".next/", "dist/", "generated/", "-lock.")
+
+
+def _pii_scan_candidate(name: str) -> bool:
+    if not name.startswith(_PII_SCAN_ROOTS):
+        return False
+    if not name.endswith(_PII_SCAN_SUFFIXES):
+        return False
+    return not any(part in name for part in _PII_SCAN_EXCLUDE)
+
+
+def _occurrences_at(ref: str | None, pattern: re.Pattern[str]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    if ref is None:
+        tracked = _git("ls-files", "--cached", "--others", "--exclude-standard").splitlines()
+        for name in tracked:
+            if not _pii_scan_candidate(name):
+                continue
+            path = REPO_ROOT / name
+            if path.is_file():
+                counts.update(pattern.findall(path.read_text(errors="replace")))
+        return counts
+    files = _git("ls-tree", "-r", "--name-only", ref).splitlines()
+    for name in files:
+        if not _pii_scan_candidate(name):
+            continue
+        counts.update(pattern.findall(_git("show", f"{ref}:{name}")))
+    return counts
+
+
+def _net_new_pii(
+    label: str,
+    before: Counter[str],
+    after: Counter[str],
+    allowlist: list[str],
+    result: GateResult,
+) -> None:
+    """Pure net-new comparison, extracted for the round-8 self-tests."""
+    for value, count in after.items():
+        if value in allowlist or _CAMEL_CASE.match(value):
+            continue
+        was = before.get(value, 0)
+        if count > was:
+            result.add(
+                "G6",
+                "working tree",
+                f"{label} `{value}` net-new: merge-base has {was}, HEAD has {count}",
+            )
+
+
+def check_g6_pii(result: GateResult, base: str, allowlist: list[str]) -> None:
+    for label, pattern in _PII_PATTERNS.items():
+        _net_new_pii(
+            label, _occurrences_at(base, pattern), _occurrences_at(None, pattern), allowlist, result
+        )
+
+
+# ---------------------------------------------------------------------------
+# G7 - the stored identity key is DERIVED; changing how it derives without a
+# migration silently splits the population (round 12, P1.6)
+# ---------------------------------------------------------------------------
+
+# The functions and module constants that shape the STORED key. Anything else
+# in the module (bar-3 shapes, weak-anchor classification, divergence guards)
+# reads rows at decision time and can change freely - only what writes
+# `clients.identity_key` is fingerprinted.
+_G7_KEY_FUNCTIONS = frozenset(
+    {
+        "normalize_name",
+        "normalize_postcode",
+        "compute_identity_key",
+        "identity_name",
+        "_fold_unicode",
+    }
+)
+_G7_KEY_CONSTANTS = frozenset(
+    {
+        "_ALNUM_TOKEN",
+        "_NON_ALNUM",
+        "_UK_POSTCODE",
+        "_STRUCTURE_AFTER",
+        "_UNIT_BEFORE",
+        "_ORDINAL_INWARD",
+        "_US_ZIP_PLUS_FOUR",
+        "_MIN_POSTCODE_LEN",
+        "_LEADING_ARTICLES",
+        "_TRAILING_SUFFIXES",
+        "_TRANSLITERATIONS",
+        "_NAME_PREFIX_LEN",
+        "KEY_SEPARATOR",
+        "LEGAL_ENTITY_PLACEHOLDER",
+    }
+)
+_IDENTITY_KEY_MODULE = "apps/api/src/bullet_api/worker/identity_key.py"
+
+
+def _normalizer_fingerprint(source: str) -> str:
+    """A stable dump of the key-shaping code, docstrings and comments excluded.
+
+    AST-based so that a docstring or comment edit does NOT trip G7 (forcing a
+    no-op migration for a prose change would teach people to bypass the gate),
+    while any semantic change to a fingerprinted function or constant does.
+    Unparseable source fingerprints as itself, failing toward "changed".
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    parts: list[tuple[str, str]] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if node.name not in _G7_KEY_FUNCTIONS:
+                continue
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                node.body = body[1:] or [ast.Pass()]
+            parts.append((node.name, ast.dump(node, include_attributes=False)))
+        elif isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if any(name in _G7_KEY_CONSTANTS for name in names):
+                parts.append((names[0], ast.dump(node, include_attributes=False)))
+    parts.sort()
+    return "\n".join(f"{name}: {dump}" for name, dump in parts)
+
+
+def check_g7_normalizer_migration(result: GateResult, base: str) -> None:
+    """FAIL when the key-shaping code changed and no migration touches
+    `identity_key` in the same diff.
+
+    `identity_key` is derived AND stored: old rows keep keys the new code can
+    no longer produce, so a genuine returning client silently stops matching
+    (0013's WARNING). That obligation was a docstring until round 12 (P1.6)
+    pointed out the escape hatch - "0013 has never run outside local dev" -
+    expires the moment this PR's `preDeployCommand` deploys. An enforced check
+    cannot go stale the way prose does. S1-26h owns the recompute tooling; this
+    check only refuses to let a normalizer change ship without SOMETHING
+    migration-shaped acknowledging the stored keys.
+    """
+    module_path = REPO_ROOT / _IDENTITY_KEY_MODULE
+    current_source = module_path.read_text() if module_path.is_file() else ""
+    base_source = _git("show", f"{base}:{_IDENTITY_KEY_MODULE}")
+    if _normalizer_fingerprint(base_source) == _normalizer_fingerprint(current_source):
+        return
+    changed = _git("diff", "--name-only", base).splitlines()
+    changed += _git("ls-files", "--others", "--exclude-standard").splitlines()
+    for name in changed:
+        if "alembic/versions/" not in name:
+            continue
+        candidate = REPO_ROOT / name
+        if candidate.is_file() and "identity_key" in candidate.read_text(errors="replace"):
+            return
+    result.add(
+        "G7",
+        _IDENTITY_KEY_MODULE,
+        "the key-shaping code changed but no migration in this diff touches "
+        "`identity_key`. The key is DERIVED and STORED - old rows keep keys the "
+        "new code cannot produce, so returning clients silently stop matching. "
+        "Ship a recompute/backfill migration with the change (S1-26h), or an "
+        "explicit migration-file note for why stored keys are unaffected.",
+    )
+
+
+# ---------------------------------------------------------------------------
+
+
+CHECKS = {
+    "G1": "comment-literal coverage",
+    "G4": "no conditional assertions",
+    "G5": "no defaults on discriminating fixture params",
+    "G6": "diff-scoped PII",
+    "G7": "normalizer change requires a key migration",
+}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base", default="main", help="branch to diff against")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--only", help="run a single check, e.g. G1")
+    args = parser.parse_args()
+    # VALIDATED (round 12, P3): `--only G2` (or any typo) used to run ZERO
+    # checks and, with --json, print [] and exit 0 - a vacuous green.
+    if args.only and args.only not in CHECKS:
+        parser.error(f"--only must be one of {', '.join(sorted(CHECKS))}; got {args.only!r}")
+
+    base = _merge_base(args.base)
+    allowlist = _load_allowlist()
+    result = GateResult()
+
+    selected = [args.only] if args.only else list(CHECKS)
+    if "G1" in selected:
+        check_g1_comment_literals(result, base, allowlist.get("G1", []))
+    if "G4" in selected:
+        check_g4_conditional_assertions(result)
+    if "G5" in selected:
+        check_g5_fixture_defaults(result)
+    if "G6" in selected:
+        check_g6_pii(result, base, allowlist.get("G6", []))
+    if "G7" in selected:
+        check_g7_normalizer_migration(result, base)
+
+    if args.json:
+        payload = [
+            {"check": f.check, "location": f.location, "message": f.message}
+            for f in result.findings
+        ]
+        print(json.dumps(payload, indent=2))
+        return 1 if result.findings else 0
+
+    print(f"review gate - diffing against {base[:12]}\n")
+    by_check: dict[str, list[Finding]] = {}
+    for finding in result.findings:
+        by_check.setdefault(finding.check, []).append(finding)
+
+    for code in selected:
+        found = by_check.get(code, [])
+        status = f"{len(found)} finding(s)" if found else "clean"
+        print(f"{code} {CHECKS[code]:<48} {status}")
+        for finding in found:
+            print(finding.render())
+        if found:
+            print()
+
+    total = len(result.findings)
+    print(f"\n{'FAIL' if total else 'PASS'}: {total} finding(s)")
+    return 1 if total else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

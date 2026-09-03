@@ -37,6 +37,19 @@ export default defineConfig({
   // boots fresh.
   webServer: [
     {
+      // Inngest dev server. REQUIRED, not optional (review round 7 discovery):
+      // the attach endpoint commits, then emits `transcript.linked`, and with
+      // nothing on :8288 the emit raises AFTER the DB write - the API returns
+      // 500, the UI shows "Attach failed", and the spec's green run had been
+      // depending on an ambient dev server someone happened to have running.
+      // Booting it here makes the stack self-contained.
+      command: 'npx inngest-cli dev --no-discovery',
+      url: 'http://localhost:8288',
+      reuseExistingServer: !process.env.CI,
+      timeout: 180_000,
+      stdout: 'pipe',
+    },
+    {
       // FastAPI backend. `uv run` resolves the project venv from apps/api.
       command: 'uv run uvicorn bullet_api.main:app --host 127.0.0.1 --port 8000',
       cwd: '../api',
@@ -55,8 +68,10 @@ export default defineConfig({
         RESEND_API_KEY: '',
         // Put the Inngest SDK in dev mode so importing bullet_api.main does not
         // raise SigningKeyMissingError (no signing key locally). Mirrors what
-        // conftest.py and the `codegen` Make target already do. The Inngest dev
-        // server itself is NOT required for these specs.
+        // conftest.py and the `codegen` Make target already do. (This comment
+        // used to claim the dev server itself was "NOT required for these
+        // specs" - false since S1-27a: the attach spec's endpoint emits, and
+        // the dev server above is what receives it.)
         INNGEST_DEV: '1',
       },
     },

@@ -15,6 +15,10 @@ retriable vs not):
   wraps this in `inngest.NonRetriableError`.
 - `GhlServerError` (5xx / 429) - GHL is down, rate-limiting, or timing
   out. Transient; the worker lets it propagate so Inngest retries.
+- `GhlNotConfiguredError` - the agency API key is empty, so no call is
+  possible. Non-retriable. It has its own type rather than a bare
+  `RuntimeError` because `httpx.StreamError` IS a `RuntimeError`, so a
+  broad catch dead-lettered recoverable transport failures alongside it.
 """
 
 from __future__ import annotations
@@ -31,6 +35,22 @@ from bullet_api.config import get_settings
 # plus a `Version` header that pins the API contract.
 GHL_API_BASE_URL = "https://services.leadconnectorhq.com"
 GHL_API_VERSION = "2021-07-28"
+
+# 4xx codes that are transient rather than structural, so the worker retries
+# instead of dead-lettering:
+#
+# - 408 request timeout: the server saying "you took too long". The identical
+#   request can succeed next time.
+# - 429 rate-limit: explicitly a "try again later".
+# - 401 / 403 auth: a rotated or briefly-unavailable agency key. Dead-lettering
+#   these was the sharpest edge here - one key blip would TERMINALLY fail every
+#   signing in flight, and each needs a human to re-drive. A genuinely wrong key
+#   still dead-letters, just via Inngest's retry budget instead of instantly, so
+#   retrying costs a few minutes of backoff and buys back the whole blip case.
+#
+# Everything else in the 4xx range means the request itself is wrong and will
+# keep failing, so it stays non-retriable.
+_RETRIABLE_STATUS = frozenset({401, 403, 408, 429})
 
 
 @dataclass(frozen=True)
@@ -81,6 +101,20 @@ class GhlClientError(GhlError):
         super().__init__(f"GHL returned {status_code}: {_clip(body)}")
 
 
+class GhlNotConfiguredError(GhlError, RuntimeError):
+    """The agency API key is empty, so no call can be made at all.
+
+    Non-retriable - retrying an unset env var achieves nothing - but it needs
+    its own type rather than a bare `RuntimeError` (review round 5). The worker
+    caught `RuntimeError` to dead-letter this case, and **`httpx.StreamError`
+    is a subclass of `RuntimeError`**, so a transport-level streaming failure
+    on a perfectly recoverable signing was being dead-lettered alongside it.
+
+    Still inherits `RuntimeError` so any caller that catches the old type keeps
+    working; the worker now catches THIS, which `httpx.StreamError` is not.
+    """
+
+
 class GhlServerError(GhlError):
     """A 5xx or 429 from GHL - server error, rate-limit, or overload.
 
@@ -111,9 +145,10 @@ class GhlClient(Protocol):
         Used by S1-26's returning-client check to avoid creating a duplicate
         sub-account: if a location already exists for the signed-document
         email, the caller reuses its id instead of POSTing a new one. This
-        also closes S1-25's at-least-once duplicate-create window - a retry
-        after a lost create response finds the orphaned location here rather
-        than provisioning a second one.
+        was ALSO meant to close S1-25's at-least-once duplicate-create window,
+        but does NOT (S1-26d): the search is eventually consistent, so a create
+        whose response was lost and is retried seconds later cannot see its own
+        orphan and provisions a second location anyway. That window is OPEN.
 
         Returns the matching location (first hit) or None when no location
         exists for the email. "No match" is a normal answer, NOT an error.
@@ -148,7 +183,7 @@ class HttpGhlClient:
     async def create_location(self, payload: dict) -> GhlLocation:
         if not self._api_key:
             # Fail loudly rather than silently no-op, mirroring HttpPandaDocClient.
-            raise RuntimeError(
+            raise GhlNotConfiguredError(
                 "GHL_AGENCY_API_KEY is empty; cannot create sub-account. "
                 "Set it on the Render env group."
             )
@@ -163,30 +198,61 @@ class HttpGhlClient:
                 json=payload,
             )
         if 200 <= response.status_code < 300:
-            body = response.json()
+            # GUARDED (round 12, P2): a 2xx with an unexpected shape used to
+            # raise AFTER the location exists in GHL - and deterministically,
+            # so every Inngest retry re-POSTed and re-failed, minting one more
+            # orphan per attempt. A shape mismatch cannot heal on retry, so it
+            # maps to the NON-retriable error: one orphan at most, a visible
+            # failed action recording the body, and a human decides.
+            try:
+                body = response.json()
+                location_id = str(body["id"])
+            except (ValueError, KeyError, TypeError) as exc:
+                raise GhlClientError(
+                    response.status_code,
+                    "2xx create-location response could not be parsed "
+                    f"({type(exc).__name__}); a location LIKELY EXISTS in GHL that no "
+                    f"client row records - reconcile before retrying: {response.text[:500]}",
+                ) from exc
             return GhlLocation(
-                id=str(body["id"]),
+                id=location_id,
                 name=body.get("name", ""),
                 company_id=str(body.get("companyId", "")),
                 raw=body,
             )
-        # 429 (rate-limit) is retriable alongside 5xx; everything else in the
-        # 4xx range is a non-retriable client error.
-        if response.status_code == 429 or response.status_code >= 500:
+        # 408 (request timeout) and 429 (rate-limit) are retriable alongside
+        # 5xx; everything else in the 4xx range is a non-retriable client error.
+        # 408 matters because it is a TRANSIENT server-side condition wearing a
+        # 4xx code - dead-lettering it would terminally fail a signing that
+        # would have succeeded on the next attempt.
+        if response.status_code in _RETRIABLE_STATUS or response.status_code >= 500:
             raise GhlServerError(response.status_code, response.text)
         raise GhlClientError(response.status_code, response.text)
 
     async def find_location_by_email(self, email: str, *, company_id: str) -> GhlLocation | None:
         if not self._api_key:
-            raise RuntimeError(
+            raise GhlNotConfiguredError(
                 "GHL_AGENCY_API_KEY is empty; cannot look up sub-account. "
                 "Set it on the Render env group."
             )
-        # CONFIRM PRE-PROD: GHL agency location search shape. Best-guess is
-        # GET /locations/search?companyId=&email=&limit=1 returning
-        # {"locations": [...]}. No live GHL access yet, so the exact path,
-        # query params, and response envelope are confirmed against the real
-        # API before rollout - same deferred posture as `create_location`.
+        # VERIFIED LIVE against Bullet's agency: the path, query params and the
+        # `{"locations": [...], "traceId": ...}` envelope all hold (21/07/2026
+        # read-only probe, then again in the 30/07 end-to-end Chain 1 run). The
+        # earlier CONFIRM PRE-PROD marker is cleared.
+        #
+        # KNOWN CAVEAT (S1-26d, found 30/07): this search is EVENTUALLY
+        # CONSISTENT. A location created seconds ago is not yet findable by
+        # email even though GET by id returns it with that exact address, while
+        # a long-established location resolves fine. So this is a reliable
+        # lookup for a genuinely returning client and an UNRELIABLE backstop for
+        # the at-least-once window it was also meant to cover (a create whose
+        # response was lost, retried immediately, will not find its own
+        # orphan). Callers must not treat a `None` as proof no location exists.
+        #
+        # `limit=1` means a business with several locations returns an arbitrary
+        # one; the caller corroborates the hit on name, postcode and phone
+        # (vetoing on a divergent address) before reusing
+        # it, so an unrelated hit is flagged rather than merged.
         async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
             response = await client.get(
                 f"{self._base_url}/locations/search",
@@ -212,9 +278,31 @@ class HttpGhlClient:
         # treat as "no existing location" rather than a hard error.
         if response.status_code == 404:
             return None
-        if response.status_code == 429 or response.status_code >= 500:
+        # Same retriable set as `create_location` (review round 4, finding 1):
+        # this lookup runs before the create on every attempt, so a key blip
+        # here has to be retriable too, or the create-path fix is unreachable
+        # - every in-flight signing dead-letters at the lookup before it ever
+        # gets to the POST that would have survived the blip.
+        if response.status_code in _RETRIABLE_STATUS or response.status_code >= 500:
             raise GhlServerError(response.status_code, response.text)
         raise GhlClientError(response.status_code, response.text)
+
+
+class _Unset:
+    """Sentinel for "the test did not say what the GHL lookup returns".
+
+    `lookup_result` used to default to `None`, meaning "no existing location".
+    That default silently disarmed the returning-client email leg in 27 of the
+    GHL tests, so an entire production code path was invisible to the suite -
+    which is how a franchise-merging bug shipped with a green test that could
+    never have caught it (review rounds 1 and 2 both landed on an instance of
+    this). Requiring an explicit value makes the omission a loud failure
+    instead of a silent pass; tests that genuinely want "no existing location"
+    pass `lookup_result=None`.
+    """
+
+
+_UNSET = _Unset()
 
 
 @dataclass
@@ -225,16 +313,22 @@ class FakeGhlClient:
     set (set exactly one). Records every create payload on `calls` so tests
     can assert on the request body (e.g. that `snapshotId` is present/absent).
 
-    `find_location_by_email` returns `lookup_result` (default None = "no
-    existing location", the common case so existing create-path tests
-    proceed to create unchanged), or raises `lookup_error` when set. Records
-    every lookup on `lookup_calls` as `(email, company_id)`.
+    `find_location_by_email` returns `lookup_result` when set to a value, or
+    raises `lookup_error` when set. Records every lookup on `lookup_calls` as
+    `(email, company_id)`.
+
+    `lookup_result` defaults to `_UNSET` (fixed docstring, review round 4:
+    this used to say it defaulted to `None`, which was true before the
+    `_UNSET` sentinel above replaced that default - see its docstring for
+    why). An unset call raises `AssertionError` rather than silently
+    behaving as "no existing location"; pass `lookup_result=None` explicitly
+    for that case.
     """
 
     location: GhlLocation | None = None
     error: Exception | None = None
     calls: list[dict] = field(default_factory=list)
-    lookup_result: GhlLocation | None = None
+    lookup_result: GhlLocation | None | _Unset = _UNSET
     lookup_error: Exception | None = None
     lookup_calls: list[tuple[str, str]] = field(default_factory=list)
 
@@ -250,6 +344,15 @@ class FakeGhlClient:
         self.lookup_calls.append((email, company_id))
         if self.lookup_error is not None:
             raise self.lookup_error
+        if isinstance(self.lookup_result, _Unset):
+            raise AssertionError(
+                "FakeGhlClient.find_location_by_email was called but the test never "
+                "said what it returns. This leg decides whether an existing GHL "
+                "sub-account is REUSED, so leaving it implicit hides the reuse path "
+                "entirely - exactly how a franchise-merging bug shipped green twice. "
+                "Pass lookup_result=None for 'no existing location', or a GhlLocation "
+                "for a hit."
+            )
         return self.lookup_result
 
 
