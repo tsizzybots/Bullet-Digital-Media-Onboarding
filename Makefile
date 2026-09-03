@@ -56,7 +56,10 @@ lint:
 review-gate:
 	@uv run python apps/api/scripts/review_gate.py --base $(or $(BASE),main); static=$$?; \
 	uv run python apps/api/scripts/review_gate_mutate.py --include-db $(MUTATE_ARGS); mutate=$$?; \
-	exit $$((static + mutate))
+	if [ $$static -ne 0 ] || [ $$mutate -ne 0 ]; then exit 1; fi
+# ^ NOT `exit $$((static + mutate))` (round 12, P3): shell exit codes are
+# taken modulo 256, so two failures summing to 256 exited 0 - a green gate
+# made of two red halves.
 
 # The mutation half alone.
 review-gate-db:

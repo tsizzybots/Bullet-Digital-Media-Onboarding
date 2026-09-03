@@ -225,3 +225,59 @@ async def test_transient_4xx_is_retriable_not_dead_lettered(
     with pytest.raises(GhlServerError) as exc:
         await calls[method_name]()
     assert exc.value.status_code == status_code
+
+
+class TestTwoxxParseGuard:
+    """Round 12, P2: a 2xx whose body cannot be parsed maps to the
+    NON-retriable error.
+
+    The location likely exists in GHL the moment the 2xx arrives; a shape
+    mismatch is deterministic, so a retriable error would re-POST and re-fail
+    on every attempt - one new orphan per retry. Non-retriable means one
+    orphan at most, a visible dead-letter carrying the body, and a human
+    reconciles.
+    """
+
+    async def test_2xx_with_unparseable_body_is_non_retriable(self) -> None:
+        transport = _transport(200, "<html>upstream proxy error page</html>")
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlClientError) as excinfo:
+            await client.create_location({"name": "Sample Gym", "companyId": "comp_1"})
+        assert "LIKELY EXISTS" in str(excinfo.value)
+
+    async def test_2xx_missing_id_is_non_retriable(self) -> None:
+        transport = _transport(201, {"location": {"id": "loc_nested"}})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlClientError) as excinfo:
+            await client.create_location({"name": "Sample Gym", "companyId": "comp_1"})
+        assert "LIKELY EXISTS" in str(excinfo.value)
+
+
+class TestTransportLevelErrors:
+    """Round 12, test gap 6: the status-code mapping was well covered but a
+    raised transport error was not - and the worker's `_record_failure`
+    contract depends on transport errors PROPAGATING (it catches broad
+    `Exception`, and the wrapper classifies retriable-vs-not on the type).
+    """
+
+    @pytest.mark.parametrize("exc_type", [httpx.ConnectError, httpx.ReadTimeout])
+    async def test_create_location_propagates_transport_errors(
+        self, exc_type: type[Exception]
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise exc_type("boom", request=request)
+
+        client = HttpGhlClient(api_key="agency-key", transport=httpx.MockTransport(handler))
+        with pytest.raises(exc_type):
+            await client.create_location({"name": "Sample Gym", "companyId": "comp_1"})
+
+    @pytest.mark.parametrize("exc_type", [httpx.ConnectError, httpx.ReadTimeout])
+    async def test_find_location_propagates_transport_errors(
+        self, exc_type: type[Exception]
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise exc_type("boom", request=request)
+
+        client = HttpGhlClient(api_key="agency-key", transport=httpx.MockTransport(handler))
+        with pytest.raises(exc_type):
+            await client.find_location_by_email("gym@example.com", company_id="comp_1")

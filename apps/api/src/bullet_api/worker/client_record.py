@@ -392,10 +392,13 @@ async def create_client_record_core(
     # keeps whatever the row already held, and the concurrency bucket below
     # must name the same key the GHL worker's sibling query will match on.
     identity_key = client_row.identity_key
+    # TWO tiers, not three (round 12, P3): `extract_client_fields` raises
+    # `PandaDocPayloadError` unless the email token is a non-empty trimmed
+    # string (`_stringy` returns None otherwise), so `normalized_email` cannot
+    # be empty here and the old `str(client_id)` third tier was unreachable -
+    # a guard no input can reach reads as coverage while providing none.
     normalized_email = fields.email.strip().lower()
-    dedup_key = identity_key or (
-        f"email:{normalized_email}" if normalized_email else str(client_id)
-    )
+    dedup_key = identity_key or f"email:{normalized_email}"
 
     # Backfill the audit row. `processed_at` uses COALESCE so a retry
     # preserves the first-success timestamp; bumping it on every retry
@@ -607,7 +610,14 @@ async def create_client_record(ctx: inngest.Context) -> dict:
                 extra={
                     "document_id": document_id,
                     "onboarding_event_id": str(onboarding_event_id),
-                    "error": str(exc),
+                    # `str(exc.orig)`, NOT `str(exc)` (round 12, P2): the
+                    # SQLAlchemy wrapper appends `[SQL: ...]` and
+                    # `[parameters: {...}]` - the whole client INSERT bind set,
+                    # names/emails/phones included - while the driver's own
+                    # message ("column X does not exist") carries no bind
+                    # values. The engine also sets `hide_parameters=True` as
+                    # the belt to this braces.
+                    "error": str(exc.orig) if exc.orig is not None else type(exc).__name__,
                 },
             )
             raise

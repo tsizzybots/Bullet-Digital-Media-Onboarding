@@ -272,3 +272,232 @@ class TestMutateRunnerClassification:
     def test_the_full_table(self, returncode: int, output: str, status: str) -> None:
         got, _detail = review_gate_mutate._classify_pytest_result(returncode, output, "x::y")
         assert got == status
+
+
+# ---------------------------------------------------------------------------
+# Round 12 (P1.5): the COMPOSITION ROOTS. Round 8 self-tested the leaf helpers
+# and the manifest mutated the same leaves - `check_g1/g4/g5/g6`, the diff
+# parser, the mutate runner's flow guards and its exit aggregation were all
+# still revert-green: `for path in []` in check_g4 was a clean gate forever.
+# Each class below backs a manifest mutation on the ROOT it exercises.
+# ---------------------------------------------------------------------------
+
+
+class TestCheckRootsAreWired:
+    def test_check_g4_scans_the_tests_root(self, tmp_path, monkeypatch) -> None:
+        (tmp_path / "test_synthetic.py").write_text("if rows[0]:\n    assert rows\n")
+        monkeypatch.setattr(review_gate, "TESTS_ROOT", tmp_path)
+        result = review_gate.GateResult()
+        review_gate.check_g4_conditional_assertions(result)
+        assert len(result.findings) == 1
+
+    def test_check_g5_scans_the_tests_root(self, tmp_path, monkeypatch) -> None:
+        (tmp_path / "test_seeds.py").write_text(
+            "async def _seed_client(s, *, phone='+44 7700 900123'):\n    ...\n"
+        )
+        monkeypatch.setattr(review_gate, "TESTS_ROOT", tmp_path)
+        result = review_gate.GateResult()
+        review_gate.check_g5_fixture_defaults(result)
+        assert len(result.findings) == 1
+
+    def test_check_g1_reports_an_uncovered_literal(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            review_gate,
+            "_added_comment_lines",
+            lambda base: [("f.py", 3, 'rejects "AB12 3CDE" now')],
+        )
+        monkeypatch.setattr(review_gate, "_test_corpus", lambda: "")
+        result = review_gate.GateResult()
+        review_gate.check_g1_comment_literals(result, "base", [])
+        assert len(result.findings) == 1
+        assert "AB12 3CDE" in result.findings[0].message
+
+    def test_check_g1_accepts_a_covered_literal(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            review_gate,
+            "_added_comment_lines",
+            lambda base: [("f.py", 3, 'rejects "AB12 3CDE" now')],
+        )
+        monkeypatch.setattr(review_gate, "_test_corpus", lambda: 'x = "AB12 3CDE"')
+        result = review_gate.GateResult()
+        review_gate.check_g1_comment_literals(result, "base", [])
+        assert result.findings == []
+
+    def test_check_g6_walks_every_pattern(self, monkeypatch) -> None:
+        def _fake_occurrences(ref, pattern):
+            if ref is None:  # the working tree
+                return _Counter({"newdomainhit@bulletdigitalmedia.com": 1})
+            return _Counter()
+
+        monkeypatch.setattr(review_gate, "_occurrences_at", _fake_occurrences)
+        result = review_gate.GateResult()
+        review_gate.check_g6_pii(result, "base", [])
+        # One finding per pattern (the fake reports the same value for all of
+        # them); what matters is the loop actually visits the patterns.
+        assert len(result.findings) == len(review_gate._PII_PATTERNS)
+
+    def test_added_comment_lines_parses_the_diff(self, monkeypatch) -> None:
+        diff = (
+            "diff --git a/apps/api/src/x.py b/apps/api/src/x.py\n"
+            "+++ b/apps/api/src/x.py\n"
+            "@@ -0,0 +7 @@\n"
+            '+    # the fix rejects "AB12 3CDE" outright\n'
+            "+    code_line = 1\n"
+        )
+
+        def _fake_git(*args):
+            return diff if args[0] == "diff" else ""
+
+        monkeypatch.setattr(review_gate, "_git", _fake_git)
+        lines = review_gate._added_comment_lines("base")
+        assert lines == [("apps/api/src/x.py", 7, '    # the fix rejects "AB12 3CDE" outright')]
+
+
+class TestG7NormalizerMigration:
+    """Round 12, P1.6: the recompute obligation is enforced, not prose."""
+
+    BASE_SRC = (
+        'import re\n_UK_POSTCODE = re.compile("A")\n'
+        'def normalize_postcode(v):\n    "doc"\n    return v\n'
+    )
+
+    def _run(self, monkeypatch, tmp_path, current_src: str, diff_files: list[str]) -> list:
+        module = tmp_path / "identity_key.py"
+        module.write_text(current_src)
+        for name in diff_files:
+            target = tmp_path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("op.add_column('clients', 'identity_key')")
+
+        def _fake_git(*args):
+            if args[0] == "show":
+                return self.BASE_SRC
+            if args[0] == "diff":
+                return "\n".join(diff_files)
+            return ""
+
+        monkeypatch.setattr(review_gate, "_git", _fake_git)
+        monkeypatch.setattr(review_gate, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(review_gate, "_IDENTITY_KEY_MODULE", "identity_key.py")
+        result = review_gate.GateResult()
+        review_gate.check_g7_normalizer_migration(result, "base")
+        return result.findings
+
+    def test_semantic_change_without_migration_fails(self, monkeypatch, tmp_path) -> None:
+        changed = self.BASE_SRC.replace('re.compile("A")', 're.compile("B")')
+        assert len(self._run(monkeypatch, tmp_path, changed, [])) == 1
+
+    def test_semantic_change_with_key_migration_passes(self, monkeypatch, tmp_path) -> None:
+        changed = self.BASE_SRC.replace('re.compile("A")', 're.compile("B")')
+        files = ["apps/api/alembic/versions/0099_recompute.py"]
+        assert self._run(monkeypatch, tmp_path, changed, files) == []
+
+    def test_docstring_only_change_does_not_trip(self, monkeypatch, tmp_path) -> None:
+        changed = self.BASE_SRC.replace('"doc"', '"a completely rewritten docstring"')
+        assert self._run(monkeypatch, tmp_path, changed, []) == []
+
+    def test_fingerprint_ignores_non_key_code(self) -> None:
+        a = review_gate._normalizer_fingerprint("def unrelated():\n    return 1\n")
+        b = review_gate._normalizer_fingerprint("def unrelated():\n    return 2\n")
+        assert a == b == ""
+
+
+class TestMutateRunnerFlowGuards:
+    def test_exit_code_full_table(self) -> None:
+        table = [
+            (dict(survived=False, errored=False, unproven_fails=False), 0),
+            (dict(survived=True, errored=False, unproven_fails=False), 1),
+            (dict(survived=False, errored=True, unproven_fails=False), 1),
+            (dict(survived=False, errored=False, unproven_fails=True), 1),
+            (dict(survived=True, errored=True, unproven_fails=True), 1),
+        ]
+        for kwargs, expected in table:
+            assert review_gate_mutate._exit_code(**kwargs) == expected
+
+    def test_apply_refuses_an_ambiguous_pattern(self, tmp_path) -> None:
+        target = tmp_path / "mod.py"
+        target.write_text("guard()\nguard()\n")
+        outcome = review_gate_mutate._apply(target, "guard()", "pass")
+        assert isinstance(outcome, str) and "ambiguous" in outcome
+        assert target.read_text() == "guard()\nguard()\n"  # untouched
+
+    def test_apply_refuses_a_stale_pattern(self, tmp_path) -> None:
+        target = tmp_path / "mod.py"
+        target.write_text("something_else()\n")
+        outcome = review_gate_mutate._apply(target, "guard()", "pass")
+        assert isinstance(outcome, str) and "stale" in outcome
+
+    def test_restore_refuses_to_clobber_a_concurrent_edit(self, tmp_path) -> None:
+        target = tmp_path / "mod.py"
+        target.write_text("the operator edited this mid-run\n")
+        problem = review_gate_mutate._restore(target, "original\n", "mutated\n")
+        assert problem is not None and "NOT restored" in problem
+        assert target.read_text() == "the operator edited this mid-run\n"
+
+    def test_node_id_resolution_reads_the_collect_outcome(self, monkeypatch) -> None:
+        class _Proc:
+            def __init__(self, rc: int, out: str) -> None:
+                self.returncode, self.stdout, self.stderr = rc, out, ""
+
+        monkeypatch.setattr(review_gate_mutate, "_pytest", lambda *a: _Proc(0, "collected 1 item"))
+        assert review_gate_mutate._node_id_resolves("tests/x.py::t") is True
+        monkeypatch.setattr(
+            review_gate_mutate, "_pytest", lambda *a: _Proc(4, "ERROR: no tests ran")
+        )
+        assert review_gate_mutate._node_id_resolves("tests/x.py::gone") is False
+
+    @pytest.mark.parametrize(
+        ("run_status", "expect_clean", "detail_fragment"),
+        [
+            ("SURVIVED", True, ""),
+            ("KILLED", False, "does NOT pass"),
+            ("UNPROVEN", False, "skips on unmutated source"),
+        ],
+    )
+    def test_baseline_reads_the_unmutated_run(
+        self, monkeypatch, run_status: str, expect_clean: bool, detail_fragment: str
+    ) -> None:
+        monkeypatch.setattr(review_gate_mutate, "_BASELINE_CACHE", {})
+        monkeypatch.setattr(review_gate_mutate, "_run_test", lambda node_id: (run_status, "detail"))
+        clean, detail = review_gate_mutate._baseline_is_clean("tests/x.py::t")
+        assert clean is expect_clean
+        assert detail_fragment in detail
+
+    def test_main_refuses_a_file_escaping_the_api_root(self, tmp_path, monkeypatch, capsys) -> None:
+        manifest = tmp_path / "manifest.toml"
+        manifest.write_text(
+            "[[mutation]]\n"
+            'name = "escape attempt"\n'
+            'file = "../../etc/hosts"\n'
+            'find = "x"\nreplace = "y"\n'
+            'must_fail = "tests/x.py::t"\n'
+        )
+        monkeypatch.setattr(review_gate_mutate, "MANIFEST", manifest)
+        monkeypatch.setattr(review_gate_mutate.sys, "argv", ["review_gate_mutate.py"])
+        rc = review_gate_mutate.main()
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "escapes" in out
+
+    def test_main_refuses_a_must_fail_that_selects_no_test(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        manifest = tmp_path / "manifest.toml"
+        manifest.write_text(
+            "[[mutation]]\n"
+            'name = "renamed test"\n'
+            'file = "scripts/review_gate.py"\n'
+            'find = "def main"\nreplace = "def main"\n'
+            'must_fail = "tests/test_nowhere.py::TestGone::test_gone"\n'
+        )
+
+        class _Proc:
+            returncode, stdout, stderr = 4, "ERROR: no tests ran", ""
+
+        monkeypatch.setattr(review_gate_mutate, "MANIFEST", manifest)
+        monkeypatch.setattr(review_gate_mutate, "_pytest", lambda *a: _Proc())
+        monkeypatch.setattr(review_gate_mutate.sys, "argv", ["review_gate_mutate.py"])
+        rc = review_gate_mutate.main()
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "selects no test" in out

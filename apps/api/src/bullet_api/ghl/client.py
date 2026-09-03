@@ -198,9 +198,24 @@ class HttpGhlClient:
                 json=payload,
             )
         if 200 <= response.status_code < 300:
-            body = response.json()
+            # GUARDED (round 12, P2): a 2xx with an unexpected shape used to
+            # raise AFTER the location exists in GHL - and deterministically,
+            # so every Inngest retry re-POSTed and re-failed, minting one more
+            # orphan per attempt. A shape mismatch cannot heal on retry, so it
+            # maps to the NON-retriable error: one orphan at most, a visible
+            # failed action recording the body, and a human decides.
+            try:
+                body = response.json()
+                location_id = str(body["id"])
+            except (ValueError, KeyError, TypeError) as exc:
+                raise GhlClientError(
+                    response.status_code,
+                    "2xx create-location response could not be parsed "
+                    f"({type(exc).__name__}); a location LIKELY EXISTS in GHL that no "
+                    f"client row records - reconcile before retrying: {response.text[:500]}",
+                ) from exc
             return GhlLocation(
-                id=str(body["id"]),
+                id=location_id,
                 name=body.get("name", ""),
                 company_id=str(body.get("companyId", "")),
                 raw=body,

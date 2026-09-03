@@ -155,6 +155,7 @@ from bullet_api.ghl.client import (
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.events import CLIENT_CREATED_EVENT
 from bullet_api.worker.identity_key import (
+    KEY_SEPARATOR,
     addresses_materially_diverge,
     contact_name_agrees,
     corroborating_signal_agrees,
@@ -313,6 +314,28 @@ _SIBLING_BY_IDENTITY_KEY_SQL = text(
     _SIBLING_SELECT.format(predicate="identity_key = :identity_key")
 )
 
+# The DEDUP LOCK (round 12, P1.4). The two `dedup_key` tiers are disjoint
+# Inngest buckets by design, but `_SIBLING_BY_EMAIL_UNKEYED_SQL` deliberately
+# CROSSES them - a keyed doc and a blank-Zip doc for one business land in
+# different buckets, so neither Concurrency(limit=1) serialises the pair, and
+# with `_SIBLING_SELECT` requiring `ghl_subaccount_id IS NOT NULL` both
+# concurrent runs see ZERO candidates, no bar ever evaluates, and two
+# sub-accounts appear with no flag (the CHANGELOG's earlier claim that the
+# phone bar contains this residual was WRONG - with no candidate row there is
+# nothing to corroborate against). A transaction-scoped advisory lock on the
+# lowercased email serialises exactly the pairs the dedup scan can link -
+# cross-bucket racers share an email by construction, or the scan could never
+# have linked them either. Taken TWICE, because the function deliberately
+# commits mid-flight (the in_progress row must be durable before the external
+# call) and a xact-scoped lock dies with that commit: once around the
+# phase-1 sibling SELECT, and again in the transaction that spans the GHL
+# call and the `ghl_subaccount_id` write-back - after which the sibling check
+# RE-RUNS, so whichever racer acquires second sees the winner's committed
+# write-back instead of a stale empty scan. Session-scoped locks were
+# rejected: under a connection pool a leaked session lock blocks the email
+# forever, and the xact scope self-releases on every path including raises.
+_DEDUP_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtext('dedup:' || lower(:email)))")
+
 # Fallback for a NULL identity_key. A document with no usable name or
 # postcode would otherwise have NO DB-side dedup signal at all, which was a
 # regression against S1-26 where email WAS the sibling key.
@@ -335,7 +358,12 @@ _SIBLING_BY_IDENTITY_KEY_SQL = text(
 # franchisees have no shared access); the SAME person signing twice, with the
 # same email, name and phone, absent a postcode, is the strongest evidence
 # available that this is one business re-signing, not two.
-_SIBLING_BY_EMAIL_SQL = text(_SIBLING_SELECT.format(predicate="lower(email) = lower(:email)"))
+# `email = :email` and NOT `lower(...) = lower(...)`: the column is CITEXT
+# (0002), so equality is already case-insensitive - and wrapping the column
+# in lower() defeats `ix_clients_email`, sequential-scanning `clients` inside
+# the very transaction that then holds locks across a 10s GHL call (round 12,
+# P3).
+_SIBLING_BY_EMAIL_SQL = text(_SIBLING_SELECT.format(predicate="email = :email"))
 
 # The email fallback used by a KEYED client, restricted to rows the keyed query
 # STRUCTURALLY CANNOT SEE (review round 6, P1 - and the regression that fix
@@ -354,7 +382,7 @@ _SIBLING_BY_EMAIL_SQL = text(_SIBLING_SELECT.format(predicate="lower(email) = lo
 # evidence of difference, and it is exactly the pre-0013 population round 6
 # found stranded.
 _SIBLING_BY_EMAIL_UNKEYED_SQL = text(
-    _SIBLING_SELECT.format(predicate="lower(email) = lower(:email) AND identity_key IS NULL")
+    _SIBLING_SELECT.format(predicate="email = :email AND identity_key IS NULL")
 )
 
 
@@ -509,6 +537,98 @@ def _pick_sibling(
     # compare. A pure prefix collision returns (None, None): no flag, and the
     # GHL leg runs normally.
     return None, collided
+
+
+async def _db_sibling_check(
+    session: AsyncSession,
+    *,
+    client: Row,
+    client_id: uuid.UUID,
+    client_name: str | None,
+) -> tuple[Row | None, Row | None]:
+    """Run the full DB-sibling scan: keyed query first, then the email fallback.
+
+    Returns `(sibling, collision)` exactly as `_pick_sibling` does. Extracted
+    (round 12, P1.4) so the scan can run TWICE: once before the `in_progress`
+    commit, and again under the re-acquired dedup lock in the transaction that
+    spans the GHL call - the re-run is what lets the second of two same-email
+    racers see the first one's committed write-back.
+
+    TWO-STAGE, and the second stage now also runs when the keyed stage found
+    rows but neither matched nor name-collided (round 12, P2): a PURE prefix
+    collision used to suppress the email fallback entirely, stranding a genuine
+    legacy NULL-keyed sibling behind an unrelated business that merely shares
+    six characters and a postcode. Each stage carries its own bar:
+
+    - KEYED stage: `require_contact_name` only when the key's own anchor
+      postcode is WEAK (round 10 P0.1) - the postcode anchor otherwise makes
+      bars 1+2 sufficient. The anchor is read from the postcode half of the
+      identity_key itself, not the stored `postal_code`, which the COALESCE
+      upsert can leave disagreeing with the key (round 11, P2).
+    - EMAIL stage: `require_contact_name=True` always - its candidates share
+      only a literal mailbox, with no postcode anchoring them (round 4,
+      finding 4). A keyed client only reaches rows the key structurally could
+      not see (`identity_key IS NULL`); see `_SIBLING_BY_EMAIL_UNKEYED_SQL`.
+    """
+    keyed = client.identity_key is not None
+    anchor_postcode = (
+        client.identity_key.partition(KEY_SEPARATOR)[2]
+        if client.identity_key
+        else client.postal_code
+    )
+
+    def _warn_if_capped(rows: Sequence[Row]) -> None:
+        # Never silently truncate: a match past the cap would look identical
+        # to "no returning client found" and quietly provision a duplicate.
+        if len(rows) == _SIBLING_CANDIDATE_LIMIT:
+            log.warning(
+                "S1-26c sibling candidate cap hit; a match beyond the cap would be missed",
+                extra={
+                    "client_id": str(client_id),
+                    "has_identity_key": client.identity_key is not None,
+                    "limit": _SIBLING_CANDIDATE_LIMIT,
+                },
+            )
+
+    sibling: Row | None = None
+    collision: Row | None = None
+    if keyed:
+        keyed_rows = (
+            await session.execute(
+                _SIBLING_BY_IDENTITY_KEY_SQL,
+                {"identity_key": client.identity_key, "client_id": client_id},
+            )
+        ).all()
+        _warn_if_capped(keyed_rows)
+        sibling, collision = _pick_sibling(
+            keyed_rows,
+            client_name=client_name,
+            client_phone=client.phone,
+            client_contact_first_name=client.contact_first_name,
+            client_contact_last_name=client.contact_last_name,
+            client_address=client.address,
+            client_postcode=client.postal_code,
+            require_contact_name=postcode_is_weak_anchor(anchor_postcode),
+        )
+    if sibling is None and collision is None:
+        email_rows = (
+            await session.execute(
+                _SIBLING_BY_EMAIL_UNKEYED_SQL if keyed else _SIBLING_BY_EMAIL_SQL,
+                {"email": client.email, "client_id": client_id},
+            )
+        ).all()
+        _warn_if_capped(email_rows)
+        sibling, collision = _pick_sibling(
+            email_rows,
+            client_name=client_name,
+            client_phone=client.phone,
+            client_contact_first_name=client.contact_first_name,
+            client_contact_last_name=client.contact_last_name,
+            client_address=client.address,
+            client_postcode=client.postal_code,
+            require_contact_name=True,
+        )
+    return sibling, collision
 
 
 def _location_postcode(location: GhlLocation) -> str:
@@ -899,99 +1019,15 @@ async def create_ghl_subaccount_core(
     # it falls back to the EMAIL sibling query - S1-26's original key. Without
     # that fallback those documents would have no DB-side dedup at all, which is
     # strictly worse than before this ticket.
-    keyed = client.identity_key is not None
-    candidates = []
-    if keyed:
-        candidates = (
-            await session.execute(
-                _SIBLING_BY_IDENTITY_KEY_SQL,
-                {"identity_key": client.identity_key, "client_id": client_id},
-            )
-        ).all()
+    # DEDUP LOCK, phase 1 (round 12, P1.4 - see `_DEDUP_LOCK_SQL`): serialise
+    # the sibling scan against any same-email run currently holding the lock
+    # across its GHL call, so this scan sees that run's committed write-back
+    # instead of an empty result. Transaction-scoped: released by the
+    # `in_progress` commit below, and re-acquired after it (phase 2).
+    await session.execute(_DEDUP_LOCK_SQL, {"email": client.email})
 
-    # FALL BACK to email when the keyed query found NOTHING (review round 6).
-    # `keyed` used to select strictly one query, which made every pre-0013 row
-    # permanently invisible to every later keyed signing: 0013 performs no
-    # backfill and says so - "pre-existing rows simply carry NULL identity_key
-    # and fall through to CREATE" - so those rows are unreachable by an
-    # identity-key predicate, forever. Detection became order-dependent
-    # (unkeyed-first/keyed-second never linked, the reverse linked cleanly),
-    # which is a regression against S1-26, whose predicate was `WHERE email`.
-    #
-    # The fallback runs under the UNKEYED bar (`require_contact_name=True`,
-    # applied below via `keyed_candidates_found`), not the keyed one: its
-    # candidates share only a literal email, with no postcode anchoring them,
-    # which is exactly the condition bar 3 exists for.
-    keyed_candidates_found = bool(candidates)
-    if not candidates:
-        candidates = (
-            await session.execute(
-                # A keyed client only reaches rows the KEY could not see. See
-                # `_SIBLING_BY_EMAIL_UNKEYED_SQL` for why re-examining keyed
-                # rows by email destroys the separation the key just made.
-                _SIBLING_BY_EMAIL_UNKEYED_SQL if keyed else _SIBLING_BY_EMAIL_SQL,
-                {"email": client.email, "client_id": client_id},
-            )
-        ).all()
-
-    if len(candidates) == _SIBLING_CANDIDATE_LIMIT:
-        # Never silently truncate: a match past the cap would look identical to
-        # "no returning client found" and quietly provision a duplicate.
-        log.warning(
-            "S1-26c sibling candidate cap hit; a match beyond the cap would be missed",
-            extra={
-                "client_id": str(client_id),
-                "identity_key": client.identity_key,
-                "limit": _SIBLING_CANDIDATE_LIMIT,
-            },
-        )
-
-    # S1-26c dedup guard, FIVE bars (see `_pick_sibling`; bar 5 is the postcode
-    # disqualifier added round 9 P1.1). (1) The identity key
-    # truncates the name to 6 chars, so two DIFFERENT businesses sharing a name
-    # prefix AND a postcode collide on it ("Fitness First" vs "Fitness Studio");
-    # every candidate is scanned for a full-name match, not just the earliest.
-    # (2) The PHONE must also agree, because `Company.Zip` is the COMPANY
-    # postcode rather than the studio's, so a franchisee entering their brand
-    # plus a head-office postcode produces an identical key AND identical names
-    # for two different studios. Failing either bar flags a possible duplicate
-    # and provisions this signing as its own client (never auto-merge).
-    #
-    # The email fallback (unkeyed) now links too, on a STRONGER bar than the
-    # keyed path (review round 4, finding 4 - supersedes round 2, finding 5):
-    # it lacks the postcode anchor bars 1+2 lean on, so `require_contact_name`
-    # replaces it with the signing contact's name instead of dropping the
-    # requirement. See `_pick_sibling`'s docstring for the full reasoning.
-    # The weak-anchor gate must judge the postcode the keyed match ACTUALLY
-    # anchored on - the postcode half of the identity_key - not the stored
-    # `postal_code`, which the COALESCE upsert can leave disagreeing with the key
-    # (review round 11, P2). Fall back to the stored value when there is no key.
-    anchor_postcode = (
-        client.identity_key.partition("|")[2] if client.identity_key else client.postal_code
-    )
-    sibling, collision = _pick_sibling(
-        candidates,
-        client_name=client_name,
-        client_phone=client.phone,
-        client_contact_first_name=client.contact_first_name,
-        client_contact_last_name=client.contact_last_name,
-        client_address=client.address,
-        # Bar 5 (review round 9, P1.1): a contradictory postcode refuses the
-        # link. It bites on DRIFT (a legacy NULL-keyed sibling, or a COALESCE
-        # upsert that kept an old postcode) and is normally inert on the keyed
-        # path, where candidates share the normalized postcode - see
-        # `postcodes_materially_diverge`.
-        client_postcode=client.postal_code,
-        # The email fallback ALWAYS carries the stronger bar (unkeyed row OR
-        # keyed row whose key found nothing). AND a keyed row whose ANCHOR
-        # postcode is a WEAK anchor (a repdigit like "11111" that round 9 P1.2
-        # lets key) keeps requiring bar 3 too: the keyed path's "shared postcode
-        # is the anchor" argument is void when the postcode is filler, so name +
-        # phone alone must not merge two sites of one brand (review round 10 P0.1,
-        # round 11 P1.1 broadened the classifier to filler-plus-text).
-        require_contact_name=(
-            not keyed_candidates_found or postcode_is_weak_anchor(anchor_postcode)
-        ),
+    sibling, collision = await _db_sibling_check(
+        session, client=client, client_id=client_id, client_name=client_name
     )
 
     if collision is not None:
@@ -1001,8 +1037,10 @@ async def create_ghl_subaccount_core(
             extra={
                 "client_id": str(client_id),
                 "sibling_client_id": str(collision.id),
-                "identity_key": client.identity_key,
-                "candidate_count": len(candidates),
+                # Presence only (round 12, P3): the key embeds a name prefix
+                # plus a postcode, and this module already reduces postcode and
+                # phone to `has_*` booleans everywhere else it logs.
+                "has_identity_key": client.identity_key is not None,
             },
         )
 
@@ -1037,7 +1075,7 @@ async def create_ghl_subaccount_core(
             # Link the new row to the original root and reuse the sub-account
             # id. Guard with `ghl_subaccount_id IS NULL` so a concurrent
             # writer is never clobbered.
-            await session.execute(
+            linked = await session.execute(
                 text(
                     "UPDATE clients "
                     "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
@@ -1049,6 +1087,80 @@ async def create_ghl_subaccount_core(
                     "client_id": client_id,
                 },
             )
+            # rowcount == 0 (round 12, P2): the guard matched no row, so a
+            # concurrent writer already set an id. The ROW is the authority -
+            # report what it holds, not what this run intended.
+            if linked.rowcount == 0:
+                surviving = (
+                    await session.execute(
+                        text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                        {"client_id": client_id},
+                    )
+                ).scalar_one_or_none()
+                if surviving and surviving != sibling.ghl_subaccount_id:
+                    await session.commit()
+                    log.warning(
+                        "S1-26 sibling link lost a write race; returning the row's id",
+                        extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
+                    )
+                    return CreateSubaccountResult(
+                        ghl_subaccount_id=surviving, created=False, skipped=True
+                    )
+        else:
+            # TORN-STATE REPAIR, this branch's own copy (round 13, concurrency
+            # execution audit - proved live against the DB). `already_succeeded`
+            # meant this exact link was RECORDED once before, but recording it
+            # is not the same as the `clients` row HOLDING the id: if the row
+            # lost it (a crash, a bug, manual intervention - however it tore),
+            # the old code fell straight to `session.commit()` below and
+            # reported success from every surface while never attempting the
+            # write-back. Every future replay repeated the identical no-op
+            # forever. The create-path's own already_succeeded branch already
+            # self-heals this shape; this branch is where it was missing.
+            repaired = await session.execute(
+                text(
+                    "UPDATE clients "
+                    "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
+                    "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+                ),
+                {
+                    "root_id": sibling.root_id,
+                    "ghl_id": sibling.ghl_subaccount_id,
+                    "client_id": client_id,
+                },
+            )
+            if repaired.rowcount > 0:
+                log.warning(
+                    "S1-26 repaired a torn sibling link: action already succeeded "
+                    "but the client row held no id",
+                    extra={
+                        "client_id": str(client_id),
+                        "ghl_subaccount_id": sibling.ghl_subaccount_id,
+                    },
+                )
+            else:
+                # rowcount == 0 here too (round 13, caught proving the repair
+                # branch above): a racer set the row between our load and
+                # this UPDATE. The unconditional `return sibling....` a few
+                # lines below would have reported the SIBLING's id regardless
+                # of what THIS row actually holds - the same bug the round-12
+                # `linked.rowcount == 0` branch above already guards against.
+                # Same posture here: the row is the authority.
+                surviving = (
+                    await session.execute(
+                        text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                        {"client_id": client_id},
+                    )
+                ).scalar_one_or_none()
+                if surviving and surviving != sibling.ghl_subaccount_id:
+                    await session.commit()
+                    log.warning(
+                        "S1-26 torn sibling repair lost a write race; returning the row's id",
+                        extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
+                    )
+                    return CreateSubaccountResult(
+                        ghl_subaccount_id=surviving, created=False, skipped=True
+                    )
         await session.commit()
         log.info(
             "S1-26 GHL sub-account reused (returning client, DB sibling)",
@@ -1114,10 +1226,10 @@ async def create_ghl_subaccount_core(
     # as a clean success: no failed action, no flag, no retry, and a client left
     # permanently without a sub-account with nothing anywhere saying so.
     if begun.already_succeeded:
-        if client.ghl_subaccount_id:
-            return CreateSubaccountResult(
-                ghl_subaccount_id=client.ghl_subaccount_id, created=False, skipped=True
-            )
+        # No `if client.ghl_subaccount_id` branch here (round 12, P2 - it was
+        # provably dead): `client` is bound ONCE at load, and the truthy case
+        # already returned at the already-provisioned short-circuit above, so
+        # this path only runs with a NULL id on the loaded row.
         # The action row recorded the id even though the write-back to `clients`
         # did not land. Recover it and repair the row rather than re-POSTing.
         recovered = (
@@ -1127,19 +1239,30 @@ async def create_ghl_subaccount_core(
             )
         ).scalar_one_or_none()
         if recovered:
-            await session.execute(
+            repaired = await session.execute(
                 text(
                     "UPDATE clients SET ghl_subaccount_id = :ghl_id "
                     "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
                 ),
                 {"ghl_id": recovered, "client_id": client_id},
             )
+            # rowcount == 0 (round 12, P2): a concurrent writer set the row
+            # after our load. The ROW is the authority - returning the id we
+            # intended while the row holds another silently misreports.
+            surviving = recovered
+            if repaired.rowcount == 0:
+                surviving = (
+                    await session.execute(
+                        text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                        {"client_id": client_id},
+                    )
+                ).scalar_one_or_none() or recovered
             await session.commit()
             log.warning(
                 "S1-26 repaired a torn action: success recorded but no id on the client row",
-                extra={"client_id": str(client_id), "ghl_subaccount_id": recovered},
+                extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
             )
-            return CreateSubaccountResult(ghl_subaccount_id=recovered, created=False, skipped=True)
+            return CreateSubaccountResult(ghl_subaccount_id=surviving, created=False, skipped=True)
         # No id in EITHER place, so the recorded success cannot be trusted.
         # Fall through to the normal lookup-then-create path, which is the
         # self-healing route: the lookup runs first, so an existing location is
@@ -1204,6 +1327,110 @@ async def create_ghl_subaccount_core(
                 "client_id": str(client_id),
                 "action_id": str(begun.action_id),
                 "error": str(exc),
+            },
+        )
+
+    # DEDUP LOCK, phase 2 + RE-CHECK (round 12, P1.4). The in_progress commit
+    # released the phase-1 lock, so a same-email racer may have provisioned and
+    # committed in the gap. Re-acquire the lock - this transaction now spans
+    # the GHL call and the write-back, so it holds until the terminal commit -
+    # and RE-RUN the sibling scan: whichever racer arrives here second blocks
+    # on the first one's terminal commit and then SEES its committed
+    # `ghl_subaccount_id`, linking instead of minting a duplicate.
+    #
+    # UNCONDITIONAL, not gated on `collision is None` (round 13, concurrency
+    # execution audit found the gate itself was the hole). The comment this
+    # replaces argued a phase-1 collision "already flagged and suppressed
+    # reuse, so creating its own sub-account is fail-safe regardless of
+    # racers" - true for what phase-1 saw, but phase-1 only flagged against
+    # the ONE candidate it found; it does nothing to a DIFFERENT racer in a
+    # DIFFERENT dedup_key bucket, and skipping the lock here meant this run's
+    # own create + write-back proceeded with NO lock held at all - the exact
+    # unserialised window P1.4 exists to close, reopened on precisely the
+    # path most likely to be racing (two documents for one business, one of
+    # which already failed a bar). Now every create + write-back is lock-
+    # protected and re-checked, collision or not; a re-check hit still
+    # overrides an earlier flag (the post-lock view is the authoritative
+    # one), and a clean re-check leaves the phase-1 flag standing.
+    try:
+        await session.execute(_DEDUP_LOCK_SQL, {"email": client.email})
+        recheck_sibling, recheck_collision = await _db_sibling_check(
+            session, client=client, client_id=client_id, client_name=client_name
+        )
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
+    if recheck_sibling is not None:
+        try:
+            await _clear_possible_duplicate(session, client_id=client_id)
+            await complete_action(
+                session,
+                action_id=begun.action_id,
+                external_id=recheck_sibling.ghl_subaccount_id,
+                response={
+                    "skipped_existing": True,
+                    "reason": GHL_SKIP_REASON_DB_SIBLING,
+                    "raced_concurrent_signing": True,
+                    "ghl_subaccount_id": recheck_sibling.ghl_subaccount_id,
+                    "parent_client_id": str(recheck_sibling.root_id),
+                    "sibling_client_id": str(recheck_sibling.id),
+                },
+            )
+            linked = await session.execute(
+                text(
+                    "UPDATE clients "
+                    "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
+                    "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+                ),
+                {
+                    "root_id": recheck_sibling.root_id,
+                    "ghl_id": recheck_sibling.ghl_subaccount_id,
+                    "client_id": client_id,
+                },
+            )
+            surviving = recheck_sibling.ghl_subaccount_id
+            if linked.rowcount == 0:
+                surviving = (
+                    await session.execute(
+                        text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                        {"client_id": client_id},
+                    )
+                ).scalar_one_or_none() or surviving
+            await session.commit()
+        except Exception as exc:
+            await _record_failure(exc)
+            raise
+        log.info(
+            "S1-26 GHL sub-account reused (returning client, DB sibling on re-check)",
+            extra={
+                "client_id": str(client_id),
+                "ghl_subaccount_id": surviving,
+                "parent_client_id": str(recheck_sibling.root_id),
+            },
+        )
+        return CreateSubaccountResult(
+            ghl_subaccount_id=surviving,
+            created=False,
+            skipped=True,
+            parent_client_id=recheck_sibling.root_id,
+        )
+    if recheck_collision is not None:
+        # Same handling as a phase-1 collision: flag (guarded - this write
+        # sits between the committed in_progress row and its terminal
+        # state) and suppress GHL reuse below.
+        try:
+            await _flag_possible_duplicate(
+                session, client_id=client_id, sibling_id=recheck_collision.id
+            )
+        except Exception as exc:
+            await _record_failure(exc)
+            raise
+        collision = recheck_collision
+        log.warning(
+            "S1-26c possible duplicate: sibling collision on re-check, not corroborated",
+            extra={
+                "client_id": str(client_id),
+                "sibling_client_id": str(recheck_collision.id),
             },
         )
 
@@ -1307,13 +1534,31 @@ async def create_ghl_subaccount_core(
                 "ghl_subaccount_id": existing.id,
             },
         )
-        await session.execute(
+        adopted = await session.execute(
             text(
                 "UPDATE clients SET ghl_subaccount_id = :ghl_id "
                 "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
             ),
             {"ghl_id": existing.id, "client_id": client_id},
         )
+        # rowcount == 0 (round 12, P2): a concurrent writer set the row first;
+        # the row is the authority (same posture as the sibling-link site).
+        if adopted.rowcount == 0:
+            surviving = (
+                await session.execute(
+                    text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                    {"client_id": client_id},
+                )
+            ).scalar_one_or_none()
+            if surviving and surviving != existing.id:
+                await session.commit()
+                log.warning(
+                    "S1-26 GHL-lookup adoption lost a write race; returning the row's id",
+                    extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
+                )
+                return CreateSubaccountResult(
+                    ghl_subaccount_id=surviving, created=False, skipped=True
+                )
         await session.commit()
         log.info(
             "S1-26 GHL sub-account reused (returning client, GHL lookup)",
@@ -1351,13 +1596,39 @@ async def create_ghl_subaccount_core(
         # Guard with `ghl_subaccount_id IS NULL` so a concurrent writer cannot
         # be clobbered; the per-client concurrency cap makes that race
         # near-impossible, but the guard is cheap insurance.
-        await session.execute(
+        written = await session.execute(
             text(
                 "UPDATE clients SET ghl_subaccount_id = :ghl_id "
                 "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
             ),
             {"ghl_id": location.id, "client_id": client_id},
         )
+        # rowcount == 0 here is the WORST of the four guarded sites (round 12,
+        # P2): the location just POSTed is real in GHL but recorded on no
+        # client row - an orphan. Flag it with the orphan's id so a human can
+        # merge or delete it (the action row already records it as this run's
+        # external_id), and return the row's actual id rather than the
+        # orphan's.
+        surviving_id = location.id
+        if written.rowcount == 0:
+            surviving_id = (
+                await session.execute(
+                    text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                    {"client_id": client_id},
+                )
+            ).scalar_one_or_none() or location.id
+            if surviving_id != location.id:
+                await _flag_possible_duplicate(
+                    session, client_id=client_id, ghl_location_id=location.id
+                )
+                log.warning(
+                    "S1-25 create write-back lost a write race; the new location is an orphan",
+                    extra={
+                        "client_id": str(client_id),
+                        "ghl_subaccount_id": surviving_id,
+                        "orphan_ghl_location_id": location.id,
+                    },
+                )
         await session.commit()
     except Exception as exc:
         await _record_failure(exc)
@@ -1367,11 +1638,13 @@ async def create_ghl_subaccount_core(
         "S1-25 GHL sub-account created",
         extra={
             "client_id": str(client_id),
-            "ghl_subaccount_id": location.id,
+            "ghl_subaccount_id": surviving_id,
             "action_id": str(begun.action_id),
         },
     )
-    return CreateSubaccountResult(ghl_subaccount_id=location.id, created=True, skipped=False)
+    return CreateSubaccountResult(
+        ghl_subaccount_id=surviving_id, created=surviving_id == location.id, skipped=False
+    )
 
 
 @inngest_client.create_function(
@@ -1445,14 +1718,28 @@ async def create_ghl_subaccount_core(
         # this comment used to cite, and BOTH were false reassurance: the
         # `platform_actions` idempotency key is
         # `{client_id}:ghl:create_subaccount:{event_id}`, so two DIFFERENT
-        # client rows for one business can never collide on it, and "the
-        # sibling re-check" is precisely the check that races when neither run
-        # has committed a `ghl_subaccount_id` yet. The residual is real, merely
-        # narrow: it needs a legacy queued event AND a fresh signing for the
-        # SAME business in flight in the one deploy window, worst case is a
-        # duplicate (visible, flagged, S1-26e-mergeable) sub-account, it closes
-        # on its own once the queue drains, and it cannot be fixed in CEL
-        # because the expression cannot compute an identity_key.
+        # client rows for one business can never collide on it. The sibling
+        # re-check used to be the second false reassurance - it was precisely
+        # the check that raced when neither run had committed a
+        # `ghl_subaccount_id` yet. Round 12 (P1.4) closed the SAME-EMAIL half
+        # of that race in the DB itself: `_DEDUP_LOCK_SQL` serialises the scan
+        # and write-back on `lower(email)`, and the phase-2 re-check sees the
+        # winner's committed row. The residual is now only the
+        # DIFFERENT-EMAIL shape (a keyed event and a legacy queued one whose
+        # emails differ), worst case a duplicate (visible, flagged,
+        # S1-26e-mergeable) sub-account, closing on its own once the deploy-
+        # window queue drains; it cannot be fixed in CEL because the
+        # expression cannot compute an identity_key.
+        #
+        # OVERCLAIM CORRECTED (round 13, concurrency execution audit): the
+        # previous wording here said these rows "could never have linked
+        # anyway", which is not quite true - a `pandadoc.signed` replay can
+        # COALESCE-backfill `identity_key` onto a row whose pre-deploy
+        # `client.created` event still carries no `dedup_key` (the client
+        # row is keyed; the QUEUED EVENT that names it is not), making that
+        # pair linkable via the keyed sibling scan despite sharing neither
+        # an email nor a dedup bucket. The outcome is unchanged (still the
+        # same accepted residual above), only the reasoning was wrong.
         #
         # CEL has no `??`, and Inngest's docs do not document
         # one, so `has()` + ternary is used rather than an operator that might

@@ -9,7 +9,9 @@ from __future__ import annotations
 import pytest
 
 from bullet_api.worker.identity_key import (
+    _ORDINAL_INWARD,
     LEGAL_ENTITY_PLACEHOLDER,
+    _digits_are_low_entropy,
     addresses_materially_diverge,
     compute_identity_key,
     contact_name_agrees,
@@ -557,11 +559,11 @@ class TestMalformedPostcodeNeverMintsAUkKey:
     def test_floor_ordinal_loses_to_an_ordinal_shaped_real_postcode(
         self, value: str, expected: str
     ) -> None:
-        # Round 11, P0.1: a unit/floor ordinal always PRECEDES the postcode in an
-        # address, so keeping the FIRST ordinal-shaped match let the floor number
-        # beat a real ordinal-shaped postcode - and two different postcodes
-        # collapsed onto one key (a false MERGE). The fallback keeps the LAST
-        # ordinal-shaped match, so the suffix (the postcode) wins.
+        # Round 11 P0.1, mechanism replaced in round 12: the floor ordinal is
+        # DROPPED by the structure-word and unit-designator guards, leaving the
+        # real ordinal-shaped postcode as the sole surviving candidate - no
+        # positional keep-first/keep-last rule exists any more (both were
+        # disproved, rounds 10 and 11 respectively).
         assert normalize_postcode(value) == expected
 
     def test_two_ordinal_shaped_sites_do_not_collapse_via_the_floor_number(self) -> None:
@@ -573,12 +575,11 @@ class TestMalformedPostcodeNeverMintsAUkKey:
         assert second == "E81ST"
         assert first != second
 
-    def test_last_ordinal_wins_when_two_non_floor_ordinals_compete(self) -> None:
-        # The pin for the LAST-match rule specifically. The floor-word guard
-        # already removes a "1st Floor" ordinal from contention, so the floor
-        # params above cannot distinguish first-keep from last-keep - this one
-        # can: two ordinal-shaped matches, NEITHER followed by a floor word, and
-        # the suffix (the postcode) must win over the unit prefix.
+    def test_unit_prefixed_ordinal_is_dropped_so_the_real_ordinal_postcode_wins(self) -> None:
+        # Round 11's pin, re-grounded on the round-12 mechanism: "Unit B2 1st"
+        # is dropped by the unit-designator guard (not outranked by position),
+        # leaving "E8 1ST" as the sole surviving candidate. The required output
+        # is unchanged from round 11.
         assert normalize_postcode("Unit B2 1st, E8 1ST") == "E81ST"
 
     def test_floor_ordinal_alone_does_not_mint_a_postcode_key(self) -> None:
@@ -610,6 +611,22 @@ class TestMalformedPostcodeNeverMintsAUkKey:
         # like "B33 8TH", which round 10's first-match fallback regressed for
         # exactly the unit/floor prefixes this now parametrizes.
         assert normalize_postcode(prefix + postcode) == normalize_postcode(postcode)
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [", UK", ", Unit A1 1st", ", 2nd Street", " 1st Floor", ", Suite C3 2nd"],
+    )
+    @pytest.mark.parametrize(
+        "postcode",
+        ["E8 1AA", "SW1A 1AA", "CR0 2AB", "E8 1ST", "B33 8TH", "N7 3RD"],
+    )
+    def test_address_suffix_does_not_change_the_key(self, suffix: str, postcode: str) -> None:
+        # Round 12 test gap 1: the prefix test above covered only the direction
+        # round 11 had already fixed, leaving the suffix mirror (P0.2's trailing
+        # unit ordinal) invisible to the suite. Trailing address furniture -
+        # country, unit ordinal, ordinal street, floor - must never change the
+        # key of the real postcode that precedes it.
+        assert normalize_postcode(postcode + suffix) == normalize_postcode(postcode)
 
 
 class TestUnicodeFold:
@@ -877,12 +894,29 @@ class TestPostcodeIsWeakAnchor:
         # safe direction - documented, not accidental.
         assert postcode_is_weak_anchor("111 11") is True
 
-    @pytest.mark.parametrize("value", ["1000", "75008", "10115", "E8 1AA", "SW1A 1AA", "E1 1EE"])
+    @pytest.mark.parametrize("value", ["75008", "10115", "E8 1AA", "SW1A 1AA", "E1 1EE"])
     def test_a_postcode_with_real_entropy_is_strong(self, value: str) -> None:
-        # A second distinct digit ("1000") or a letter-first code ("E8 1AA",
-        # "E1 1EE" - repeated digits but real UK structure) is a real anchor - a
-        # UK postcode is never purely numeric and never digit-first.
+        # High-entropy digit content ("75008") or a letter-structured code
+        # ("E8 1AA", "E1 1EE" - repeated digits but under three of them) is a
+        # real anchor.
         assert postcode_is_weak_anchor(value) is False
+
+    def test_three_digit_doubled_run_is_not_filler(self) -> None:
+        # "B33 8TH" has digit content "338" - one doubled digit plus a tail is
+        # ordinary real-code content at three digits, so the doubled-run rule
+        # is gated to four-plus.
+        assert _digits_are_low_entropy("338") is False
+
+    def test_brussels_thousand_is_weak_under_the_digit_content_rule(self) -> None:
+        # SPEC CHANGE, round 12 P1.2 (this row was pinned STRONG in round 11):
+        # classifying on digit content makes "1000" weak - its "000" run is
+        # byte-identical to data-entry filler ("10000" is in the reviewer's
+        # placeholder sweep), and a rule that keeps "1000" strong keeps the
+        # filler strong too. Weak only keeps bar 3 REQUIRED: a genuine Brussels
+        # returning client with the same signer still links, so the cost of the
+        # reversal is a flag-not-merge on a different signer - the safe
+        # direction, accepted and documented.
+        assert postcode_is_weak_anchor("1000") is True
 
     @pytest.mark.parametrize("value", [None, "", "TBA", "00000"])
     def test_absent_or_filler_postcode_is_not_a_weak_anchor(self, value: str | None) -> None:
@@ -911,3 +945,573 @@ class TestPostcodesMateriallyDiverge:
         # The fail-open branch: if either side is missing or normalizes to "",
         # bar 5 must abstain rather than veto an otherwise-corroborated link.
         assert postcodes_materially_diverge(a, b) is False
+
+
+class TestPostcodeCandidateSpec:
+    """Round 12 P0.1/P0.2: the candidate specification, stated as a matrix.
+
+    The ordinal guard was wrong three ways in three rounds (skip-all, keep-first,
+    keep-last-with-a-floor-denylist) because each was a positional patch against
+    the review's example. This class IS the specification: every row below is a
+    required output, covering the reviewer's sweep shapes from rounds 9-12 AND
+    every previously verified row, so a future patch that trades one shape for
+    another fails here immediately.
+    """
+
+    # -- Rows that must KEEP working (rounds 9-11 verified outputs) -----------
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("E8 1AA", "E81AA"),
+            ("London E8 1AA", "E81AA"),
+            ("B33 8TH", "B338TH"),
+            ("London B33 8TH", "B338TH"),
+            ("B2 1ST", "B21ST"),
+            ("Unit B2, 1st Floor, E8 1AA", "E81AA"),
+            ("Unit A1, 1st Floor, B33 8TH", "B338TH"),
+            ("Unit B2 1st, E8 1ST", "E81ST"),
+        ],
+    )
+    def test_previously_verified_rows_unchanged(self, value: str, expected: str) -> None:
+        assert normalize_postcode(value) == expected
+
+    # -- Round 12 P0.1: ordinal STREET words are the class FLOOR belonged to --
+    @pytest.mark.parametrize(
+        ("value_a", "value_b"),
+        [
+            # 20 of 25 world cities collapsed onto 'A13RD' at head. Distinct
+            # geography must produce distinct keys (or no key at all).
+            ("Unit A1, 3rd Avenue, Chicago IL 60601", "Unit A1, 3rd Avenue, New York NY 10001"),
+            ("Suite C3 2nd Street London SW1A 1AA", "Suite C3 2nd Street Leeds LS1 4AB"),
+        ],
+    )
+    def test_ordinal_street_never_collapses_distinct_geography(
+        self, value_a: str, value_b: str
+    ) -> None:
+        key_a = normalize_postcode(value_a)
+        key_b = normalize_postcode(value_b)
+        assert key_a != key_b or (key_a == "" and key_b == "")
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            # A real postcode beside an ordinal street must win, both orders.
+            ("Birmingham B33 8TH, Unit A1, 2nd Street", "B338TH"),
+            ("London E8 1ST, Unit A1, 2nd Street", "E81ST"),
+            ("Unit A1, 2nd Street, Birmingham B33 8TH", "B338TH"),
+            ("2nd Avenue office, E8 1AA", "E81AA"),
+        ],
+    )
+    def test_real_postcode_beats_ordinal_street(self, value: str, expected: str) -> None:
+        assert normalize_postcode(value) == expected
+
+    def test_ordinal_street_alone_mints_no_postcode_shaped_key(self) -> None:
+        # 'Unit A1, 3rd Avenue' carries no postcode. Whatever key it produces
+        # must NOT equal the key of a genuine 'A1 3RD'-shaped postcode.
+        assert normalize_postcode("Unit A1, 3rd Avenue") != "A13RD"
+
+    def test_structure_word_ordinal_without_unit_prefix_mints_no_postcode_key(self) -> None:
+        # The structure-word guard's own kill: NO unit designator in the value,
+        # so the unit-before guard cannot mask the mutation (round 11's
+        # floor-params lesson, applied at authoring time). Without the guard,
+        # 'C3 2nd Street' keys byte-identically to the genuine client at
+        # 'C3 2ND'.
+        assert normalize_postcode("C3 2nd Street") != normalize_postcode("C3 2ND")
+
+    # -- Round 12 P0.2: the TRAILING unit ordinal (the keep-last mirror) ------
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("B33 8TH, Unit A1 1st", "B338TH"),
+            ("E8 1ST, Unit A1 1st", "E81ST"),
+        ],
+    )
+    def test_trailing_unit_ordinal_never_beats_the_real_postcode(
+        self, value: str, expected: str
+    ) -> None:
+        assert normalize_postcode(value) == expected
+
+    @pytest.mark.parametrize(
+        "value", ["Unit B2 1st", "Unit B2, 1st", "Unit B2 1st Level", "Unit A1 1st"]
+    )
+    def test_unit_ordinal_alone_does_not_impersonate_a_postcode(self, value: str) -> None:
+        # A unit number with a trailing ordinal is not a postcode. It must not
+        # produce the same key as the genuine Birmingham client at 'B2 1ST'
+        # (round 11 asked for exactly this; the floor-word denylist delivered it
+        # only when the literal word FLOOR followed).
+        assert normalize_postcode(value) != normalize_postcode("B2 1ST")
+        assert normalize_postcode(value) != normalize_postcode("A1 1ST")
+
+    # -- Ambiguity fails toward SPLIT (the reviewer's stated direction) -------
+    def test_two_real_postcodes_are_ambiguous_and_split(self) -> None:
+        # Two genuine postcode candidates and nothing to choose between them:
+        # minting either would guess. NULL key -> fail-safe CREATE.
+        assert normalize_postcode("E8 1AA / N1 4AB") == ""
+
+    def test_two_undecidable_ordinals_split(self) -> None:
+        # Two ordinal-shaped candidates, neither droppable by structure
+        # evidence: position provably cannot decide (round 11 proved keep-last
+        # wrong; round 10 proved keep-first wrong). SPLIT.
+        assert normalize_postcode("E8 1ST B33 8TH") == ""
+
+    @pytest.mark.parametrize("inward", ["1ST", "2ND", "3RD", "8TH"])
+    def test_ordinal_inward_shapes_are_recognised(self, inward: str) -> None:
+        # Pins the _ORDINAL_INWARD alphabet the comments cite: these are the
+        # inward halves that are AMBIGUOUS (real postcode or unit ordinal).
+        assert _ORDINAL_INWARD.fullmatch(inward)
+        assert not _ORDINAL_INWARD.fullmatch("1AA")
+
+    @pytest.mark.parametrize("street", ["3rd Avenue", "2nd Street"])
+    def test_bare_ordinal_street_mints_no_postcode_shaped_key(self, street: str) -> None:
+        # The structure-word guard's own alphabet: an ordinal street after a
+        # unit token must never yield the 5-char ordinal key.
+        key = normalize_postcode(f"Unit A1, {street}")
+        assert key not in {"A13RD", "A12ND"}
+
+    def test_one_real_plus_ordinal_keeps_the_real(self) -> None:
+        # S1-26f's documented residual is unchanged: one REAL candidate wins
+        # even when an ordinal-shaped value precedes it.
+        assert normalize_postcode("B33 8TH, Head Office N1 4AB") == "N14AB"
+
+
+class TestWeakAnchorDigitContent:
+    """Round 12 P1.2: weak-anchor classification on DIGIT CONTENT, positionless.
+
+    Round 11's leading-run regex modelled exactly one filler shape and anchored
+    at the start. The reviewer's actual suggestion (both rounds) was to classify
+    on the digit content of the normalized value. These rows are the reviewer's
+    own placeholder sweep plus the strong rows that must stay strong.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "12345",
+            "54321",
+            "1234",
+            "123456",
+            "12345678",
+            "10000",
+            "11223",
+            "00001",
+            "98765",
+            "11112",
+            "12321",
+            "1212",
+            "13579",
+            "11111",
+            "99999",
+            "2222",
+            "111",
+            # Sole-kill params for individual low-entropy clauses (each is
+            # caught by exactly ONE rule, so its manifest mutation cannot be
+            # masked by a sibling clause - the round-11 floor-params lesson):
+            "1121",  # two-distinct-digits only
+            "11123",  # three-same-digit-run only
+            "1122",
+            # repeating-pair ONLY: every length-4+ pair also has <=2 distinct
+            # digits, so a length-3 alternation is the sole shape that reaches
+            # the pair rule alone (the mutation runner proved "1212" masked).
+            "121",
+        ],
+    )
+    def test_placeholder_shaped_digit_content_is_weak(self, value: str) -> None:
+        assert postcode_is_weak_anchor(value) is True
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "11111 USA",
+            "USA 11111",
+            "PO Box 11111",
+            "Head Office 99999",
+            "11111 Berlin",
+            "Berlin 11111",
+        ],
+    )
+    def test_weakness_is_position_independent(self, value: str) -> None:
+        # Leading text bypassed the round-11 start-anchored regex entirely.
+        assert postcode_is_weak_anchor(value) is True
+
+    @pytest.mark.parametrize(
+        "value",
+        ["E1 1EE", "SW1A 1AA", "E8 1AA", "75008", "60601", "D02X285"],
+    )
+    def test_real_postcodes_stay_strong(self, value: str) -> None:
+        assert postcode_is_weak_anchor(value) is False
+
+    def test_ordinal_shaped_extraction_is_weak_regardless_of_digit_content(self) -> None:
+        # SPEC CHANGE, round 13 (pure-logic execution audit): "B33 8TH" was
+        # pinned STRONG through round 12 - correct for digit content alone
+        # ("338" has real entropy), wrong once the execution audit showed
+        # WHY: "Studio B2, 1st" mints the SAME key as the genuine Birmingham
+        # client at "B2 1ST" with a STRONG anchor, because the unit word
+        # STUDIO was never on `_UNIT_BEFORE`'s list. Chasing every gym-
+        # industry unit word one at a time repeats the exact mistake rounds
+        # 9-12 made with the ordinal candidate rule itself. The class fix:
+        # an ordinal-shaped extraction is, by `normalize_postcode`'s OWN
+        # candidate rules, ambiguous - it survived only because nothing
+        # recognisable disqualified it - so it can never certify a merge
+        # alone. Cost: real ordinal-shaped UK postcodes (~1% of the format)
+        # now also require the signer bar, the same safe-direction trade
+        # every other weak-anchor clause makes.
+        assert postcode_is_weak_anchor("B33 8TH") is True
+        # A same-signer returning client at a genuine ordinal-shaped
+        # postcode still links (bar 3 stays satisfiable, just required).
+        assert postcode_is_weak_anchor("E8 1ST") is True
+        # Non-ordinal real postcodes are unaffected.
+        assert postcode_is_weak_anchor("E8 1AA") is False
+
+
+class TestContactNameShapes:
+    """Round 12 P1.1: bar 3 rejects by SHAPE, not enumeration.
+
+    The 12-entry denylist was the enumeration antipattern this module deleted
+    everywhere else, and ('Club','Manager') walked straight past it - round 2's
+    franchise conflation re-entered through the field introduced to replace the
+    missing postcode. Role titles, department shapes and first==last echoes are
+    not people; identical on both rows they must refuse, not corroborate.
+    """
+
+    @pytest.mark.parametrize(
+        ("first", "last"),
+        [
+            ("Club", "Manager"),
+            ("The", "Manager"),
+            ("General", "Manager"),
+            ("Gym", "Manager"),
+            ("Duty", "Manager"),
+            ("Managing", "Director"),
+            ("Company", "Secretary"),
+            ("Business", "Owner"),
+            ("Franchise", "Owner"),
+            ("Head Office", "Manager"),
+            ("Front", "Desk"),
+            ("N/A", "N/A"),
+            ("NA", "NA"),
+            ("Unknown", "Unknown"),
+            ("TBC", "TBC"),
+            ("John", "Doe"),
+        ],
+    )
+    def test_role_titles_and_placeholders_never_corroborate(self, first: str, last: str) -> None:
+        assert contact_name_agrees(first, last, first, last) is False
+
+    @pytest.mark.parametrize(
+        ("first", "last"),
+        [("Sarah", "Connor"), ("Dana", "Reed"), ("Marcus", "Webb"), ("José", "García")],
+    )
+    def test_real_signers_still_corroborate(self, first: str, last: str) -> None:
+        assert contact_name_agrees(first, last, first, last) is True
+
+    def test_multi_token_part_refuses_toward_split(self) -> None:
+        # A part carrying 2+ tokens is department-shaped ('Head Office'). The
+        # cost is that a double-barrelled given name also refuses - the SPLIT
+        # direction, documented as the accepted trade. The param deliberately
+        # contains NO role noun, so only the multi-token rule refuses it and
+        # its manifest mutation cannot be masked by the role-noun guard.
+        assert contact_name_agrees("Mary Jane", "Smith", "Mary Jane", "Smith") is False
+
+
+class TestNonLatinScripts:
+    """Round 12 P1.3: non-Latin letters are FOLDED INTO the key, not deleted.
+
+    The ASCII-only tokenizer deleted what NFKD could not fold, so every
+    Cyrillic/Greek/CJK business collapsed onto its Latin remnant ('gym') and
+    bar 1 was structurally inert for the whole cohort - while a fully non-Latin
+    name NULL-keyed on every signing (silent split). The INT PandaDoc account
+    is live, which is what makes this cohort reachable.
+    """
+
+    def test_distinct_cyrillic_names_diverge(self) -> None:
+        assert names_materially_diverge("Титан Gym", "Атлант Gym") is True
+
+    def test_cyrillic_name_contributes_to_the_stem(self) -> None:
+        assert normalize_name("Титан Gym") != normalize_name("Атлант Gym")
+        assert normalize_name("Титан Gym") != "gym"
+
+    def test_fully_non_latin_name_still_keys(self) -> None:
+        assert compute_identity_key("Спортзал Титан", "E8 1AA") is not None
+
+    @pytest.mark.parametrize(
+        ("name_a", "name_b"),
+        [("Fitness Παλλάς", "Fitness Ολύμπια"), ("ジム Fitness", "アトラス Fitness")],
+    )
+    def test_greek_and_cjk_names_diverge(self, name_a: str, name_b: str) -> None:
+        assert names_materially_diverge(name_a, name_b) is True
+
+    def test_latin_names_are_unaffected_by_the_widened_tokenizer(self) -> None:
+        assert normalize_name("The F45 Training Ltd") == "f45training"
+        assert normalize_name("Café Gym") == normalize_name("Cafe Gym")
+
+
+class TestPlaceholderShapedNames:
+    """Round 12, P2: the unidentifiable-can-never-merge invariant was an
+    exact-string compare against one constant, so "N/A" keyed as `na|...` and
+    a case variant of the placeholder itself keyed normally. Placeholders are
+    a SHAPE, recognised on the normalized stem.
+    """
+
+    def test_placeholder_business_name_falls_through_to_the_legal_entity(self) -> None:
+        assert identity_name("N/A", "Real Gym Ltd") == "Real Gym Ltd"
+
+    @pytest.mark.parametrize("value", ["TBC", "tbd", "n/a", "None", "Not Applicable", "TEST"])
+    def test_placeholder_shaped_name_yields_no_identity(self, value: str) -> None:
+        assert identity_name(value, None) is None
+        assert identity_name(None, value) is None
+
+    def test_case_and_space_variants_of_the_constant_are_rejected(self) -> None:
+        assert identity_name(None, " UNKNOWN - NEEDS REVIEW ") is None
+
+    def test_placeholder_shaped_name_cannot_mint_a_key(self) -> None:
+        assert compute_identity_key(identity_name("N/A", None), "E8 1AA") is None
+
+
+class TestPhoneCountryCodeConflict:
+    """Round 12, P2: the 9-digit tail drops the country code, so two real
+    numbers from different countries could corroborate each other."""
+
+    def test_malta_and_us_numbers_sharing_a_tail_do_not_agree(self) -> None:
+        # The premise, computed not asserted in prose: both numbers really do
+        # share the 9-digit tail - which is exactly why the tail alone must
+        # not decide.
+        assert normalize_phone("+356 2912 3456") == "629123456"
+        assert normalize_phone("+1 (562) 912-3456") == "629123456"
+        assert (
+            corroborating_signal_agrees(phone_a="+356 2912 3456", phone_b="+1 (562) 912-3456")
+            is False
+        )
+
+    def test_country_code_and_trunk_zero_forms_still_agree(self) -> None:
+        # The reason the tail exists at all: one business re-typing its own
+        # number with and without the country code is not two businesses.
+        assert (
+            corroborating_signal_agrees(phone_a="+44 7700 900123", phone_b="07700 900123") is True
+        )
+
+    def test_bare_national_form_agrees_with_the_international_form(self) -> None:
+        assert corroborating_signal_agrees(phone_a="7700 900123", phone_b="+44 7700 900123") is True
+
+
+class TestPhoneRealNumberStructure:
+    """Round 13: the tail-suffix heuristic replaced by real per-country
+    numbering-plan structure (`phonenumbers`) - closing the two residuals
+    the pure-logic execution audit found (one merge-direction, one split-
+    direction), neither closable by tightening the SAME digit-shape rule.
+    """
+
+    def test_cross_country_digit_coincidence_does_not_corroborate(self) -> None:
+        # The construction that survived round 12's own fix: Spain and
+        # Italy share a digit-identical national significant number once
+        # Spain's country code is stripped away, and no digit-suffix rule
+        # can tell that apart from a genuine national-prefix relationship.
+        # Italy is deliberately NOT in `_PHONE_CANDIDATE_REGIONS` (it is not
+        # a confirmed Bullet market), so the non-"+" Italian-shaped number
+        # produces no candidate for the Spanish reading to coincide with.
+        spain_full = "34655512345"
+        italy_full = "0655512345"
+        # The premise, computed not asserted in prose: stripping Spain's
+        # "34" leaves exactly Italy's own national significant number.
+        assert spain_full[len("34") :] == italy_full.lstrip("0")
+        assert (
+            corroborating_signal_agrees(phone_a="+34 655 512 345", phone_b="06 5551 2345")
+            is False
+        )
+
+    @pytest.mark.parametrize(
+        ("with_cc", "national"),
+        [
+            ("+45 32 12 34 56", "32 12 34 56"),  # Denmark
+            ("+47 22 12 34 56", "22 12 34 56"),  # Norway
+            ("+65 6123 4567", "6123 4567"),  # Singapore
+            ("+352 621 123 456", "621 123 456"),  # Luxembourg
+        ],
+    )
+    def test_short_nsn_countries_now_corroborate_across_forms(
+        self, with_cc: str, national: str
+    ) -> None:
+        # These 8-digit-NSN countries used to fail PERMANENTLY: the fixed
+        # 9-digit tail ate one digit of the NSN the moment a country code
+        # was prepended, so the two forms' tails never matched by length,
+        # let alone content. A genuine returning client here got a
+        # duplicate sub-account on every re-signing, silently - the exact
+        # class round 5 fixed for UK landlines, unfixed for this cohort
+        # until now.
+        assert corroborating_signal_agrees(phone_a=with_cc, phone_b=national) is True
+
+    def test_a_country_outside_the_region_list_cannot_self_corroborate_without_a_plus(
+        self,
+    ) -> None:
+        # Documented scope boundary, not a silent gap: Italy is not in
+        # `_PHONE_CANDIDATE_REGIONS` (not a confirmed Bullet market), so a
+        # GENUINE Italian number written once with "+39" and once without
+        # cannot be resolved to the same reading - a missed link, the SAFE
+        # direction, not a wrong one. (Two IDENTICAL non-"+" strings would
+        # trivially self-match on whichever candidate region accepts them,
+        # which is why this test uses the country-code-present/absent pair
+        # rather than comparing the bare string to itself.)
+        assert (
+            corroborating_signal_agrees(phone_a="+39 06 5551 2345", phone_b="06 5551 2345")
+            is False
+        )
+
+    def test_placeholder_shaped_numbers_never_reach_real_number_interpretation(
+        self,
+    ) -> None:
+        # The filler pre-filter runs BEFORE any phonenumbers parsing, so a
+        # placeholder that happens to be digit-count-plausible for some
+        # real country never gets the chance to corroborate on that basis.
+        assert corroborating_signal_agrees(phone_a="1234567890", phone_b="1234567890") is False
+
+
+class TestAddressBoundaryShifts:
+    """Round 12, P2: `normalize_name`'s no-separator concatenation erased
+    token boundaries, so bar 4 abstained on genuinely different addresses -
+    chained with an ordinal-hijacked key, that removed the last surviving bar.
+    """
+
+    def test_boundary_shifted_addresses_diverge(self) -> None:
+        assert addresses_materially_diverge("Unit 1, 23 Mill Road", "Unit 12, 3 Mill Road") is True
+
+    def test_spacing_and_punctuation_still_do_not_diverge(self) -> None:
+        assert (
+            addresses_materially_diverge("12 Mare Street,  London", "12 Mare Street, London")
+            is False
+        )
+
+
+class TestOrdinalHijackViaUnenumeratedUnitWord:
+    """Round 13 (pure-logic execution audit) - the worst finding.
+
+    "Studio B2, 1st" carries NO real postcode, yet it minted the exact key
+    of the genuine Birmingham client at "B2 1ST" with a STRONG anchor: bar
+    3 was waived because `_UNIT_BEFORE`'s original list was office-generic
+    and never enumerated STUDIO - the one word this agency's own gym data
+    is full of. Two closures, tested independently: `_UNIT_BEFORE` now
+    lists the gym-industry words directly (defense in depth), and
+    `postcode_is_weak_anchor` treats every ordinal-shaped extraction as
+    weak regardless of which words surround it (the class fix - it would
+    have caught this even with STUDIO still unenumerated).
+    """
+
+    def test_studio_prefix_no_longer_mints_the_ordinal_key(self) -> None:
+        assert normalize_postcode("Studio B2, 1st") != "B21ST"
+
+    @pytest.mark.parametrize(
+        "prefix", ["Gym", "Bay", "Pod", "Kiosk", "Cabin", "Stall", "Studio"]
+    )
+    def test_gym_industry_unit_words_do_not_mint_a_postcode_key(self, prefix: str) -> None:
+        assert normalize_postcode(f"{prefix} B2 1st") != "B21ST"
+
+    def test_the_class_fix_holds_even_for_an_unenumerated_word(self) -> None:
+        # The defensive part of the fix is necessarily open-ended - a word
+        # nobody thought to add is still a gap in `_UNIT_BEFORE` alone. This
+        # is the CLASS closure: even if the value below used a unit word not
+        # on that list, the resulting key is ordinal-shaped and therefore a
+        # WEAK anchor unconditionally, so bar 3 stays required and no merge
+        # can happen on this signal alone.
+        key = normalize_postcode("Annex B2, 1st")  # "Annex" is not enumerated
+        if key:
+            assert postcode_is_weak_anchor(key) is True
+
+    def test_end_to_end_bar_3_stays_required(self) -> None:
+        # The full corroboration chain the reviewer traced: same brand, same
+        # shared phone, a hijacked postcode - the signer bar must still be
+        # the deciding factor, not waived by a false-strong anchor.
+        key_real = compute_identity_key("Anytime Fitness", "B2 1ST")
+        key_hijack = compute_identity_key("Anytime Fitness", "Studio B2, 1st")
+        assert key_real != key_hijack or key_hijack is None
+        if key_real is not None:
+            anchor_postcode = key_real.partition("|")[2]
+            assert postcode_is_weak_anchor(anchor_postcode) is True
+
+
+class TestContactNameShapeCheckIsCommutative:
+    """Round 13 (pure-logic execution audit): the shape checks ran on side A
+    only, so a role-noun-shaped part FUSED into one token ("ClubManager")
+    evaded both the role-noun and multi-token rules on that side, while the
+    equality check at the end still matched it against a spelled-out "Club
+    Manager" on the OTHER side - a real bug, and one that made the function
+    depend on ARGUMENT ORDER, which a symmetric corroboration signal must
+    never do.
+    """
+
+    def test_fused_role_title_on_either_side_refuses(self) -> None:
+        assert contact_name_agrees("ClubManager", "Jones", "Club Manager", "Jones") is False
+        assert contact_name_agrees("Club Manager", "Jones", "ClubManager", "Jones") is False
+
+    def test_result_is_order_independent(self) -> None:
+        a = contact_name_agrees("ClubManager", "Jones", "Club Manager", "Jones")
+        b = contact_name_agrees("Club Manager", "Jones", "ClubManager", "Jones")
+        assert a == b
+
+    def test_real_signers_still_agree_both_orders(self) -> None:
+        a = contact_name_agrees("Sarah", "Connor", "Sarah", "Connor")
+        b = contact_name_agrees("Sarah", "Connor", "Sarah", "Connor")
+        assert a is b is True
+
+
+class TestPostcodeDuplicateCandidateNotAmbiguous:
+    """Round 13 (pure-logic execution audit): candidates were counted by
+    OCCURRENCE, not distinct value - a copy-pasted duplicate ("E8 1AA E8
+    1AA") looked like "two genuine postcodes, no way to pick" and NULL-keyed
+    an unambiguous value.
+    """
+
+    def test_duplicated_postcode_still_keys(self) -> None:
+        assert normalize_postcode("E8 1AA E8 1AA") == "E81AA"
+
+    def test_duplicated_postcode_with_punctuation_still_keys(self) -> None:
+        assert normalize_postcode("E8 1AA, E8 1AA") == "E81AA"
+
+    def test_genuinely_different_postcodes_still_split(self) -> None:
+        # The real ambiguity case is unaffected by the dedupe.
+        assert normalize_postcode("E8 1AA / N1 4AB") == ""
+
+
+class TestSlashSeparatedPostcodes:
+    """Round 13 (pure-logic execution audit): the separator class recognised
+    whitespace/comma/period/hyphen but not a slash, so a slash-separated
+    postcode fell through to the flat/token path and lost the town-invariant
+    ("London E8/1AA" keyed as the WHOLE string, town included, instead of
+    "E81AA")."""
+
+    def test_slash_separated_postcode_matches_the_space_form(self) -> None:
+        assert normalize_postcode("E8/1AA") == normalize_postcode("E8 1AA") == "E81AA"
+
+    def test_town_prefixed_slash_postcode_matches_the_bare_form(self) -> None:
+        assert normalize_postcode("London E8/1AA") == normalize_postcode("E8 1AA") == "E81AA"
+
+    def test_slash_after_a_unit_designator_is_still_recognised(self) -> None:
+        # "Unit/B2 1st" - the unit-before guard's separator class gap.
+        assert normalize_postcode("Unit/B2 1st") != normalize_postcode("B2 1ST")
+
+
+class TestFitnessIndustryRoleTitles:
+    """Round 13 (pure-logic execution audit): `_ROLE_NOUNS` was office-generic
+    and missed the titles this agency's OWN signer fields are full of - a
+    gap of the exact same class round 12's fix closed for office titles.
+    Each param is its own sole-kill target so a partial revert of the
+    fitness-title additions is caught by name, not just by count.
+    """
+
+    @pytest.mark.parametrize(
+        ("first", "last"),
+        [
+            ("Head", "Coach"),
+            ("Personal", "Trainer"),
+            ("Fitness", "Instructor"),
+            ("Studio", "Lead"),
+            ("Gym", "Lead"),
+            ("Sales", "Rep"),
+            # SOLE-KILL pairs: "personal" and "studio" paired with a non-role
+            # last name, so removing either alone (and not any co-occurring
+            # role noun from the pairs above) still fails these two.
+            ("Personal", "Jones"),
+            ("Studio", "Jones"),
+            ("Duty", "Manager"),
+            ("Membership", "Advisor"),
+        ],
+    )
+    def test_fitness_titles_never_corroborate(self, first: str, last: str) -> None:
+        assert contact_name_agrees(first, last, first, last) is False

@@ -295,9 +295,15 @@ class _ConditionalAssertVisitor(ast.NodeVisitor):
         body_asserts = self._contains_assert(node.body)
         else_asserts = self._contains_assert(node.orelse)
         if (body_asserts != else_asserts) and self._condition_reads_system(node.test):
+            try:
+                rel = str(self.path.relative_to(REPO_ROOT))
+            except ValueError:
+                # Outside the repo (the synthetic self-test trees) - same
+                # fallback `_scan_seed_defaults` already carries.
+                rel = str(self.path)
             self.result.add(
                 "G4",
-                f"{self.path.relative_to(REPO_ROOT)}:{node.lineno}",
+                f"{rel}:{node.lineno}",
                 "assertions are gated behind a condition read from the system under "
                 "test - this passes silently in exactly the case it exists to catch",
             )
@@ -475,6 +481,116 @@ def check_g6_pii(result: GateResult, base: str, allowlist: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# G7 - the stored identity key is DERIVED; changing how it derives without a
+# migration silently splits the population (round 12, P1.6)
+# ---------------------------------------------------------------------------
+
+# The functions and module constants that shape the STORED key. Anything else
+# in the module (bar-3 shapes, weak-anchor classification, divergence guards)
+# reads rows at decision time and can change freely - only what writes
+# `clients.identity_key` is fingerprinted.
+_G7_KEY_FUNCTIONS = frozenset(
+    {
+        "normalize_name",
+        "normalize_postcode",
+        "compute_identity_key",
+        "identity_name",
+        "_fold_unicode",
+    }
+)
+_G7_KEY_CONSTANTS = frozenset(
+    {
+        "_ALNUM_TOKEN",
+        "_NON_ALNUM",
+        "_UK_POSTCODE",
+        "_STRUCTURE_AFTER",
+        "_UNIT_BEFORE",
+        "_ORDINAL_INWARD",
+        "_US_ZIP_PLUS_FOUR",
+        "_MIN_POSTCODE_LEN",
+        "_LEADING_ARTICLES",
+        "_TRAILING_SUFFIXES",
+        "_TRANSLITERATIONS",
+        "_NAME_PREFIX_LEN",
+        "KEY_SEPARATOR",
+        "LEGAL_ENTITY_PLACEHOLDER",
+    }
+)
+_IDENTITY_KEY_MODULE = "apps/api/src/bullet_api/worker/identity_key.py"
+
+
+def _normalizer_fingerprint(source: str) -> str:
+    """A stable dump of the key-shaping code, docstrings and comments excluded.
+
+    AST-based so that a docstring or comment edit does NOT trip G7 (forcing a
+    no-op migration for a prose change would teach people to bypass the gate),
+    while any semantic change to a fingerprinted function or constant does.
+    Unparseable source fingerprints as itself, failing toward "changed".
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    parts: list[tuple[str, str]] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if node.name not in _G7_KEY_FUNCTIONS:
+                continue
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                node.body = body[1:] or [ast.Pass()]
+            parts.append((node.name, ast.dump(node, include_attributes=False)))
+        elif isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if any(name in _G7_KEY_CONSTANTS for name in names):
+                parts.append((names[0], ast.dump(node, include_attributes=False)))
+    parts.sort()
+    return "\n".join(f"{name}: {dump}" for name, dump in parts)
+
+
+def check_g7_normalizer_migration(result: GateResult, base: str) -> None:
+    """FAIL when the key-shaping code changed and no migration touches
+    `identity_key` in the same diff.
+
+    `identity_key` is derived AND stored: old rows keep keys the new code can
+    no longer produce, so a genuine returning client silently stops matching
+    (0013's WARNING). That obligation was a docstring until round 12 (P1.6)
+    pointed out the escape hatch - "0013 has never run outside local dev" -
+    expires the moment this PR's `preDeployCommand` deploys. An enforced check
+    cannot go stale the way prose does. S1-26h owns the recompute tooling; this
+    check only refuses to let a normalizer change ship without SOMETHING
+    migration-shaped acknowledging the stored keys.
+    """
+    module_path = REPO_ROOT / _IDENTITY_KEY_MODULE
+    current_source = module_path.read_text() if module_path.is_file() else ""
+    base_source = _git("show", f"{base}:{_IDENTITY_KEY_MODULE}")
+    if _normalizer_fingerprint(base_source) == _normalizer_fingerprint(current_source):
+        return
+    changed = _git("diff", "--name-only", base).splitlines()
+    changed += _git("ls-files", "--others", "--exclude-standard").splitlines()
+    for name in changed:
+        if "alembic/versions/" not in name:
+            continue
+        candidate = REPO_ROOT / name
+        if candidate.is_file() and "identity_key" in candidate.read_text(errors="replace"):
+            return
+    result.add(
+        "G7",
+        _IDENTITY_KEY_MODULE,
+        "the key-shaping code changed but no migration in this diff touches "
+        "`identity_key`. The key is DERIVED and STORED - old rows keep keys the "
+        "new code cannot produce, so returning clients silently stop matching. "
+        "Ship a recompute/backfill migration with the change (S1-26h), or an "
+        "explicit migration-file note for why stored keys are unaffected.",
+    )
+
+
+# ---------------------------------------------------------------------------
 
 
 CHECKS = {
@@ -482,6 +598,7 @@ CHECKS = {
     "G4": "no conditional assertions",
     "G5": "no defaults on discriminating fixture params",
     "G6": "diff-scoped PII",
+    "G7": "normalizer change requires a key migration",
 }
 
 
@@ -491,6 +608,10 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--only", help="run a single check, e.g. G1")
     args = parser.parse_args()
+    # VALIDATED (round 12, P3): `--only G2` (or any typo) used to run ZERO
+    # checks and, with --json, print [] and exit 0 - a vacuous green.
+    if args.only and args.only not in CHECKS:
+        parser.error(f"--only must be one of {', '.join(sorted(CHECKS))}; got {args.only!r}")
 
     base = _merge_base(args.base)
     allowlist = _load_allowlist()
@@ -505,6 +626,8 @@ def main() -> int:
         check_g5_fixture_defaults(result)
     if "G6" in selected:
         check_g6_pii(result, base, allowlist.get("G6", []))
+    if "G7" in selected:
+        check_g7_normalizer_migration(result, base)
 
     if args.json:
         payload = [

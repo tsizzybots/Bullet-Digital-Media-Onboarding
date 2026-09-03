@@ -52,9 +52,21 @@ the dedup guard raises:
   record which location we suspect, so the human resolving the flag knows
   exactly what to merge into instead of hunting for it in the agency.
 
-All additive + nullable/defaulted, so this is a safe forward-only change; no
-backfill is required (the clients table is empty on staging, and pre-existing
-rows simply carry NULL `identity_key` and fall through to CREATE).
+All columns are additive + nullable/defaulted, so UPGRADE is safe with no
+backfill (the clients table is empty on staging, and pre-existing rows simply
+carry NULL `identity_key` and fall through to CREATE). DOWNGRADE IS NOT
+LOSSLESS and must not be described as safe (round 12, P2 - the previous
+wording said "safe forward-only" while `downgrade()` silently drops
+`postal_code`, `address`, and every human review decision recorded in the
+possible-duplicate columns): run it only on a database whose rows you are
+prepared to lose those columns from.
+
+A trigger (`trg_clients_clear_orphaned_duplicate_flag`) keeps the flag
+actionable (round 12, P2): `possible_duplicate_of` is ON DELETE SET NULL, so
+deleting the candidate used to clear the POINTER while leaving
+`possible_duplicate = true` - an un-actionable notice nothing could clear.
+The trigger clears the flag when the pointer transitions away and no other
+candidate (`possible_duplicate_ghl_id`) remains to act on.
 
 WARNING for whoever changes the normalizer next: `identity_key` is DERIVED and
 STORED, so it is a snapshot of `worker/identity_key.py` at the moment each row
@@ -62,8 +74,13 @@ was written. Any change to `normalize_name` / `normalize_postcode` /
 `identity_name` silently splits the population - old rows keep keys the new
 code can no longer produce, so a genuine returning client stops matching and
 gets a duplicate sub-account. Such a change MUST ship with a recompute of every
-non-NULL `identity_key`. This is free TODAY only because 0013 has never been
-applied outside a local dev database, so no stored keys exist yet.
+non-NULL `identity_key`. THIS OBLIGATION IS NOW ENFORCED, NOT ADVISORY (round
+12, P1.6): `render.yaml` ships `preDeployCommand: uv run alembic upgrade head`
+in the same PR as this migration, so "0013 has never been applied outside
+local dev" stops being true on the first staging deploy after merge - and
+`review_gate.py`'s G7 check fails CI when `worker/identity_key.py`'s
+normalization functions change with no migration touching `identity_key` in
+the same diff (S1-26h owns the recompute tooling itself).
 """
 
 from __future__ import annotations
@@ -116,9 +133,51 @@ def upgrade() -> None:
     )
     op.add_column("clients", sa.Column("possible_duplicate_ghl_id", sa.Text(), nullable=True))
     op.create_index("ix_clients_identity_key", "clients", ["identity_key"])
+    # Keep the flag actionable when its candidate disappears (round 12, P2).
+    # The FK's ON DELETE SET NULL fires this UPDATE trigger; when the pointer
+    # transitions away and no GHL-location candidate remains either, the flag
+    # would point at nothing forever (no clearing endpoint exists until
+    # S1-26e), so it clears with it. A deliberate app write is unaffected:
+    # `_clear_possible_duplicate` clears the flag itself, and
+    # `_flag_possible_duplicate` only ever sets pointers via COALESCE.
+    op.execute(
+        sa.text(
+            """
+            CREATE FUNCTION clients_clear_orphaned_duplicate_flag() RETURNS trigger AS $$
+            BEGIN
+                IF NEW.possible_duplicate
+                   AND OLD.possible_duplicate_of IS NOT NULL
+                   AND NEW.possible_duplicate_of IS NULL
+                   AND NEW.possible_duplicate_ghl_id IS NULL THEN
+                    NEW.possible_duplicate := false;
+                END IF;
+                RETURN NEW;
+            END
+            $$ LANGUAGE plpgsql
+            """
+        )
+    )
+    op.execute(
+        sa.text(
+            "CREATE TRIGGER trg_clients_clear_orphaned_duplicate_flag "
+            "BEFORE UPDATE OF possible_duplicate_of ON clients "
+            "FOR EACH ROW EXECUTE FUNCTION clients_clear_orphaned_duplicate_flag()"
+        )
+    )
+    # SET LOCAL above is TRANSACTION-scoped, and env.py runs `upgrade head` as
+    # ONE transaction (no transaction_per_migration), so without this reset the
+    # 5s lock_timeout would silently apply to every LATER migration in the same
+    # batch (round 12, P2) - changing their failure semantics from "wait" to
+    # "abort" with nothing in their own files saying so.
+    op.execute(sa.text("SET LOCAL lock_timeout = DEFAULT"))
 
 
 def downgrade() -> None:
+    # NOT LOSSLESS (round 12, P2): drops `postal_code`, `address`, and the
+    # possible-duplicate columns - including every human review decision
+    # recorded in them. See the module docstring.
+    op.execute(sa.text("DROP TRIGGER trg_clients_clear_orphaned_duplicate_flag ON clients"))
+    op.execute(sa.text("DROP FUNCTION clients_clear_orphaned_duplicate_flag()"))
     op.drop_index("ix_clients_identity_key", table_name="clients")
     op.drop_column("clients", "possible_duplicate_ghl_id")
     op.drop_column("clients", "possible_duplicate_of")

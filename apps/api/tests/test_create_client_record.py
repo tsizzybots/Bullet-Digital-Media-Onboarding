@@ -32,6 +32,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.pandadoc.client import FakePandaDocClient, PandaDocNotFound
@@ -784,3 +785,64 @@ async def test_placeholder_legal_entity_yields_no_identity_key(
     legal_entity, identity_key = row.one()
     assert legal_entity == LEGAL_ENTITY_PLACEHOLDER
     assert identity_key is None
+
+
+# --------------------------------------------------------------------------- #
+# Round 12, P2: the schema-drift "MUST stay retriable" contract, now pinned
+# --------------------------------------------------------------------------- #
+
+
+async def test_schema_drift_stays_retriable_and_logs_no_bind_params(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ProgrammingError from the core must PROPAGATE (retriable), never be
+    translated to NonRetriableError - dead-lettering schema drift loses the
+    signing permanently (no platform_actions row exists yet, and the reconcile
+    cron's ON CONFLICT sees the onboarding_events row as already handled). The
+    contract lived only in a comment until round 12 found that routing it to
+    NonRetriableError left the whole suite green.
+
+    Same test, second property (round 12, P2): the drift log line must not
+    carry the INSERT's bind parameters - `str(exc)` on a StatementError appends
+    `[parameters: {...}]`, the full client PII set.
+    """
+    import contextlib
+    from unittest.mock import Mock
+
+    from bullet_api.worker import client_record as module
+
+    async def _fake_fetch(pandadoc_client: object, document_id: str) -> dict:  # noqa: ARG001
+        return {"id": document_id}
+
+    @contextlib.asynccontextmanager
+    async def _fake_session_cm():
+        yield Mock()
+
+    drift = ProgrammingError(
+        "INSERT INTO clients (...)",
+        {"email": "leaked-bind-param@example.com"},
+        Exception('column "identity_key" of relation "clients" does not exist'),
+    )
+
+    async def _raising_core(*args: object, **kwargs: object) -> object:
+        raise drift
+
+    monkeypatch.setattr(module, "fetch_document_for_orchestrator", _fake_fetch)
+    monkeypatch.setattr(module, "AsyncSessionLocal", _fake_session_cm)
+    monkeypatch.setattr(module, "create_client_record_core", _raising_core)
+
+    ctx = Mock()
+    ctx.event.data = {
+        "onboarding_event_id": "00000000-0000-0000-0000-000000000001",
+        "document_id": "doc-drift",
+    }
+
+    handler = module.create_client_record._handler  # type: ignore[attr-defined]
+    with caplog.at_level("ERROR"):
+        with pytest.raises(ProgrammingError):
+            await handler(ctx)
+
+    drift_lines = [r for r in caplog.records if "schema drift" in r.getMessage()]
+    assert drift_lines, "the drift branch must log loudly"
+    for record in caplog.records:
+        assert "leaked-bind-param@example.com" not in str(record.__dict__)

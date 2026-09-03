@@ -64,6 +64,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
+import phonenumbers
+
 # Written into `clients.legal_entity` (NOT NULL) when neither the signed
 # legal-trading-name field nor `Company.Name` yielded anything. It is a marker,
 # not a name - `identity_name` rejects it so an unidentifiable signing can never
@@ -79,12 +81,25 @@ _LEADING_ARTICLES = frozenset({"the"})
 _TRAILING_SUFFIXES = frozenset({"ltd", "limited"})
 
 _NAME_PREFIX_LEN = 6
-_KEY_SEPARATOR = "|"
+# PUBLIC: ghl_subaccount splits the stored key on this to recover the anchor
+# postcode (round 12, P2 - it previously hard-coded a bare "|" across the
+# module boundary; if the separator ever changed, `partition` returned ""
+# there, the anchor was judged strong, and bar 3 silently switched off on
+# every keyed row).
+KEY_SEPARATOR = "|"
 
-# Tokenize on runs of alphanumerics, so punctuation and whitespace both split
-# ("ltd." -> "ltd", "F45  Training" -> "f45", "training"). Applied AFTER the
-# unicode fold below, so accented letters are already plain ASCII by this point.
-_ALNUM_TOKEN = re.compile(r"[a-z0-9]+")
+# Tokenize on runs of WORD characters (any script), so punctuation and
+# whitespace both split ("ltd." -> "ltd", "F45  Training" -> "f45",
+# "training"). Applied AFTER the unicode fold below, so accented LATIN letters
+# are already plain ASCII by this point - and non-Latin letters are KEPT, not
+# deleted (round 12, P1.3): the previous ASCII-only class `[a-z0-9]+` deleted
+# what the fold could not transliterate, so "Титан Gym" and "Атлант Gym" both
+# collapsed to the stem "gym" (bar 1 structurally inert for the whole
+# non-Latin cohort) while a fully non-Latin name normalized to "" and
+# NULL-keyed on every signing (a systematic silent SPLIT). `[^\W_]` is the
+# unicode word class minus underscore; for pure ASCII input it matches exactly
+# what `[a-z0-9]+` matched, proven by the Latin-invariance tests.
+_ALNUM_TOKEN = re.compile(r"[^\W_]+")
 _NON_ALNUM = re.compile(r"[^A-Z0-9]+")
 _NON_DIGIT = re.compile(r"[^0-9]")
 
@@ -95,12 +110,97 @@ _NON_DIGIT = re.compile(r"[^0-9]")
 # exact placeholder keys ("00000", "99999") the filler checks exist to reject.
 _US_ZIP_PLUS_FOUR = re.compile(r"^(\d{5})-?\d{4}$")
 
-# Phone comparison uses the TAIL of the digits so a country code / trunk prefix
-# difference ("+44 7700 900123" vs "07700 900123") does not split one business.
-# 9 is long enough that two genuinely different numbers colliding is not a real
-# scenario, and short enough to survive every national prefix convention.
+# `normalize_phone`'s own OUTPUT is no longer what decides corroboration
+# (round 13 moved that to `_phone_interpretations`, real per-country
+# structure via `phonenumbers` - see its docstring for why: a tail-suffix
+# comparison cannot tell "the same number in two formats" from "a
+# coincidence between two different countries' numbers", and this SAME
+# constant's own reasoning below - "9 is long enough... not a real
+# scenario" - is precisely the class of claim the round-13 audit falsified
+# by construction). This tail is now used ONLY as the FILLER pre-filter
+# (`corroborating_signal_agrees` checks `normalize_phone(...)` is non-empty
+# before ever attempting a real-number reading) and by `normalize_phone`'s
+# own direct callers/tests. 9 is long enough that FILLER shapes (repeating
+# pairs, sequential runs) are reliably distinguishable from real numbers;
+# it is not, on its own, long enough to serve as an identity comparison -
+# that job now belongs to `_phone_interpretations`.
 _PHONE_SIGNIFICANT_DIGITS = 9
 _PHONE_MIN_DIGITS = 7
+
+# Regions tried when a phone number has no "+" and is therefore ambiguous
+# about which country it belongs to (round 13, P2/P0 residual close - see
+# `_phone_interpretations`). Two groups: markets this module's OWN test
+# corpus already establishes as real (UK - the primary market - plus every
+# INT postcode example cited elsewhere in this file: France, Belgium, the
+# Netherlands, Ireland, Iceland, Malta, Sweden, Canada, the US), and the
+# short-national-number cohort `postcode_is_weak_anchor`'s own docstring
+# names as a target (Denmark, Norway, Singapore, Luxembourg - all countries
+# with 8-digit national numbers, where the fixed 9-digit tail this module
+# used to compare ate one digit of the number itself the moment a country
+# code was prepended, permanently failing that cohort's own returning
+# clients). Deliberately NOT a general-purpose country list: a number from a
+# country outside it, written without a "+", will not corroborate - a
+# missed link, the safe direction, visible as a spare sub-account rather
+# than a silent wrong merge.
+_PHONE_CANDIDATE_REGIONS = (
+    "GB",
+    "FR",
+    "BE",
+    "NL",
+    "IE",
+    "IS",
+    "MT",
+    "SE",
+    "CA",
+    "US",
+    "DK",
+    "NO",
+    "SG",
+    "LU",
+)
+
+
+def _phone_interpretations(phone: str) -> list[tuple[int, int]]:
+    """Every plausible (country_code, national_number) reading of `phone`.
+
+    Round 13 replaced the old tail-suffix heuristic here (round 12's
+    "9-digit tail plus a zero-stripped full-string suffix check") with real
+    per-country numbering-plan structure via `phonenumbers` (the Python port
+    of Google's libphonenumber) - the audit that found the old heuristic's
+    failure modes also showed neither is closable by tightening the SAME
+    heuristic further: a number with no explicit country code is digit-for-
+    digit indistinguishable from any other country's number in the same
+    shape, which no digit-suffix rule can resolve; only real per-country
+    metadata can.
+
+    A "+"-prefixed number is UNAMBIGUOUS - its country code is stated, not
+    guessed - and `phonenumbers.parse` uses it regardless of which region is
+    passed as a hint (verified by execution: the same "+"-prefixed string
+    parses to the identical country_code/national_number under every region
+    tried below, so there is no separate unambiguous-parse branch here to
+    maintain - a prior version of this function had one, and it was a pure
+    optimisation with zero observable effect, i.e. a guard that provably
+    cannot fail; removed rather than shipped unpinned). A number with no "+"
+    IS ambiguous, so it is tried against every region in
+    `_PHONE_CANDIDATE_REGIONS` and every STRUCTURALLY POSSIBLE reading is
+    kept. `is_possible_number` (digit-count plausibility for that country),
+    not the stricter `is_valid_number` (checked against actually-assigned
+    ranges): a genuine client's real number must never be rejected here for
+    landing in a range this library's metadata does not yet list as
+    assigned - that would trade a merge-direction fix for a new split-
+    direction regression. Malformed input raises `NumberParseException` for
+    that one region attempt, skipped rather than treated as fatal.
+    """
+    readings: list[tuple[int, int]] = []
+    for region in _PHONE_CANDIDATE_REGIONS:
+        try:
+            parsed = phonenumbers.parse(phone, region)
+        except phonenumbers.NumberParseException:
+            continue
+        if phonenumbers.is_possible_number(parsed):
+            readings.append((parsed.country_code, parsed.national_number))
+    return readings
+
 
 # A number made of a single repeated digit ("000000000") or an alternating
 # two-digit block ("121212121") is filler, not a contact. Rejecting it stops
@@ -139,29 +239,50 @@ _PHONE_MIN_DIGITS = 7
 # keyed differently from the same business's bare "E8 1AA" - one business, two
 # keys, so no DB candidate and a duplicate sub-account with no flag.
 _UK_POSTCODE = re.compile(
-    r"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\s,.\-]*([0-9][A-Z]{2})(?![A-Z0-9])"
+    r"(?<![A-Z0-9])([A-Z]{1,2}[0-9][A-Z0-9]?)[\s,.\-/]*([0-9][A-Z]{2})(?![A-Z0-9])"
 )
 
-# The inward half `[0-9][A-Z]{2}` also matches an English ORDINAL, and the
-# relaxed separator lets the outward half latch onto a preceding unit number, so
-# a floor-number unit was read as the postcode (review round 9, P1.3). But an
-# ordinal-shaped inward can ALSO be a real postcode, so `normalize_postcode`
-# treats an ordinal match as a fallback rather than discarding it outright (see
-# the extraction loop for the ordering rule). `fullmatch` because the inward
-# group is always exactly `[0-9][A-Z]{2}` (three chars).
+# The inward half `[0-9][A-Z]{2}` also matches an English ORDINAL ("1ST",
+# "2ND", "3RD", "8TH"), and the relaxed separator lets the outward half latch
+# onto a preceding unit number, so a unit/floor number can be read as a
+# postcode (review round 9, P1.3). An ordinal-shaped inward can ALSO be a real
+# postcode ("B33 8TH" is a GOV.UK canonical example), so ordinal-shaped matches
+# are AMBIGUOUS candidates - see the candidate rules in `normalize_postcode`.
+# `fullmatch` because the inward group is always exactly `[0-9][A-Z]{2}`.
 _ORDINAL_INWARD = re.compile(r"[0-9](?:ST|ND|RD|TH)")
 
-# A unit/floor ordinal is never a postcode. When an ordinal-shaped inward half is
-# immediately followed by a floor word, skip it outright rather than keeping it as
-# the postcode fallback, so a value that is a floor with no postcode does not mint
-# a key (review round 11, P0.1). Matched from the position AFTER the ordinal.
-_FLOOR_AFTER = re.compile(r"[\s,.\-]*(?:FLOOR|FLR|FL)\b")
+# An ordinal immediately followed by an address-STRUCTURE word is a unit floor
+# number or a street name, never a postcode. Round 11 guarded only FLOOR|FLR|FL
+# and round 12 (P0.1) showed streets were the class that denylist was a shadow
+# of: "3rd Avenue" / "2nd Street" survived the floor guard and hijacked the key
+# across arbitrary geography. Longest alternatives first so `\b` cannot split a
+# longer word ("FLOOR" before "FL", "STREET" before "ST"). Matched from the
+# position AFTER the ordinal. Every entry only ever DROPS a candidate, which
+# fails toward SPLIT - the module's safe direction - so the list is generous.
+_STRUCTURE_AFTER = re.compile(
+    r"[\s,.\-/]*(?:FLOOR|FLR|FL|LEVEL|LVL|STREET|ST|AVENUE|AVE|AV|ROAD|RD"
+    r"|LANE|LN|BOULEVARD|BLVD|WAY|DRIVE|DR|CLOSE|COURT|CT|PLACE|PL"
+    r"|TERRACE|TER|CRESCENT|CRES|GARDENS|GDNS|SQUARE|SQ|PARADE|ROW|WALK"
+    r"|GROVE|GREEN|MEWS|HILL|PARK)\b"
+)
 
-# A WEAK-anchor postcode (see `postcode_is_weak_anchor`): a leading run of one
-# repeated NON-ZERO digit, then optional letters. Catches filler bare ("11111")
-# and filler with trailing text ("11111USA"); excludes every letter-first real
-# postcode and any code with a second distinct digit.
-_WEAK_POSTCODE = re.compile(r"([1-9])\1*[A-Z]*")
+# An ordinal-shaped candidate whose OUTWARD half is immediately preceded by a
+# unit-designator word is a unit number with a trailing ordinal ("Unit B2 1st"),
+# not a postcode (review round 12, P0.2 - the trailing mirror of the floor
+# case: round 11 flipped first-to-last, which fixed the prefix shape and opened
+# the suffix shape, because a positional rule always has a positional mirror).
+# Anchored at the END of the text preceding the candidate.
+# Round 13 (pure-logic execution audit): the original list was office-generic
+# and missed the words THIS agency's own data is full of - "Studio B2, 1st"
+# minted the genuine Birmingham client's key. STUDIO/GYM/BAY/POD/KIOSK/CABIN/
+# STALL added as defense in depth; `postcode_is_weak_anchor`'s ordinal-shape
+# clause is the real, class-level fix (a word we still failed to enumerate
+# here is caught there instead), so this list is belt-and-braces, not the
+# only line of defence.
+_UNIT_BEFORE = re.compile(
+    r"\b(?:UNIT|SUITE|STE|APT|APARTMENT|FLAT|ROOM|RM|SHOP|BLOCK|BLDG"
+    r"|BUILDING|OFFICE|LOT|NO|NUMBER|STUDIO|GYM|BAY|POD|KIOSK|CABIN|STALL)[\s,.\-/#]*$"
+)
 
 # There is deliberately NO postcode denylist any more (review round 7 found
 # every membership check dead). The shape checks in `normalize_postcode`
@@ -176,25 +297,88 @@ _WEAK_POSTCODE = re.compile(r"([1-9])\1*[A-Z]*")
 # rather than an address.
 _MIN_POSTCODE_LEN = 3
 
-# Typed into the signing-contact fields when the real signer is not known.
-# Compared against the lowercased "first last" form. Without this, two
-# unrelated clients whose documents both name a department rather than a person
-# corroborate each other on bar 3 - the same failure the placeholder postcode
-# and phone denylists exist to prevent.
-_PLACEHOLDER_CONTACT_NAMES = frozenset(
+# Role/department nouns that mark a signing-contact "name" as a JOB TITLE, not
+# a person (round 12, P1.1). The previous 12-entry exactly-two-word denylist was
+# the enumeration antipattern this module deleted everywhere else - and it was
+# bypassed in the UNSAFE direction: ("Club", "Manager") corroborated because
+# nobody had enumerated it, and ("Head Office", "Manager") walked past a set
+# keyed on exactly two words. A role noun appearing in EITHER part refuses by
+# SHAPE, so the bypass class is closed rather than chased entry by entry. A
+# real person surnamed one of these is vanishingly rare and the cost of a false
+# refusal is a SPLIT (flag, not merge) - the module's safe direction.
+_ROLE_NOUNS = frozenset(
     {
-        "head office",
-        "the office",
-        "accounts department",
-        "accounts dept",
-        "accounts payable",
-        "front desk",
-        "main office",
-        "reception desk",
-        "n a",
-        "na",
-        "not applicable",
-        "to be confirmed",
+        "manager",
+        "director",
+        "owner",
+        "office",
+        "desk",
+        "admin",
+        "administrator",
+        "secretary",
+        "accounts",
+        "account",
+        "reception",
+        "receptionist",
+        "assistant",
+        "supervisor",
+        "coordinator",
+        "department",
+        "dept",
+        "team",
+        "staff",
+        "officer",
+        "principal",
+        "proprietor",
+        "founder",
+        "partner",
+        "chairman",
+        "chairwoman",
+        "chairperson",
+        "president",
+        "ceo",
+        "cfo",
+        "coo",
+        "md",
+        "gm",
+        "hr",
+        "payroll",
+        # Round 13 (pure-logic execution audit): the original set was
+        # office-generic and missed the titles a FITNESS business's own
+        # signer fields are full of - ("Head","Coach") corroborated because
+        # neither word was enumerated. Same open-class trade as the rest of
+        # this set: a title we still fail to enumerate remains a gap, the
+        # same documented residual as every other shape-by-enumeration guard
+        # in this module.
+        "coach",
+        "trainer",
+        "instructor",
+        "lead",
+        "rep",
+        "sales",
+        "duty",
+        "membership",
+        "pt",
+        "personal",
+        "fitness",
+        "studio",
+    }
+)
+
+# Placeholder first/last PAIRS that no shape rule can recognise - the
+# ("john", "doe") pair is two perfectly name-shaped tokens. Small and closed
+# by nature - these are the
+# canonical dummy names, not an open class - unlike the role-title set above,
+# where the open class is handled by shape.
+_PLACEHOLDER_NAME_PAIRS = frozenset(
+    {
+        ("john", "doe"),
+        ("jane", "doe"),
+        ("n", "a"),
+        ("not", "applicable"),
+        ("first", "last"),
+        ("firstname", "lastname"),
+        ("full", "name"),
     }
 )
 
@@ -247,6 +431,33 @@ def _fold_unicode(value: str) -> str:
     )
 
 
+# Normalized STEMS that mark a "name" as a placeholder, whatever field it
+# arrived in and however it was cased or spaced (round 12, P2): the
+# unidentifiable-can-never-merge invariant used to be an exact-string compare
+# against the one `LEGAL_ENTITY_PLACEHOLDER` constant, so "N/A" keyed as
+# `na|...`, "TBC" as `tbc|...`, and a case or trailing-space variant of the
+# placeholder itself keyed normally - uniting unidentifiable signings on
+# exactly the non-identity the constant exists to refuse. Stems, not raw
+# strings, so "n/a", "N.A." and " tbc " all resolve to one member. The
+# normalized form of `LEGAL_ENTITY_PLACEHOLDER` is a member for the same
+# reason.
+_PLACEHOLDER_NAME_STEMS = frozenset(
+    {
+        "na",
+        "tbc",
+        "tbd",
+        "tba",
+        "unknown",
+        "none",
+        "notapplicable",
+        "pending",
+        "test",
+        "xxx",
+        "unknownneedsreview",
+    }
+)
+
+
 def identity_name(business_name: str | None, legal_entity: str | None = None) -> str | None:
     """The name that identifies this client: trading name, else legal entity.
 
@@ -260,25 +471,33 @@ def identity_name(business_name: str | None, legal_entity: str | None = None) ->
     learned nothing - so it is rejected here and the caller fails safe to
     CREATE rather than uniting every unidentifiable signing under one key.
     """
-    if business_name and business_name.strip():
-        return business_name
-    if legal_entity and legal_entity.strip() and legal_entity != LEGAL_ENTITY_PLACEHOLDER:
-        return legal_entity
+    for candidate in (business_name, legal_entity):
+        if not candidate or not candidate.strip():
+            continue
+        if candidate == LEGAL_ENTITY_PLACEHOLDER:
+            continue
+        # Placeholder by SHAPE, not just by the one constant (round 12, P2):
+        # a business_name of "N/A" falls through to the legal entity, and a
+        # placeholder-shaped legal entity yields None -> fail-safe CREATE.
+        if normalize_name(candidate) in _PLACEHOLDER_NAME_STEMS:
+            continue
+        return candidate
     return None
 
 
 def normalize_name(name: str | None) -> str:
     """Normalize a business name to a compact alphanumeric identity stem.
 
-    fold accents -> lowercase -> tokenize on non-alphanumerics -> drop a
-    leading article ("the") -> drop a trailing company suffix
+    fold accents -> casefold -> tokenize on non-word characters (any script:
+    non-Latin letters are part of the identity, not noise - round 12, P1.3) ->
+    drop a leading article ("the") -> drop a trailing company suffix
     ("ltd"/"limited") -> join the remaining tokens with no separators. Returns
     "" when nothing usable remains (None, blank, or a name that is only an
     article/suffix).
     """
     if not name:
         return ""
-    tokens = _ALNUM_TOKEN.findall(_fold_unicode(name).lower())
+    tokens = _ALNUM_TOKEN.findall(_fold_unicode(name).casefold())
     if tokens and tokens[0] in _LEADING_ARTICLES:
         tokens = tokens[1:]
     if tokens and tokens[-1] in _TRAILING_SUFFIXES:
@@ -289,32 +508,53 @@ def normalize_name(name: str | None) -> str:
 def normalize_postcode(postcode: str | None) -> str:
     """Normalize a postcode to a canonical key fragment, or "" if unusable.
 
-    THE SPEC, small enough to state completely - which is the round-7 fix:
+    THE SPEC, small enough to state completely, and restated in round 12 to
+    match the code exactly (round 12 P1.7 found the previous version of this
+    docstring describing a contiguity rule the module no longer had and listing
+    "99999" as rejected when it keys - a maintainer "fixing" the code to match
+    the stale spec would have re-broken round 9's P1.2; every example below is
+    pinned by a test so the doc cannot drift again):
 
-    1. A UK postcode found in the RAW string is extracted as outward+inward
-       ("London E8 1AA" -> "E81AA"). Raw only: round 6's extra probe of the
-       separator-stripped form went dead under this spec (a flat-form match is
-       boxed in by its own lookarounds to equal the whole flat string, which is
-       what step 2 returns anyway) and was deleted in round 7 when the mutation
-       runner proved no test could kill it. Separator-free spellings like
-       "AB12CD" still match the raw probe directly, and the exotic spelling
-       "B 11 1AA" (separators INSIDE the outward half) keys through step 2 as
-       the same flat string the probe would extract - no residual at all under
-       the round-8 filler rule, pinned by test.
-    2. Otherwise the key IS the separator-stripped uppercased string, verbatim -
+    1. CANDIDATE DISCOVERY: every UK-shaped match (outward+inward) in the RAW
+       string is a candidate. A candidate whose inward half is an English
+       ordinal ("1ST"/"2ND"/"3RD"/"8TH"...) is AMBIGUOUS - it can be a real
+       postcode ("B33 8TH") or a unit/floor/street number - and is DROPPED
+       outright when the text around it says which: an address-structure word
+       after it ("1st Floor", "3rd Avenue", "2nd Street") or a unit designator
+       before it ("Unit B2 1st"). A non-ordinal candidate is REAL.
+    2. CANDIDATE SELECTION, failing toward SPLIT whenever position would have
+       to guess (round 12 P0.1/P0.2 - the ordinal rule was wrong three ways in
+       three rounds precisely because skip-all/keep-first/keep-last are all
+       positional guesses with positional mirrors):
+         exactly one REAL        -> that candidate ("Unit B2, 1st Floor,
+                                    E8 1AA" -> "E81AA"; a REAL candidate also
+                                    beats any surviving ordinal, so
+                                    "B33 8TH, Head Office N1 4AB" -> "N14AB",
+                                    the S1-26f residual, unchanged)
+         two or more REAL        -> "" (two genuine postcodes, no way to pick:
+                                    "E8 1AA / N1 4AB" -> "")
+         zero REAL, one AMBIGUOUS -> that candidate ("B33 8TH" and
+                                    "London B33 8TH" -> "B338TH";
+                                    "B33 8TH, Unit A1 1st" -> "B338TH")
+         zero REAL, two or more  -> "" ("E8 1ST B33 8TH" -> "": position
+                                    provably cannot decide between ordinals)
+         zero candidates         -> step 3.
+    3. Otherwise the key IS the separator-stripped uppercased string, verbatim -
        no sorting, no dropping, no reordering of any kind - with exactly one
        equivalence: a US ZIP+4 reduces to its ZIP5 ("94107-1234" -> "94107",
        one delivery area, one client), and the reduced value still runs the
        filler gauntlet below rather than returning early (review round 7:
        returning early let "00000-0000" mint the exact placeholder key "00000"
        the gauntlet exists to reject).
-    3. Filler is rejected by SHAPE, never by denylist: too short
+    4. Filler is rejected by SHAPE, never by denylist: too short
        (`_MIN_POSTCODE_LEN`), no digit at all ("TBA", "NONE", "XXXX"), or a
-       contiguous run of one repeated digit ("00000", "99999", "00000 ABC").
-       The contiguity requirement is what keeps real alternating postcodes
-       alive: Ottawa's "K1K 1K1" has digit content "111" but no "111" run, so
-       it keys normally (a latent false-reject in rounds 5-6, found while
-       proving the round-7 rejection rules).
+       single-repeated-digit block whose digit is ZERO ("00000", "0000",
+       "00000 ABC") - no postal system issues an all-zero block. A NONZERO
+       single-repeated block is a REAL postcode (Itegem "2222", Reykjavik
+       "111", Diemen "1111 AB") and KEYS - "99999" keys too; what contains the
+       filler risk is `postcode_is_weak_anchor`, which keeps the signer bar
+       required for low-entropy digit content rather than NULL-keying real
+       codes (rounds 9-12 traded these off explicitly; see that function).
 
     WHY THE KEY PRESERVES ORDER - the theorem that ends the axis-trading.
     Rounds 4-7 each repaired one axis and silently broke another: round 4
@@ -366,31 +606,37 @@ def normalize_postcode(postcode: str | None) -> str:
     # reject to NULL under the contiguity filler rule; with that rule narrowed
     # to spare real repdigit postcodes, the token path keys it as "B111AA" -
     # exactly what the probe would have extracted. Zero divergence remains.
-    # An ordinal-shaped inward half can be EITHER a unit floor-number OR a real
-    # postcode - "E8 1ST" and "B33 8TH" (a GOV.UK canonical example) both end in
-    # one. Skipping every ordinal match outright (round 9) discarded the ~1% of
-    # real UK postcodes shaped that way and broke the town-invariant this probe
-    # exists for - a value carrying the town must key the same as the bare
-    # postcode (round 10, P1.3). So prefer the first NON-ordinal match, and keep
-    # an ordinal-shaped one only as a fallback. Two refinements were needed
-    # (round 11, P0.1), both because a unit/floor ordinal always PRECEDES the
-    # postcode in an address:
-    #   - keep the LAST ordinal-shaped match, not the first, so a real
-    #     ordinal-shaped postcode ("Unit A1, 1st Floor, B33 8TH") beats the floor
-    #     ordinal that precedes it instead of both collapsing onto one key;
-    #   - drop an ordinal that is immediately followed by a floor word entirely,
-    #     so an ordinal-only value with no postcode ("Unit B2, 1st Floor") falls
-    #     through to the token path rather than minting a spurious postcode key.
-    ordinal_fallback = None
+    # CANDIDATE RULES (round 12, P0.1/P0.2 - see THE SPEC above). The three
+    # previous positional rules (skip-all in round 9, keep-first in round 10,
+    # keep-last-with-a-floor-denylist in round 11) each fixed the review's
+    # example and broke its mirror, because address grammar puts ordinals both
+    # BEFORE the postcode (units, floors) and AFTER it (streets, trailing unit
+    # ordinals). So position never decides ordinal-vs-ordinal here: contextual
+    # evidence drops what it can prove is not a postcode, a REAL candidate
+    # outranks what remains, and any residual tie fails toward SPLIT ("" ->
+    # NULL key -> fail-safe CREATE), never toward a guess.
+    real_candidates: list[str] = []
+    ordinal_candidates: list[str] = []
     for uk_match in _UK_POSTCODE.finditer(upper):
+        candidate = uk_match.group(1) + uk_match.group(2)
         if _ORDINAL_INWARD.fullmatch(uk_match.group(2)):
-            if _FLOOR_AFTER.match(upper, uk_match.end()):
+            if _STRUCTURE_AFTER.match(upper, uk_match.end()):
                 continue
-            ordinal_fallback = uk_match.group(1) + uk_match.group(2)
-            continue
-        return uk_match.group(1) + uk_match.group(2)
-    if ordinal_fallback is not None:
-        return ordinal_fallback
+            if _UNIT_BEFORE.search(upper, 0, uk_match.start()):
+                continue
+            ordinal_candidates.append(candidate)
+        else:
+            real_candidates.append(candidate)
+    distinct_real = set(real_candidates)
+    if len(distinct_real) == 1:
+        return real_candidates[0]
+    if len(distinct_real) >= 2:
+        return ""
+    distinct_ordinal = set(ordinal_candidates)
+    if len(distinct_ordinal) == 1:
+        return ordinal_candidates[0]
+    if len(distinct_ordinal) >= 2:
+        return ""
     stripped = flat
     zip_plus_four = _US_ZIP_PLUS_FOUR.match(stripped)
     if zip_plus_four is not None:
@@ -404,7 +650,10 @@ def normalize_postcode(postcode: str | None) -> str:
         # with none ("TBA", "NONE", "PENDING") is a placeholder by shape.
         return ""
     digits = "".join(ch for ch in stripped if ch.isdigit())
-    if digits and len(set(digits)) == 1:
+    # No `digits and` guard (round 12, P3): the no-digit check above already
+    # returned, so `digits` cannot be empty here - a condition no input can
+    # falsify reads as coverage.
+    if len(set(digits)) == 1:
         # A single-repeated-digit block is filler ONLY when the digit is ZERO
         # ("00000", "0000", "00000 ABC"): no postal system issues an all-zero
         # block. A NONZERO single-repeated block is a REAL postcode, whether it
@@ -438,7 +687,7 @@ def compute_identity_key(business_name: str | None, postcode: str | None) -> str
     postcode_norm = normalize_postcode(postcode)
     if not postcode_norm:
         return None
-    return name_norm[:_NAME_PREFIX_LEN] + _KEY_SEPARATOR + postcode_norm
+    return name_norm[:_NAME_PREFIX_LEN] + KEY_SEPARATOR + postcode_norm
 
 
 def _is_sequential_digits(digits: str) -> bool:
@@ -545,9 +794,59 @@ def corroborating_signal_agrees(*, phone_a: str | None, phone_b: str | None) -> 
     "only name and postcode agree" flags for a human instead of merging. That
     is the conservative direction on purpose - a missed link creates a spare
     sub-account, a wrong link puts one client's assets in another's account.
+
+    REBUILT ON REAL PHONE-NUMBER STRUCTURE (round 13, closing both residuals
+    the pure-logic audit found in the round-12 tail-suffix heuristic). That
+    heuristic compared a fixed 9-digit tail, then a zero-stripped full-string
+    suffix - both purely digit-shape rules with two failure modes:
+
+    - **Merge-direction**: Malta "+356 2912 3456" vs US "+1 (562) 912-3456"
+      shared the 9-digit tail (round 12's own fix: require the fuller
+      strings not to CONFLICT); a further construction survived even that -
+      Spain "+34 655 512 345" vs Italy "06 5551 2345" (no "+") share a
+      digit-identical national significant number, and the length gap left
+      by stripping "34" is INDISTINGUISHABLE, by digits alone, from a
+      genuine national-prefix relationship. No digit-suffix rule can tell
+      these apart, because a number written with no explicit country code
+      is digit-for-digit ambiguous about which country it belongs to.
+    - **Split-direction**: short-national-number countries (8-digit NSNs -
+      Denmark, Norway, Singapore, Luxembourg among them) permanently failed
+      to corroborate their own number across a country-code-present vs
+      -absent pairing, because the fixed 9-digit tail ate one digit of the
+      NSN the moment a country code was prepended, leaving the two forms'
+      tails different in both length and content.
+
+    Both are closed the same way: real per-country numbering-plan structure
+    via `phonenumbers` (`_phone_interpretations`), not a digit-shape guess.
+    A "+"-prefixed number states its own country code, so it is read
+    unambiguously; a number with none is tried against a bounded, disclosed
+    region list (`_PHONE_CANDIDATE_REGIONS`) and treated as corroborating
+    only when the two sides share an EXACT (country_code, national_number)
+    reading. This closes Spain/Italy (Italy is not in the region list, so a
+    non-"+" Italian-shaped number produces no candidate to coincide with)
+    while fixing Denmark/Norway/Singapore/Luxembourg (which are).
+
+    REMAINING, disclosed rather than claimed closed: a country OUTSIDE the
+    region list, written with no "+", still fails to corroborate against
+    itself - a missed link (safe direction, a spare sub-account). And a
+    coincidental agreement between two DIFFERENT real numbers, both possible
+    readings under the SAME candidate region, remains theoretically possible
+    - inherent to any bar 2 built on a single field with no independent
+    verification, the same residual class the original 9-digit tail already
+    accepted (two genuinely different numbers colliding is not a real
+    scenario) - now true of a specific (country_code, national_number) pair
+    rather than of an arbitrary 9-digit run, which is meaningfully narrower,
+    not zero.
     """
-    phone_norm_a = normalize_phone(phone_a)
-    return bool(phone_norm_a) and phone_norm_a == normalize_phone(phone_b)
+    if not normalize_phone(phone_a) or not normalize_phone(phone_b):
+        # Filler / too-short / absent, exactly as `normalize_phone` already
+        # decides (round 4-8's shape checks kept as the pre-filter - a
+        # placeholder number must never reach real-number interpretation at
+        # all, whatever some country's numbering plan happens to make of it).
+        return False
+    readings_a = _phone_interpretations(phone_a)
+    readings_b = _phone_interpretations(phone_b)
+    return any(reading in readings_b for reading in readings_a)
 
 
 def contact_name_agrees(
@@ -595,13 +894,25 @@ def contact_name_agrees(
     visible and deletable, a wrong link puts one client's assets inside
     another's - and it is the same posture this module takes everywhere else.
 
-    A PLACEHOLDER is not a name either. "Head Office" / "Front Desk" /
-    "Accounts Department" are what gets typed when the real signer is not
-    known, so two unrelated clients would corroborate each other on it - the
-    same reasoning `normalize_postcode` and `normalize_phone` already apply to
-    their own filler values. Only two-word placeholders need listing: a
-    single-word one ("Accounts", "Admin") leaves the surname blank and is
-    already refused by the both-parts rule above.
+    A NON-NAME is refused by SHAPE, not enumeration (round 12, P1.1 - the
+    previous two-word denylist was bypassed by ("Club", "Manager"), re-opening
+    round 2's franchise conflation through the very field introduced to close
+    it). Four shapes refuse, all failing toward SPLIT (a refused bar flags for
+    a human rather than merging):
+
+    - a ROLE NOUN in either part ("Club Manager", "Managing Director",
+      "Business Owner", "Front Desk") - a job title is what gets typed when
+      the signer is a function, not a person, and two sites sharing a function
+      title is no evidence they share a signer;
+    - first part == last part ("N/A N/A", "Unknown Unknown", "TBC TBC") - a
+      real person's given and family name coinciding is possible but rare, and
+      the echo shape is overwhelmingly placeholder;
+    - a part carrying two or more tokens ("Head Office" | "Manager") - a
+      department-shaped part is not a personal name part. The accepted cost:
+      a double-barrelled given name ("Mary Jane") also refuses, which only
+      keeps the bar unsatisfied and splits - the safe direction;
+    - a known placeholder PAIR (john/doe and friends) that is name-shaped
+      by construction and only recognisable by membership.
     """
 
     # Fold + tokenize each part, exactly as `normalize_name` does (review
@@ -612,15 +923,36 @@ def contact_name_agrees(
     # unicode fold, so an accented signer whose two documents differ only by
     # an accent ("José" vs "Jose") made bar 3 permanently unsatisfiable - the
     # exact class the fold fixed for business names in round 5.
-    def _part(value: str | None) -> str:
-        return "".join(_ALNUM_TOKEN.findall(_fold_unicode(value or "").lower()))
+    def _part_tokens(value: str | None) -> list[str]:
+        return _ALNUM_TOKEN.findall(_fold_unicode(value or "").casefold())
 
-    first_norm_a, last_norm_a = _part(first_a), _part(last_a)
-    first_norm_b, last_norm_b = _part(first_b), _part(last_b)
-    if not (first_norm_a and last_norm_a and first_norm_b and last_norm_b):
+    first_tokens_a, last_tokens_a = _part_tokens(first_a), _part_tokens(last_a)
+    first_tokens_b, last_tokens_b = _part_tokens(first_b), _part_tokens(last_b)
+    if not (first_tokens_a and last_tokens_a and first_tokens_b and last_tokens_b):
         return False
-    if f"{first_norm_a} {last_norm_a}" in _PLACEHOLDER_CONTACT_NAMES:
+    # The shape checks run on BOTH sides (round 13: side-A-only was a real
+    # bug, not just an inefficiency). The final equality check compares the
+    # JOINED (no-separator) forms, so two sides that TOKENIZE differently can
+    # still join to the same string: "ClubManager" fused on side A is ONE
+    # token ("clubmanager") that matches neither the role-noun set nor the
+    # multi-token rule, while "Club Manager" on side B is caught by both -
+    # yet both join to "clubmanager" and the old side-A-only check let the
+    # pair through. Checking both sides also fixes the ARGUMENT-ORDER
+    # dependence that bug produced (agrees(a, a, b, b) != agrees(b, b, a, a)
+    # for exactly this shape), which a symmetric corroboration signal must
+    # never exhibit.
+    both_sides = ((first_tokens_a, last_tokens_a), (first_tokens_b, last_tokens_b))
+    for first_tokens, last_tokens in both_sides:
+        if any(token in _ROLE_NOUNS for token in first_tokens + last_tokens):
+            return False
+        if len(first_tokens) >= 2 or len(last_tokens) >= 2:
+            return False
+    first_norm_a, last_norm_a = "".join(first_tokens_a), "".join(last_tokens_a)
+    if first_norm_a == last_norm_a:
         return False
+    if (first_norm_a, last_norm_a) in _PLACEHOLDER_NAME_PAIRS:
+        return False
+    first_norm_b, last_norm_b = "".join(first_tokens_b), "".join(last_tokens_b)
     return (first_norm_a, last_norm_a) == (first_norm_b, last_norm_b)
 
 
@@ -648,6 +980,23 @@ def names_materially_diverge(name_a: str | None, name_b: str | None) -> bool:
     if not stem_a or not stem_b:
         return True
     return stem_a != stem_b
+
+
+def _normalize_address(value: str | None) -> str:
+    """Address normal form: folded, casefolded tokens joined by ONE SPACE.
+
+    NOT `normalize_name` (round 12, P2): the name form concatenates tokens
+    with no separator, so boundary shifts erased real differences -
+    "Unit 1, 23 Mill Road" and "Unit 12, 3 Mill Road" both gave
+    "unit123millroad" and bar 4 abstained; chained with an ordinal-hijacked
+    key that removed the LAST surviving bar. Keeping one space per boundary
+    makes those two distinct while "12 Mare Street,  London" still equals
+    "12 Mare Street, London". The name form's article/suffix drops do not
+    apply - "the"/"ltd" are name noise, not address noise.
+    """
+    if not value:
+        return ""
+    return " ".join(_ALNUM_TOKEN.findall(_fold_unicode(value).casefold()))
 
 
 def addresses_materially_diverge(address_a: str | None, address_b: str | None) -> bool:
@@ -684,11 +1033,47 @@ def addresses_materially_diverge(address_a: str | None, address_b: str | None) -
     safe direction - a refusal costs a spare sub-account a human can merge via
     S1-26e, a wrong merge puts one client's assets in another's account.
     """
-    stem_a = normalize_name(address_a)
-    stem_b = normalize_name(address_b)
+    stem_a = _normalize_address(address_a)
+    stem_b = _normalize_address(address_b)
     if not stem_a or not stem_b:
         return False
     return stem_a != stem_b
+
+
+def _digits_are_low_entropy(digits: str) -> bool:
+    """True when a digit block has the shape of data-entry filler.
+
+    Filler is a PATTERN property of the digit content, judged as a union of
+    shapes rather than one regex (round 12, P1.2: the previous leading-run
+    regex modelled exactly one shape and 23 of the reviewer's 28 obvious
+    placeholder ZIPs classified STRONG): a constant step covers repdigits
+    ("11111"), keypad runs in both directions ("12345", "98765") and strided
+    runs ("13579"); a repeating pair covers "1212"; a run of three-plus of one
+    digit covers "10000" / "11112" / "00001"; two or fewer distinct digits over
+    four-plus positions covers "1122"-style filler; doubled-run structure
+    covers "11223"; a palindrome of four-plus covers "12321". Real codes have
+    none of these shapes ("75008", "60601", "D02X285"). Over-matching is the
+    SAFE direction - the only consumer keeps bar 3 REQUIRED for a weak anchor.
+    """
+    diffs = {(int(b) - int(a)) % 10 for a, b in zip(digits, digits[1:], strict=False)}
+    if len(diffs) == 1:
+        return True
+    if _is_repeating_pair(digits):
+        return True
+    if len(digits) >= 4 and len(set(digits)) <= 2:
+        return True
+    if re.search(r"(\d)\1\1", digits):
+        return True
+    if len(digits) >= 4 and digits == digits[::-1]:
+        return True
+    # Doubled-run structure ("11223" -> runs 11,22,3). Four-plus digits only:
+    # at three digits a single doubled digit plus a tail is ordinary real-code
+    # content ("B33 8TH" -> "338"), not a filler pattern.
+    if len(digits) >= 4:
+        runs = [len(run.group(0)) for run in re.finditer(r"(\d)\1*", digits)]
+        if len(runs) >= 2 and all(length >= 2 for length in runs[:-1]):
+            return True
+    return False
 
 
 def postcode_is_weak_anchor(postcode: str | None) -> bool:
@@ -697,24 +1082,45 @@ def postcode_is_weak_anchor(postcode: str | None) -> bool:
 
     Round 9 P1.2 stopped NULL-keying purely-numeric single-repeated-digit blocks
     so real letterless postcodes (Itegem "2222", Reykjavik "111") could key. But
-    that same shape is also the classic data-entry filler ("11111", "99999"), and
+    that same shape is also classic data-entry filler ("11111", "99999"), and
     a non-NULL key flips `require_contact_name` off on the keyed path - the path
     whose ENTIRE safety argument is that a SHARED postcode is a strong enough
-    anchor to make name + phone sufficient. When the shared postcode is a repdigit
-    that anchor is fake: two different sites of one brand carrying the same filler
-    would auto-MERGE (review round 10, P0.1). So a repdigit key is treated as a
+    anchor to make name + phone sufficient. When the shared postcode is filler
+    that anchor is fake: two different sites of one brand carrying the same
+    filler would auto-MERGE (review round 10, P0.1). So a low-entropy key is a
     WEAK anchor and the caller keeps requiring the signer bar (bar 3) for it.
 
-    Weak means: `_WEAK_POSTCODE` matches - a LEADING run of one repeated non-zero
-    digit, optionally followed by letters. That is the bare filler ("11111",
-    "2222") AND filler typed with a trailing country or town ("11111 USA"
-    normalizes to "11111USA"), which the earlier `normalized == digits` test let
-    walk straight past the gate (review round 11, P1.1). A real postcode is
-    excluded by construction: UK postcodes start with a LETTER, and any code with
-    a second distinct digit ("1000", "75008") or interior structure ("SW1A 1AA",
-    "E1 1EE") never matches a leading single-digit run. The purely-numeric
-    repdigit real postcodes it does catch (Itegem, Reykjavik, Stockholm "111 11")
-    are classified weak in the SAFE direction - it only keeps bar 3 ON.
+    Weak means: the DIGIT CONTENT of the normalized value is filler-shaped
+    (`_digits_are_low_entropy`) and at least three digits long. Classifying on
+    digit content - the reviewer's actual round-11 suggestion, which round 11
+    implemented as a weaker leading-anchor regex instead (round 12, P1.2) -
+    makes the gate position-independent: "11111", "11111 USA", "USA 11111",
+    "PO Box 11111" and "Head Office 99999" are all weak, because WHERE the
+    filler sits in the field says nothing about whether it is filler. Real
+    postcodes stay strong two ways: interleaved alpha-digit structure keeps the
+    digit block under three ("E1 1EE" -> "11", "SW1A 1AA" -> "11"), and real
+    numeric codes have high-entropy digit content ("75008", "60601"). Letterless
+    real codes that share filler's shape (Itegem "2222", Reykjavik "111",
+    Brussels "1000", Stockholm "111 11") classify weak in the SAFE direction -
+    it only keeps bar 3 ON for them.
+
+    OR (round 13, closing the class the adversarial-execution audit found):
+    the value is an ORDINAL-SHAPED extraction. `normalize_postcode`'s own
+    candidate rules (`_UNIT_BEFORE`/`_STRUCTURE_AFTER`) can only drop a unit
+    or floor word we thought to enumerate - "Studio B2, 1st" mints the exact
+    key of the genuine Birmingham client at "B2 1ST" with a STRONG anchor,
+    because STUDIO was never on the office-word list `_UNIT_BEFORE` carries.
+    Chasing every gym-industry unit word one at a time repeats round 9-12's
+    own mistake (patching the instance, not the class). The class fix: a key
+    whose UK-postcode shape has an ORDINAL inward half ("...1ST", "...8TH")
+    is, by this module's OWN candidate-selection rules, an AMBIGUOUS
+    extraction - it survived only because nothing recognisable disqualified
+    it, not because it was confirmed to be a postcode. An ambiguous anchor
+    cannot certify a merge on its own, so it is WEAK unconditionally, whatever
+    its digit content. The cost is real but bounded and documented: genuine
+    UK postcodes shaped like an ordinal ("B33 8TH", ~1% of the format) now
+    also require the signer bar - the same "keeps a real client's key weak in
+    the safe direction" trade every other clause here makes.
 
     CAVEAT the caller must honour: keeping bar 3 on assumes bar 3 is SATISFIABLE,
     i.e. the signing contact's first AND last name are populated. Those come from
@@ -725,8 +1131,32 @@ def postcode_is_weak_anchor(postcode: str | None) -> bool:
     tokens, a returning client here would split-and-flag every time rather than
     link. Fail-safe (SPLIT, not MERGE), but worth confirming against a real INT
     document before relying on the returning-client link for that cohort.
+
+    THIS CAVEAT IS BIGGER THAN THE REPDIGIT COHORT (round 13, pure-logic
+    execution audit) - `_digits_are_low_entropy`'s constant-step/doubled-run
+    rules also classify weak a wide band of ordinary big-city INT postal
+    codes (FR 75000/13000/69000, IT 00100, AU 2000/3000, BE 1000, the
+    `dNNN00`/`d0100` city-generic shapes generally). That is NOT a bug in
+    the classifier - a data-entry-filler-shaped code is exactly what a large
+    fraction of a country's biggest cities happen to have - but it means
+    this satisfiability caveat is load-bearing for a much larger share of
+    the INT cohort than "the letterless-repdigit clients" suggests. BLOCKS
+    ON THE SAME OUTSTANDING CLIENT ASK: confirm the INT template's signer-
+    name tokens against a real signed document before treating the
+    returning-client link as reliable for ANY INT client, not just the
+    repdigit-postcode ones. Until then the fail-safe direction (split, flag,
+    never merge) holds regardless.
     """
-    return bool(_WEAK_POSTCODE.fullmatch(normalize_postcode(postcode)))
+    normalized = normalize_postcode(postcode)
+    if not normalized:
+        return False
+    uk_match = _UK_POSTCODE.fullmatch(normalized)
+    if uk_match is not None and _ORDINAL_INWARD.fullmatch(uk_match.group(2)):
+        return True
+    digits = "".join(ch for ch in normalized if ch.isdigit())
+    if len(digits) < 3:
+        return False
+    return _digits_are_low_entropy(digits)
 
 
 def postcodes_materially_diverge(postcode_a: str | None, postcode_b: str | None) -> bool:
@@ -773,6 +1203,7 @@ def postcodes_materially_diverge(postcode_a: str | None, postcode_b: str | None)
 
 
 __all__ = [
+    "KEY_SEPARATOR",
     "LEGAL_ENTITY_PLACEHOLDER",
     "addresses_materially_diverge",
     "compute_identity_key",

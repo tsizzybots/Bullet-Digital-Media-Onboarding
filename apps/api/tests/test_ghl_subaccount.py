@@ -26,9 +26,11 @@ from datetime import timedelta
 import httpx
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.pool import NullPool
 
+from bullet_api.db.session import get_async_database_url
 from bullet_api.ghl.client import (
     FakeGhlClient,
     GhlClientError,
@@ -39,9 +41,12 @@ from bullet_api.ghl.client import (
 from bullet_api.worker import CLIENT_CREATED_EVENT, PANDADOC_SIGNED_EVENT
 from bullet_api.worker import ghl_subaccount as ghl_subaccount_module
 from bullet_api.worker.ghl_subaccount import (
+    _DEDUP_LOCK_SQL,
+    _GHL_HIT_SAME_BUSINESS,
     _SIBLING_CANDIDATE_LIMIT,
     GHL_CREATE_SUBACCOUNT_ACTION,
     ClientNotFoundError,
+    _classify_ghl_hit,
     create_ghl_subaccount,
     create_ghl_subaccount_core,
 )
@@ -4055,3 +4060,703 @@ async def test_flagged_row_dashboard_claim_holds(async_session: AsyncSession) ->
     )
     assert result.created is True, "flagged rows must be provisioned their OWN sub-account"
     assert result.parent_client_id is None, "a flagged row must not be linked to a parent"
+
+
+# --------------------------------------------------------------------------- #
+# Round 12: P0.3 (the ordinal hijack on the GHL leg), P1.4 (the dedup lock +
+# re-check), the write-race rowcount guard, and the un-stranded email fallback
+# --------------------------------------------------------------------------- #
+
+
+class TestGhlLegOrdinalHijack:
+    """Round 12, P0.3: the same ordinal-hijack inputs reached
+    `_classify_ghl_hit` as SAME_BUSINESS and reused the location - and bar 4
+    could not rescue it (the legacy cohort carries no address; the reviewer
+    also executed it with the address populated AND different and still got
+    reuse). Closed by the normalize_postcode candidate spec: these values no
+    longer produce equal postcode keys, so the classifier cannot corroborate
+    on them. Pure tests - the classifier needs no DB.
+    """
+
+    @pytest.mark.parametrize(
+        ("client_zip", "location_zip"),
+        [
+            ("Unit A1, 3rd Avenue, Chicago IL 60601", "Unit A1, 3rd Avenue, New York NY 10001"),
+            ("Birmingham B33 8TH, Unit A1, 2nd Street", "London E8 1ST, Unit A1, 2nd Street"),
+            ("B33 8TH, Unit A1 1st", "E8 1ST, Unit A1 1st"),
+        ],
+    )
+    def test_hijack_shapes_cannot_corroborate_reuse(
+        self, client_zip: str, location_zip: str
+    ) -> None:
+        verdict = _classify_ghl_hit(
+            GhlLocation(
+                id="loc_orphan",
+                name="F45 Training",
+                company_id=COMPANY_ID,
+                raw={"postalCode": location_zip, "phone": "+1 312 555 0114"},
+            ),
+            client_name="F45 Training",
+            client_postcode=client_zip,
+            client_phone="+1 312 555 0114",
+            client_address=None,
+        )
+        assert verdict != _GHL_HIT_SAME_BUSINESS
+
+    def test_populated_and_different_address_also_refuses(self) -> None:
+        # The reviewer's executed round-12 case: address populated AND
+        # different used to still yield same_business, because the equal
+        # hijacked postcode keys decided first.
+        verdict = _classify_ghl_hit(
+            GhlLocation(
+                id="loc_orphan",
+                name="F45 Training",
+                company_id=COMPANY_ID,
+                raw={
+                    "postalCode": "Unit A1, 3rd Avenue, New York NY 10001",
+                    "phone": "+1 312 555 0114",
+                    "address": "500 Fifth Ave, New York",
+                },
+            ),
+            client_name="F45 Training",
+            client_postcode="Unit A1, 3rd Avenue, Chicago IL 60601",
+            client_phone="+1 312 555 0114",
+            client_address="233 S Wacker Dr, Chicago",
+        )
+        assert verdict != _GHL_HIT_SAME_BUSINESS
+
+
+@pytest.mark.db
+async def test_dedup_lock_serialises_same_email_runs(async_session: AsyncSession) -> None:
+    """Round 12, P1.4 - the advisory lock itself, proven with two sessions.
+
+    The two `dedup_key` tiers are disjoint Inngest buckets, and the email
+    fallback deliberately crosses them, so the exact pair of rows the dedup
+    scan exists to link is the pair the concurrency guard never serialised.
+    The transaction-scoped advisory lock on `lower(email)` is what serialises
+    them: a second session must BLOCK on the same email and must NOT block on
+    a different one.
+
+    A THROWAWAY NullPool engine, not `bullet_api.db.session.engine`: the
+    production engine's pool would hand connections created under THIS test's
+    event loop to a later test's loop (the exact leak conftest's docstring
+    warns about), failing an unrelated test in suite order only.
+    """
+    lock_engine = create_async_engine(get_async_database_url(), poolclass=NullPool)
+    async with lock_engine.connect() as conn_a, lock_engine.connect() as conn_b:
+        await conn_a.execute(_DEDUP_LOCK_SQL, {"email": "Ops@Brand.example.com"})
+        await conn_b.execute(text("SET LOCAL lock_timeout = '200ms'"))
+        # Case-insensitive by construction: the racer arrives with different
+        # casing and must still queue behind the holder. asyncpg surfaces the
+        # 55P03 lock_not_available cancellation as a generic DBAPIError.
+        with pytest.raises(DBAPIError, match="lock timeout"):
+            await conn_b.execute(_DEDUP_LOCK_SQL, {"email": "ops@brand.example.com"})
+        await conn_b.rollback()
+        await conn_b.execute(text("SET LOCAL lock_timeout = '200ms'"))
+        await conn_b.execute(_DEDUP_LOCK_SQL, {"email": "other@brand.example.com"})
+        await conn_a.rollback()
+        await conn_b.rollback()
+    await lock_engine.dispose()
+
+
+@pytest.mark.db
+async def test_sibling_recheck_links_a_racer_committed_mid_flight(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 12, P1.4 - the re-check half: whichever racer arrives second must
+    SEE the winner's committed write-back instead of a stale empty scan.
+
+    Reproduces the reviewer's exact topology deterministically: the sibling
+    scan finds nothing before the `in_progress` commit, and the racing signing
+    lands right after it - the window the released phase-1 lock leaves open.
+    Without the phase-2 re-check this run POSTs a second location; with it, it
+    links to the racer's sub-account and no duplicate exists.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@race-brand.example.com",
+        business_name="Race Brand Gym",
+        legal_entity="Race Brand Gym",
+        postal_code=None,  # unkeyed -> the email tier of dedup_key
+        phone="+44 20 7946 0111",
+        contact_first_name="Dana",
+        contact_last_name="Reed",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_be_created"), lookup_result=None)
+
+    real_commit = AsyncSession.commit
+    seeded = {"done": False}
+
+    async def _commit_then_race(self: AsyncSession) -> None:
+        await real_commit(self)
+        if not seeded["done"]:
+            seeded["done"] = True
+            # The racer's row lands AFTER the in_progress commit released the
+            # phase-1 lock: same email, corroborated on every bar the unkeyed
+            # path requires (name, phone, signer), already holding a
+            # sub-account.
+            await _seed_client(
+                self,
+                email="ops@race-brand.example.com",
+                business_name="Race Brand Gym",
+                legal_entity="Race Brand Gym",
+                postal_code=None,
+                phone="+44 20 7946 0111",
+                contact_first_name="Dana",
+                contact_last_name="Reed",
+                ghl_subaccount_id="loc_racer_won",
+                created_at_offset_seconds=-5,
+            )
+
+    monkeypatch.setattr(AsyncSession, "commit", _commit_then_race)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is False
+    assert result.skipped is True
+    assert result.ghl_subaccount_id == "loc_racer_won"
+    assert result.parent_client_id is not None
+    assert ghl.calls == []  # no second location was minted
+
+
+@pytest.mark.db
+async def test_create_write_back_losing_the_race_flags_the_orphan(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 12, P2 - the guarded write-back's rowcount is READ, not ignored.
+
+    All four guarded `UPDATE ... AND ghl_subaccount_id IS NULL` writes used to
+    discard rowcount, so on a 0-row match the function returned the id it
+    INTENDED while the row held another - and at the create site the location
+    just POSTed became an unrecorded orphan. The row is the authority: the
+    function must return what the row holds and flag the orphan for a human.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@stolen-row.example.com",
+        business_name="Stolen Row Gym",
+        legal_entity="Stolen Row Gym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_new_orphan"), lookup_result=None)
+
+    real_commit = AsyncSession.commit
+    stolen = {"done": False}
+
+    async def _commit_then_steal(self: AsyncSession) -> None:
+        await real_commit(self)
+        if not stolen["done"]:
+            stolen["done"] = True
+            # A concurrent writer (cross-email, so the dedup lock does not
+            # serialise it) sets the row while our GHL call is in flight.
+            await self.execute(
+                text("UPDATE clients SET ghl_subaccount_id = 'loc_stolen' WHERE id = :id"),
+                {"id": client_id},
+            )
+
+    monkeypatch.setattr(AsyncSession, "commit", _commit_then_steal)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    # The ROW's id is reported, not the orphan's.
+    assert result.ghl_subaccount_id == "loc_stolen"
+    assert result.created is False
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate, possible_duplicate_ghl_id FROM clients WHERE id = :id"),
+        {"id": client_id},
+    )
+    is_dup, dup_ghl = flagged.one()
+    assert is_dup is True
+    assert dup_ghl == "loc_new_orphan"  # the orphan a human can now delete/merge
+
+
+@pytest.mark.db
+async def test_prefix_collision_no_longer_strands_a_legacy_email_sibling(
+    async_session: AsyncSession,
+) -> None:
+    """Round 12, P2: `if not candidates:` suppressed the email fallback
+    whenever the keyed query returned ANY row - including rows that all fail
+    bar 1. A genuine legacy NULL-keyed sibling was stranded behind an
+    unrelated business that merely shares six characters and a postcode. The
+    fallback now runs whenever the keyed stage produced neither a sibling nor
+    a collision.
+    """
+    # The unrelated prefix collider: shares the key, fails bar 1.
+    await _seed_client(
+        async_session,
+        email="other@fitness-studio.example.com",
+        business_name="Fitness Studio",
+        legal_entity="Fitness Studio",
+        postal_code="E8 1AA",
+        ghl_subaccount_id="loc_unrelated",
+        created_at_offset_seconds=-120,
+    )
+    # The REAL legacy sibling: pre-0013 row (NULL key), same email, fully
+    # corroborated on the unkeyed path's bars.
+    legacy_id = await _seed_client(
+        async_session,
+        email="ops@fitness-first.example.com",
+        business_name="Fitness First",
+        legal_entity="Fitness First",
+        postal_code="E8 1AA",
+        force_null_identity_key=True,
+        phone="+44 20 7946 0222",
+        contact_first_name="Marcus",
+        contact_last_name="Webb",
+        ghl_subaccount_id="loc_legacy",
+        created_at_offset_seconds=-60,
+    )
+    client_id = await _seed_client(
+        async_session,
+        email="ops@fitness-first.example.com",
+        business_name="Fitness First",
+        legal_entity="Fitness First",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0222",
+        contact_first_name="Marcus",
+        contact_last_name="Webb",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=None)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.skipped is True
+    assert result.ghl_subaccount_id == "loc_legacy"
+    assert result.parent_client_id == legacy_id
+
+
+# --------------------------------------------------------------------------- #
+# Round 13 (concurrency execution audit): four of the five rowcount guards
+# had no test that could actually make rowcount == 0 fire - the exact "guard
+# that cannot fail" class this whole gate exists to catch. Each test below
+# steals the row via a genuinely separate connection at the precise point
+# the vulnerable UPDATE is about to run, so the guard's fallback branch is
+# forced, not merely present.
+# --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# Round 13 (concurrency execution audit): four of the five rowcount guards
+# had no test that could actually make rowcount == 0 fire - the exact "guard
+# that cannot fail" class this whole gate exists to catch.
+#
+# `async_session` runs the whole test inside ONE outer transaction that only
+# ever releases SAVEPOINTs (see conftest.py) - nothing the test does is ever
+# visible to a genuinely separate connection. A "steal the row" race must
+# therefore write through the SAME session, exactly like the existing
+# `test_sibling_recheck_links_a_racer_committed_mid_flight` above already
+# does: the write lands in the one open transaction the code under test
+# reads from, which is what makes the guard's WHERE clause legitimately see
+# zero matching rows when it runs.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.db
+async def test_phase2_lock_and_recheck_run_even_after_a_phase1_collision(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 13 (concurrency execution audit, P1.4 F2): the phase-2 lock and
+    re-check used to be SKIPPED whenever phase-1 found a collision - the
+    reasoning was "already flagged, own sub-account is fail-safe regardless
+    of racers", which is true for what phase-1 saw but does nothing for a
+    DIFFERENT racer landing in the gap. This run starts with a phase-1
+    collision (a name-matching but phone-mismatched candidate), then a
+    genuine sibling lands mid-flight (same technique as
+    `test_sibling_recheck_links_a_racer_committed_mid_flight`) - the
+    phase-2 re-check must still find and link to it, proving the lock and
+    re-check are not gated on `collision is None`.
+    """
+    await _seed_client(
+        async_session,
+        email="ops@collide-then-race.example.com",
+        business_name="Collide Race Gym",
+        legal_entity="Collide Race Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0999",  # different phone: phase-1 collision only
+        # MUST hold a sub-account to be a keyed-query CANDIDATE at all - a
+        # row with no ghl_subaccount_id is invisible to `_SIBLING_SELECT`
+        # (`AND ghl_subaccount_id IS NOT NULL`), so without this the row is
+        # not a collision, it is simply absent, and the test's own premise
+        # (a phase-1 collision exists) silently does not hold.
+        ghl_subaccount_id="loc_mismatched_phone",
+    )
+    client_id = await _seed_client(
+        async_session,
+        email="other@collide-then-race.example.com",
+        business_name="Collide Race Gym",
+        legal_entity="Collide Race Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0111",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"), lookup_result=None)
+
+    real_check = ghl_subaccount_module._db_sibling_check
+    racer_seeded = {"done": False}
+
+    async def _check_then_seed_racer(session, **kwargs):
+        result = await real_check(session, **kwargs)
+        if not racer_seeded["done"]:
+            racer_seeded["done"] = True
+            # A genuine sibling lands AFTER phase-1's collision-only scan,
+            # in the window the phase-2 lock+recheck exists to close.
+            await _seed_client(
+                session,
+                email="ops@collide-then-race.example.com",
+                business_name="Collide Race Gym",
+                legal_entity="Collide Race Gym",
+                postal_code="E8 1AA",
+                phone="+44 20 7946 0111",
+                ghl_subaccount_id="loc_racer_won",
+                created_at_offset_seconds=-5,
+            )
+        return result
+
+    monkeypatch.setattr(ghl_subaccount_module, "_db_sibling_check", _check_then_seed_racer)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert ghl.calls == []
+    assert result.ghl_subaccount_id == "loc_racer_won"
+    assert result.parent_client_id is not None
+
+
+@pytest.mark.db
+async def test_sibling_link_update_losing_the_race_returns_the_rows_id(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 13: the phase-1 DB-sibling link UPDATE's rowcount==0 branch,
+    forced rather than merely present. A racer sets the row between the
+    sibling scan and this run's own link UPDATE; the row's id, not the
+    sibling's, must survive."""
+    await _seed_client(
+        async_session,
+        email="ops@steal-link.example.com",
+        business_name="Steal Link Gym",
+        legal_entity="Steal Link Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0111",
+        ghl_subaccount_id="loc_sibling",
+    )
+    client_id = await _seed_client(
+        async_session,
+        email="other@steal-link.example.com",
+        business_name="Steal Link Gym",
+        legal_entity="Steal Link Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0111",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"), lookup_result=None)
+
+    real_check = ghl_subaccount_module._db_sibling_check
+    stolen = {"done": False}
+
+    async def _check_then_steal(session, **kwargs):
+        result = await real_check(session, **kwargs)
+        if not stolen["done"]:
+            stolen["done"] = True
+            await session.execute(
+                text("UPDATE clients SET ghl_subaccount_id = :ghl_id WHERE id = :id"),
+                {"ghl_id": "loc_stolen_by_racer", "id": client_id},
+            )
+        return result
+
+    monkeypatch.setattr(ghl_subaccount_module, "_db_sibling_check", _check_then_steal)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.ghl_subaccount_id == "loc_stolen_by_racer"
+    assert ghl.calls == []
+    row = await async_session.execute(
+        text("SELECT ghl_subaccount_id FROM clients WHERE id = :id"), {"id": client_id}
+    )
+    assert row.scalar_one() == "loc_stolen_by_racer"
+
+
+@pytest.mark.db
+async def test_torn_sibling_repair_writes_the_id_back_with_no_racer(
+    async_session: AsyncSession,
+) -> None:
+    """Round 13: the repair WRITE itself, isolated from the race scenario.
+
+    The race test below only proves the guard's FALLBACK (read-and-report)
+    behaves correctly when a racer wins - it cannot tell whether the repair
+    UPDATE runs at all, because the racer's own write already sets the row
+    to the value the test asserts. This is the test that actually forces
+    the UPDATE to exist: no racer, so if the repair does not run, the row
+    stays NULL and the assertion fails.
+    """
+    await _seed_client(
+        async_session,
+        email="ops@torn-sib-clean.example.com",
+        business_name="Torn Sib Clean Gym",
+        legal_entity="Torn Sib Clean Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0333",
+        ghl_subaccount_id="loc_sibling",
+    )
+    client_id = await _seed_client(
+        async_session,
+        email="other@torn-sib-clean.example.com",
+        business_name="Torn Sib Clean Gym",
+        legal_entity="Torn Sib Clean Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0333",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"), lookup_result=None)
+
+    first = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert first.ghl_subaccount_id == "loc_sibling"
+
+    # Tear it: the action still says success, but the row loses its id.
+    await async_session.execute(
+        text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": client_id}
+    )
+
+    replay = FakeGhlClient(location=_ghl_location("loc_should_not_create_2"), lookup_result=None)
+    result = await create_ghl_subaccount_core(
+        async_session,
+        replay,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert replay.calls == []
+    assert result.ghl_subaccount_id == "loc_sibling"
+    row = await async_session.execute(
+        text("SELECT ghl_subaccount_id, parent_client_id FROM clients WHERE id = :id"),
+        {"id": client_id},
+    )
+    ghl_id, parent_id = row.one()
+    assert ghl_id == "loc_sibling"
+    assert parent_id is not None
+
+
+@pytest.mark.db
+async def test_torn_sibling_repair_losing_the_race_does_not_overwrite_the_racer(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 13: the NEW torn-sibling-repair branch's rowcount guard. A
+    torn client (action already succeeded via the sibling branch, row lost
+    its id) replays while a racer sets the row first - the repair must not
+    clobber the racer's write, and must not report failure."""
+    await _seed_client(
+        async_session,
+        email="ops@torn-sib.example.com",
+        business_name="Torn Sib Gym",
+        legal_entity="Torn Sib Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0222",
+        ghl_subaccount_id="loc_sibling",
+    )
+    client_id = await _seed_client(
+        async_session,
+        email="other@torn-sib.example.com",
+        business_name="Torn Sib Gym",
+        legal_entity="Torn Sib Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0222",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"), lookup_result=None)
+
+    first = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert first.ghl_subaccount_id == "loc_sibling"
+
+    # Tear it: the action still says success, but the row loses its id.
+    await async_session.execute(
+        text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": client_id}
+    )
+
+    real_check = ghl_subaccount_module._db_sibling_check
+    stolen = {"done": False}
+
+    async def _check_then_steal(session, **kwargs):
+        result = await real_check(session, **kwargs)
+        if not stolen["done"]:
+            stolen["done"] = True
+            await session.execute(
+                text("UPDATE clients SET ghl_subaccount_id = :ghl_id WHERE id = :id"),
+                {"ghl_id": "loc_stolen_during_replay", "id": client_id},
+            )
+        return result
+
+    monkeypatch.setattr(ghl_subaccount_module, "_db_sibling_check", _check_then_steal)
+
+    replay = FakeGhlClient(location=_ghl_location("loc_should_not_create_2"), lookup_result=None)
+    result = await create_ghl_subaccount_core(
+        async_session,
+        replay,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert replay.calls == []
+    assert result.ghl_subaccount_id == "loc_stolen_during_replay"
+    row = await async_session.execute(
+        text("SELECT ghl_subaccount_id FROM clients WHERE id = :id"), {"id": client_id}
+    )
+    assert row.scalar_one() == "loc_stolen_during_replay"
+
+
+@pytest.mark.db
+async def test_ghl_lookup_adoption_losing_the_race_returns_the_rows_id(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 13: the GHL-lookup adoption UPDATE's rowcount==0 branch. A
+    racer sets the row between the GHL classify verdict and this run's own
+    adoption UPDATE."""
+    client_id = await _seed_client(
+        async_session,
+        email="ops@steal-adopt.example.com",
+        business_name="Steal Adopt Gym",
+        legal_entity="Steal Adopt Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0111",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_should_not_create"),
+        lookup_result=_ghl_location(
+            "loc_found", name="Steal Adopt Gym", postal_code="E8 1AA", phone="+44 20 7946 0111"
+        ),
+    )
+
+    # Steal the row inside a wrapped `find_location_by_email` - the last
+    # AWAIT POINT before the classify verdict and the adoption UPDATE, so
+    # the racer's write (through the SAME session) is guaranteed to land
+    # before that UPDATE's WHERE clause is evaluated.
+    real_lookup = ghl.find_location_by_email
+
+    async def _lookup_then_steal(email: str, *, company_id: str):
+        result = await real_lookup(email, company_id=company_id)
+        await async_session.execute(
+            text("UPDATE clients SET ghl_subaccount_id = :ghl_id WHERE id = :id"),
+            {"ghl_id": "loc_stolen_by_racer", "id": client_id},
+        )
+        return result
+
+    monkeypatch.setattr(ghl, "find_location_by_email", _lookup_then_steal)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.ghl_subaccount_id == "loc_stolen_by_racer"
+    assert ghl.calls == []
+    row = await async_session.execute(
+        text("SELECT ghl_subaccount_id FROM clients WHERE id = :id"), {"id": client_id}
+    )
+    assert row.scalar_one() == "loc_stolen_by_racer"
+
+
+@pytest.mark.db
+async def test_create_path_torn_repair_losing_the_race_does_not_overwrite_the_racer(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 13: the create-path's OWN torn-repair UPDATE (round 12 code,
+    never actually forced to rowcount==0). Same setup as
+    `test_torn_action_success_with_no_id_is_repaired_not_reported_clean`,
+    with a racer stealing the row during the replay's repair attempt."""
+    client_id = await _seed_client(
+        async_session,
+        email="ops@torn3.example.com",
+        business_name="Torn Three Gym",
+        legal_entity="Torn Three Gym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_first_run"), lookup_result=None)
+
+    first = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert first.created is True
+
+    await async_session.execute(
+        text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": client_id}
+    )
+
+    real_begin = ghl_subaccount_module.begin_action
+    stolen = {"done": False}
+
+    async def _begin_then_steal(session, **kwargs):
+        result = await real_begin(session, **kwargs)
+        if result.already_succeeded and not stolen["done"]:
+            stolen["done"] = True
+            await session.execute(
+                text("UPDATE clients SET ghl_subaccount_id = :ghl_id WHERE id = :id"),
+                {"ghl_id": "loc_stolen_during_torn_repair", "id": client_id},
+            )
+        return result
+
+    monkeypatch.setattr(ghl_subaccount_module, "begin_action", _begin_then_steal)
+
+    replay = FakeGhlClient(location=_ghl_location("loc_should_not_create"), lookup_result=None)
+    result = await create_ghl_subaccount_core(
+        async_session,
+        replay,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert replay.calls == []
+    assert result.ghl_subaccount_id == "loc_stolen_during_torn_repair"

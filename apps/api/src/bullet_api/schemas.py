@@ -166,10 +166,13 @@ class ClientDetailResponse(BaseModel):
     # same site. The client is provisioned its OWN sub-account either way; the
     # flag is the human-review signal. EITHER OR BOTH candidate fields may be
     # populated - `possible_duplicate_of` for a clients-row collision,
-    # `possible_duplicate_ghl_id` for a GHL-location one - because one run can
-    # hit both (a DB collision, then an undecidable GHL verdict). The dashboard
-    # renders whichever are present so a human is told what to merge into
-    # rather than sent hunting for it.
+    # `possible_duplicate_ghl_id` for a GHL-location one. Both is only
+    # reachable ACROSS runs (round 12, P3 - a single run cannot: a DB collision
+    # suppresses the GHL leg entirely, so it never reaches an undecidable GHL
+    # verdict in the same pass): `_flag_possible_duplicate`'s COALESCE keeps
+    # the other run's field when a later run flags the other kind. The
+    # dashboard renders whichever are present so a human is told what to merge
+    # into rather than sent hunting for it.
     possible_duplicate: bool
     possible_duplicate_of: str | None
     possible_duplicate_ghl_id: str | None

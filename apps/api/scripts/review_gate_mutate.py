@@ -152,6 +152,17 @@ def _classify_pytest_result(returncode: int, output: str, node_id: str) -> tuple
     return SURVIVED, f"{node_id} passed with the guard broken"
 
 
+def _exit_code(*, survived: bool, errored: bool, unproven_fails: bool) -> int:
+    """The runner's verdict, extracted pure (round 12, P1.5).
+
+    Any of the three failure classes fails the build; nothing else does. This
+    line is the gate's whole authority - inline it was untestable, and
+    neutering it to `return 0` passed every SURVIVED guard through CI while
+    the report above still printed the failures.
+    """
+    return 1 if (survived or errored or unproven_fails) else 0
+
+
 def _run_test(node_id: str) -> tuple[str, str]:
     """Return (status, detail) for one mutated guard's named test."""
     try:
@@ -356,7 +367,7 @@ def main() -> int:
     # and the same shape as the skipped-tests-report-green failure that let two
     # review rounds ship. `--allow-unproven` is the deliberate laptop escape.
     unproven_fails = bool(unproven) and not args.allow_unproven
-    return 1 if (survived or errored or unproven_fails) else 0
+    return _exit_code(survived=bool(survived), errored=bool(errored), unproven_fails=unproven_fails)
 
 
 def _main_locked() -> int:
