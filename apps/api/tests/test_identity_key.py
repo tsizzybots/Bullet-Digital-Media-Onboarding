@@ -1314,8 +1314,7 @@ class TestPhoneRealNumberStructure:
         # "34" leaves exactly Italy's own national significant number.
         assert spain_full[len("34") :] == italy_full.lstrip("0")
         assert (
-            corroborating_signal_agrees(phone_a="+34 655 512 345", phone_b="06 5551 2345")
-            is False
+            corroborating_signal_agrees(phone_a="+34 655 512 345", phone_b="06 5551 2345") is False
         )
 
     @pytest.mark.parametrize(
@@ -1351,8 +1350,7 @@ class TestPhoneRealNumberStructure:
         # which is why this test uses the country-code-present/absent pair
         # rather than comparing the bare string to itself.)
         assert (
-            corroborating_signal_agrees(phone_a="+39 06 5551 2345", phone_b="06 5551 2345")
-            is False
+            corroborating_signal_agrees(phone_a="+39 06 5551 2345", phone_b="06 5551 2345") is False
         )
 
     def test_placeholder_shaped_numbers_never_reach_real_number_interpretation(
@@ -1397,9 +1395,7 @@ class TestOrdinalHijackViaUnenumeratedUnitWord:
     def test_studio_prefix_no_longer_mints_the_ordinal_key(self) -> None:
         assert normalize_postcode("Studio B2, 1st") != "B21ST"
 
-    @pytest.mark.parametrize(
-        "prefix", ["Gym", "Bay", "Pod", "Kiosk", "Cabin", "Stall", "Studio"]
-    )
+    @pytest.mark.parametrize("prefix", ["Gym", "Bay", "Pod", "Kiosk", "Cabin", "Stall", "Studio"])
     def test_gym_industry_unit_words_do_not_mint_a_postcode_key(self, prefix: str) -> None:
         assert normalize_postcode(f"{prefix} B2 1st") != "B21ST"
 
