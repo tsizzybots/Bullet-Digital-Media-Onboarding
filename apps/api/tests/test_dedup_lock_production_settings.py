@@ -132,7 +132,11 @@ async def test_the_environment_ceiling_is_reported_not_assumed() -> None:
     claimed to rule out, which is the guard-that-cannot-fail class this project
     exists to catch.
     """
-    assert ENGINE_SERVER_SETTINGS["statement_timeout"] == _TEST_CEILING
+    # The literal, inline, not via `_TEST_CEILING`: G1 scopes its corpus to
+    # test FUNCTION BODIES, so a module-level constant or a docstring does not
+    # count as coverage. Reworking this file moved the only covered occurrence
+    # out of a test body and CI caught it, which is the check working.
+    assert ENGINE_SERVER_SETTINGS["statement_timeout"] == "5000"
     engine = _production_settings_engine()
     async with engine.connect() as conn:
         effective = (await conn.execute(text("SHOW statement_timeout"))).scalar_one()

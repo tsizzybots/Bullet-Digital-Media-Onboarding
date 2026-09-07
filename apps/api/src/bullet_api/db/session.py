@@ -19,25 +19,41 @@ from bullet_api.config import get_async_database_url, get_settings
 # asyncpg-native `ssl` connect arg, defaulting to "prefer" so the same
 # build runs unchanged against local docker Postgres (no TLS) and Neon
 # (TLS mandatory and auto-upgraded).
-# `statement_timeout` is a server-side ceiling on EVERY statement (5s). Under
-# the dashboard's polling load (every open tab x every 5-10s) a slow or stuck
-# query must fail fast rather than pile up holding pooled connections. All
-# current app statements are sub-second, so 5s is a safety ceiling, not a
-# functional limit; a genuinely long operation can raise it per-transaction
-# with `SET LOCAL statement_timeout`.
+# `statement_timeout` is INTENDED as a server-side ceiling on every statement
+# (5s), so that under the dashboard's polling load (every open tab x every
+# 5-10s) a slow or stuck query fails fast rather than piling up holding pooled
+# connections.
 #
-# IT ALSO BOUNDS TIME SPENT WAITING ON A LOCK (round 13, P1.5). Postgres
-# applies `statement_timeout` to the whole statement including the queue wait,
-# not just to execution, so a statement that BLOCKS on a lock for more than 5s
-# is cancelled with `QueryCanceledError`. Proven by execution: with these exact
-# `server_settings`, a second connection blocking on `pg_advisory_xact_lock`
-# held by a first raised after 5.02s instead of queueing. Any statement whose
-# INTENDED behaviour is to wait longer than this - the dedup advisory lock in
-# `worker/ghl_subaccount.py`, held across two 10s-timeout GHL calls - must
-# raise the ceiling for itself with `SET LOCAL statement_timeout` and put it
-# back with `SET LOCAL statement_timeout = DEFAULT`. Both are transaction-
-# scoped, so the engine default below is what every other statement sees, on
-# this connection and on every other checkout from the pool.
+# IT DOES NOT REACH NEON, AND NEVER HAS - measured 07/09/2026, see the
+# platform-discovery CHANGELOG entry of that date. `server_settings` is sent as
+# a startup parameter and Neon's proxy discards it: `SHOW statement_timeout`
+# returns "0" on BOTH the pooled endpoint the app runtime uses and the direct
+# endpoint Alembic uses. So the ceiling described above applies only against a
+# local Docker Postgres, which is why it has looked correct in every round's
+# local verification since this engine was written. Treat the protection as
+# ABSENT in any deployed environment until that is fixed on its own card: the
+# fix is not a config edit, because enabling a real ceiling for the first time
+# would cancel every statement that legitimately runs longer, starting with the
+# dedup advisory lock below.
+#
+# A genuinely long operation can still raise a ceiling per-transaction with
+# `SET LOCAL statement_timeout`, which Neon DOES honour (measured on both
+# endpoints the same day).
+#
+# WHERE THE CEILING DOES APPLY, IT ALSO BOUNDS TIME SPENT WAITING ON A LOCK
+# (round 13, P1.5). Postgres applies `statement_timeout` to the whole statement
+# including the queue wait, not just to execution, so a statement that BLOCKS
+# on a lock for more than 5s is cancelled with `QueryCanceledError`. Proven by
+# execution against local Docker: a second connection blocking on
+# `pg_advisory_xact_lock` held by a first raised after 5.02s instead of
+# queueing. On Neon it does NOT, per the correction above, so the production
+# exposure was the opposite one - an unbounded wait with nothing to cancel it.
+# Either way the dedup advisory lock in `worker/ghl_subaccount.py`, held across
+# two 10s-timeout GHL calls, raises the ceiling for itself with `SET LOCAL
+# statement_timeout` and puts it back with `SET LOCAL statement_timeout =
+# DEFAULT`: on Docker that stops it being cancelled, on Neon it imposes a
+# 30s bound where there would otherwise be none. Both are transaction-scoped,
+# so the engine default below is what every other statement sees.
 #
 # The value is per-STATEMENT, not per-transaction (verified: three sequential
 # 2s statements complete inside one transaction under this 5s ceiling), so a
