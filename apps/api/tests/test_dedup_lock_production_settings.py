@@ -30,7 +30,7 @@ from collections.abc import Callable
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, InterfaceError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -80,15 +80,68 @@ def _production_settings_engine() -> AsyncEngine:
     )
 
 
-def test_production_engine_still_carries_the_five_second_ceiling() -> None:
-    """The premise of every timing test below.
+# The ceiling every timing test below establishes FOR ITSELF, inside its own
+# transaction, rather than inheriting from the environment.
+#
+# WHY (round 14, second CI failure): the engine's `server_settings` are a
+# STARTUP parameter, and whether they survive depends on what sits between the
+# client and Postgres. Local Docker applies them (`SHOW statement_timeout` ->
+# '5s'); the Neon endpoint CI connects to does NOT (-> '0'), so three tests
+# here failed on `assert '0' == '5s'` while passing locally. Pinning the
+# environment's number made these tests assertions about the deployment rather
+# than about the code. `SET LOCAL` inside the test's own transaction is
+# transaction-scoped, so it behaves identically everywhere, including through a
+# transaction-pooling proxy.
+_TEST_CEILING = "5000"
 
-    If the engine default were raised to 30s+ these tests would still pass
-    while proving nothing - the waiter would survive because the ceiling never
-    threatened it, not because `_acquire_dedup_lock` raised it. Pin the number
-    the rest of the module reasons about.
+
+async def _pin_test_ceiling(executor: AsyncSession | object) -> None:
+    """Establish the 5s ceiling on THIS transaction, whatever the environment default."""
+    await executor.execute(text(f"SET LOCAL statement_timeout = '{_TEST_CEILING}'"))  # type: ignore[attr-defined]
+
+
+async def _safe_rollback(executor: AsyncSession | object) -> None:
+    """Roll back, tolerating a connection the server has already closed.
+
+    A statement cancelled by `statement_timeout` can leave asyncpg's underlying
+    connection closed, and rollback() then raises
+    `InterfaceError: cannot call Transaction.rollback(): the underlying
+    connection is closed`. That is exactly how CI reported the bare-lock test:
+    the teardown raised, masking the assertion the test exists for.
     """
-    assert ENGINE_SERVER_SETTINGS["statement_timeout"] == "5000"
+    try:
+        await executor.rollback()  # type: ignore[attr-defined]
+    except (InterfaceError, DBAPIError, RuntimeError):
+        pass
+
+
+@pytest.mark.db
+async def test_the_environment_ceiling_is_reported_not_assumed() -> None:
+    """What ceiling does THIS environment actually apply, and does it match the dict?
+
+    Deliberately asserts only what is true in every environment. The engine is
+    BUILT with `statement_timeout: 5000`, but whether the server honours that
+    startup parameter is a property of the deployment path, not of this code:
+    a transaction-pooling proxy can drop it, in which case the effective
+    ceiling is the server default.
+
+    This replaces a test that asserted `ENGINE_SERVER_SETTINGS["statement_timeout"]
+    == "5000"` and called itself "the premise of every timing test below". That
+    assertion never opened a connection, so it held identically whether the
+    parameter reached Postgres or not - vacuous in precisely the situation it
+    claimed to rule out, which is the guard-that-cannot-fail class this project
+    exists to catch.
+    """
+    assert ENGINE_SERVER_SETTINGS["statement_timeout"] == _TEST_CEILING
+    engine = _production_settings_engine()
+    async with engine.connect() as conn:
+        effective = (await conn.execute(text("SHOW statement_timeout"))).scalar_one()
+        # No equality assertion on `effective`: '5s' where the startup parameter
+        # survives, '0' where it is dropped. Both are legitimate environments,
+        # and the timing tests below no longer depend on which one this is.
+        assert isinstance(effective, str) and effective
+        await _safe_rollback(conn)
+    await engine.dispose()
 
 
 @pytest.mark.db
@@ -105,6 +158,11 @@ async def test_bare_lock_wait_is_cancelled_at_the_production_ceiling() -> None:
     async with engine.connect() as holder, engine.connect() as waiter:
         await holder.execute(_DEDUP_LOCK_SQL, {"email": email})
 
+        # The waiter establishes the ceiling for its OWN transaction, so this
+        # test proves the same thing whether or not the environment applies the
+        # engine's startup parameter.
+        await _pin_test_ceiling(waiter)
+
         started = time.monotonic()
         with pytest.raises(DBAPIError) as caught:
             await waiter.execute(_DEDUP_LOCK_SQL, {"email": email})
@@ -115,8 +173,11 @@ async def test_bare_lock_wait_is_cancelled_at_the_production_ceiling() -> None:
         # never actually contended would return in milliseconds.
         assert 4.0 < elapsed < _MUST_BLOCK_PAST_SECONDS, elapsed
 
-        await waiter.rollback()
-        await holder.rollback()
+        # The cancellation can close the underlying connection, so neither
+        # rollback may raise past the assertions above (CI reported this test
+        # as an InterfaceError from teardown, not as its real assertion).
+        await _safe_rollback(waiter)
+        await _safe_rollback(holder)
     await engine.dispose()
 
 
@@ -133,6 +194,10 @@ async def test_acquire_dedup_lock_serialises_past_the_production_ceiling() -> No
     async with engine.connect() as holder, engine.connect() as waiter:
         await holder.execute(_DEDUP_LOCK_SQL, {"email": email})
         waiter_session = AsyncSession(bind=waiter)
+        # Without this the test is only meaningful where the environment
+        # happens to impose a low ceiling: the waiter would survive because
+        # nothing threatened it, not because `_acquire_dedup_lock` raised it.
+        await _pin_test_ceiling(waiter_session)
 
         async def _hold_then_release() -> None:
             await asyncio.sleep(_HOLD_SECONDS)
@@ -149,12 +214,12 @@ async def test_acquire_dedup_lock_serialises_past_the_production_ceiling() -> No
         _, elapsed = await asyncio.gather(_hold_then_release(), _wait_for_the_lock())
 
         assert elapsed > _MUST_BLOCK_PAST_SECONDS, (
-            f"the waiter returned after {elapsed:.2f}s, which is inside the 5s engine "
-            "ceiling - it cannot have queued behind a 6s holder"
+            f"the waiter returned after {elapsed:.2f}s, which is inside the 5s ceiling "
+            "this test pinned - it cannot have queued behind a 6s holder"
         )
         assert elapsed < _MUST_FINISH_WITHIN_SECONDS, elapsed
 
-        await waiter_session.rollback()
+        await _safe_rollback(waiter_session)
     await engine.dispose()
 
 
@@ -176,10 +241,16 @@ async def test_acquire_dedup_lock_restores_the_engine_ceiling() -> None:
         )
 
         after = (await session.execute(text("SHOW statement_timeout"))).scalar_one()
-        assert before == "5s"
-        assert after == "5s", f"the raised ceiling leaked into the rest of the transaction: {after}"
+        # Compared against the BASELINE this connection actually had, not the
+        # literal "5s": the property under test is "the raise did not leak",
+        # which holds whatever the environment's default is. Under the
+        # pre-fix code `after` is "30s" and this fails in every environment.
+        assert after == before, (
+            f"the raised ceiling leaked into the rest of the transaction: "
+            f"{after} (baseline was {before})"
+        )
 
-        await session.rollback()
+        await _safe_rollback(session)
     await engine.dispose()
 
 
@@ -195,13 +266,20 @@ async def test_set_local_does_not_survive_a_commit() -> None:
     engine = _production_settings_engine()
     async with engine.connect() as conn:
         session = AsyncSession(bind=conn)
+        baseline = (await session.execute(text("SHOW statement_timeout"))).scalar_one()
         await session.execute(text("SET LOCAL statement_timeout = '30s'"))
         assert (await session.execute(text("SHOW statement_timeout"))).scalar_one() == "30s"
 
         await session.commit()
 
-        assert (await session.execute(text("SHOW statement_timeout"))).scalar_one() == "5s"
-        await session.rollback()
+        # Back to whatever this connection had BEFORE, which is the point: the
+        # raise is transaction-scoped. Asserting the literal "5s" made this a
+        # statement about the deployment instead of about `SET LOCAL`.
+        after_commit = (await session.execute(text("SHOW statement_timeout"))).scalar_one()
+        assert after_commit == baseline, (
+            f"SET LOCAL survived the commit: {after_commit} (baseline was {baseline})"
+        )
+        await _safe_rollback(session)
     await engine.dispose()
 
 
