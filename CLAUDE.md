@@ -110,7 +110,7 @@ Every ticket follows the same documentation touchpoints. Skipping any of these b
 
    **Docker must be UP for this to mean anything.** Without Postgres the DB-marked tests SKIP and the run still reports green - that is exactly how two review rounds shipped (~223 tests silently became skips). Confirm `docker info` succeeds and the run reports **0 skipped** before treating a green suite as verification.
 
-8a. **Run `make review-gate` - REQUIRED, must be clean.** See "The review gate" section below. With Postgres up also run `make review-gate-db`, which mutation-tests the db-marked guards. `UNPROVEN` is not a pass.
+   **Step 8a: run `make review-gate` - REQUIRED, must be clean.** See "The review gate" section below. With Postgres up also run `make review-gate-db`, which mutation-tests the db-marked guards. `UNPROVEN` is not a pass. (Indented as part of step 8 rather than numbered `8a.`, which markdown does not render as a list item at all - it fell out of the ordered list and read as a stray paragraph. Kept as "8a" in the text so the ten existing "step 8a" cross-references in this file, the CHANGELOG and the skills stay accurate.)
 9. **Run the `/pre-pr-review` hardening gate - REQUIRED, do not skip.** (Complementary to step 8a, not replaced by it: the gate catches the mechanical classes, this catches the ones needing judgement.) This is a deep, adversarial self-review of the diff (see `.claude/skills/pre-pr-review/SKILL.md`). It applies the project's hardening lenses: shared/reused seams judged against ALL callers + concurrent use (not just the first caller or its protective cap), failure paths INCLUDING transport-level errors (timeouts/resets, not only typed errors), idempotency / replay / at-least-once windows, and a success-AND-failure-AND-replay test matrix. **Every finding is FIXED (or consciously deferred with a logged reason + owning ticket) and the full suite re-run green before proceeding.** The bar: a diff that has already been stress-tested for the failure and concurrency cases, not just the happy path.
 10. **Append the per-ticket entry to `docs/CHANGELOG.md`** under `[Unreleased]` with date heading `### DD/MM/YYYY - <ticket>: <short title>`. Bullets tagged Added / Changed / Removed / Decision / Discovery / Fixed / Verified, matching the format every prior ticket uses (read the latest 2-3 entries before writing to keep the voice consistent).
 11. **Push the branch** as `feat/<ticket-id>-<slug>` (or `fix/...`, `docs/...`, etc.). Open a PR against `main` using the project's PR template (Summary / StrikeFlow card / Test plan / Checklist sections).
@@ -120,8 +120,8 @@ Every ticket follows the same documentation touchpoints. Skipping any of these b
 
 ### After CI lands GREEN
 
-15. **Append a `**Verified**: CI run <run-id> on the PR's HEAD commit (<sha>) is 5/5 GREEN ...` bullet** to the same CHANGELOG entry, listing each job that passed. Pattern set by the CI-green entry on 04/06/2026 (CHANGELOG line ~52).
-16. **Commit the changelog update** as a small `docs: log CI 5/5 green for <ticket-id>` commit on the same branch and push. CI runs once more; once it's green again, the PR is ready for merge.
+15. **Append a `**Verified**: CI run <run-id> on the PR's HEAD commit (<sha>) is N/N GREEN ...` bullet** (N is the FULL check count on that run, not a fixed number - it was 5 when this step was written, 6 after the e2e job, 7 today, and hard-coding it has already made this template stale twice) to the same CHANGELOG entry, listing each job that passed. Pattern set by the CI-green entry on 04/06/2026 (CHANGELOG line ~52).
+16. **Commit the changelog update** as a small `docs: log CI green for <ticket-id>` commit on the same branch and push. CI runs once more; once it's green again, the PR is ready for merge.
 17. **Update `project_active_state.md`** to clear the "after CI lands green" outstanding action.
 
 ### When the PR is MERGED + branch is deleted
