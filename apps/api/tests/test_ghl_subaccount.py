@@ -40,6 +40,7 @@ from bullet_api.ghl.client import (
 )
 from bullet_api.worker import CLIENT_CREATED_EVENT, PANDADOC_SIGNED_EVENT
 from bullet_api.worker import ghl_subaccount as ghl_subaccount_module
+from bullet_api.worker import identity_key as identity_key_module
 from bullet_api.worker.ghl_subaccount import (
     _DEDUP_LOCK_SQL,
     _GHL_HIT_SAME_BUSINESS,
@@ -4185,19 +4186,31 @@ async def test_sibling_recheck_links_a_racer_committed_mid_flight(
     event_id = await _seed_onboarding_event(async_session)
     ghl = FakeGhlClient(location=_ghl_location("loc_should_not_be_created"), lookup_result=None)
 
-    real_commit = AsyncSession.commit
-    seeded = {"done": False}
+    # The racer must land in the window this guard exists to cover: AFTER the
+    # phase-1 scan has already come back empty, and BEFORE the phase-2
+    # re-check runs. Keying that on "the first commit" (which is what this
+    # test used to do) silently stopped working when round 14 moved
+    # `begin_action` and its commit ahead of the phase-1 lock: the racer then
+    # landed BEFORE the phase-1 scan, phase 1 found it, and the test passed
+    # with the phase-2 re-check disabled - a guard whose only test could no
+    # longer reach it. Seeding off the scan itself pins the actual window and
+    # cannot drift with commit ordering again.
+    real_sibling_check = ghl_subaccount_module._db_sibling_check
+    scans: dict[str, object] = {"count": 0, "phase_1_outcome": None}
 
-    async def _commit_then_race(self: AsyncSession) -> None:
-        await real_commit(self)
-        if not seeded["done"]:
-            seeded["done"] = True
-            # The racer's row lands AFTER the in_progress commit released the
-            # phase-1 lock: same email, corroborated on every bar the unkeyed
-            # path requires (name, phone, signer), already holding a
-            # sub-account.
+    async def _scan_then_race(session: AsyncSession, **kwargs: object) -> tuple[object, object]:
+        outcome = await real_sibling_check(session, **kwargs)  # type: ignore[arg-type]
+        scans["count"] = int(scans["count"]) + 1
+        if scans["count"] == 1:
+            # RECORDED here, ASSERTED unconditionally after the call returns. An
+            # assert inside this branch would pass silently in exactly the case
+            # it exists to catch: if the branch never runs, the premise is never
+            # checked and the test still goes green. That is the G4 rule.
+            scans["phase_1_outcome"] = outcome
+            # Same email, corroborated on every bar the unkeyed path requires
+            # (name, phone, signer), already holding a sub-account.
             await _seed_client(
-                self,
+                session,
                 email="ops@race-brand.example.com",
                 business_name="Race Brand Gym",
                 legal_entity="Race Brand Gym",
@@ -4208,8 +4221,10 @@ async def test_sibling_recheck_links_a_racer_committed_mid_flight(
                 ghl_subaccount_id="loc_racer_won",
                 created_at_offset_seconds=-5,
             )
+            await session.commit()
+        return outcome
 
-    monkeypatch.setattr(AsyncSession, "commit", _commit_then_race)
+    monkeypatch.setattr(ghl_subaccount_module, "_db_sibling_check", _scan_then_race)
 
     result = await create_ghl_subaccount_core(
         async_session,
@@ -4219,6 +4234,13 @@ async def test_sibling_recheck_links_a_racer_committed_mid_flight(
         company_id=COMPANY_ID,
     )
 
+    # The premise, asserted unconditionally: if the phase-1 scan had found the
+    # racer, this test would prove nothing about the phase-2 re-check.
+    assert scans["count"] >= 2, "the phase-2 re-check never ran"
+    assert scans["phase_1_outcome"] == (None, None), (
+        "the phase-1 scan must come back EMPTY for this test to be about the "
+        f"phase-2 re-check at all, got {scans['phase_1_outcome']!r}"
+    )
     assert result.created is False
     assert result.skipped is True
     assert result.ghl_subaccount_id == "loc_racer_won"
@@ -4232,8 +4254,10 @@ async def test_create_write_back_losing_the_race_flags_the_orphan(
 ) -> None:
     """Round 12, P2 - the guarded write-back's rowcount is READ, not ignored.
 
-    All four guarded `UPDATE ... AND ghl_subaccount_id IS NULL` writes used to
-    discard rowcount, so on a 0-row match the function returned the id it
+    All four of the guarded `UPDATE ... AND ghl_subaccount_id IS NULL` writes
+    THAT EXISTED AT ROUND 12 used to discard rowcount (round 13 added two more,
+    for six in total - see the section header below), so on a 0-row match the
+    function returned the id it
     INTENDED while the row held another - and at the create site the location
     just POSTed became an unrecorded orphan. The row is the authority: the
     function must return what the row holds and flag the orphan for a human.
@@ -4347,28 +4371,37 @@ async def test_prefix_collision_no_longer_strands_a_legacy_email_sibling(
 
 
 # --------------------------------------------------------------------------- #
-# Round 13 (concurrency execution audit): four of the five rowcount guards
-# had no test that could actually make rowcount == 0 fire - the exact "guard
-# that cannot fail" class this whole gate exists to catch. Each test below
-# steals the row via a genuinely separate connection at the precise point
-# the vulnerable UPDATE is about to run, so the guard's fallback branch is
-# forced, not merely present.
-# --------------------------------------------------------------------------- #
-
-
-# --------------------------------------------------------------------------- #
-# Round 13 (concurrency execution audit): four of the five rowcount guards
-# had no test that could actually make rowcount == 0 fire - the exact "guard
-# that cannot fail" class this whole gate exists to catch.
+# Round 13 (concurrency execution audit): the rowcount guards had no test that
+# could actually make rowcount == 0 fire - the exact "guard that cannot fail"
+# class this whole gate exists to catch.
 #
+# COUNT CORRECTED, round 14: the round-13 note said "four of the five rowcount
+# guards" on both counts. There are SIX guarded `UPDATE ... AND
+# ghl_subaccount_id IS NULL` sites in `create_ghl_subaccount_core` - the
+# phase-1 sibling link, that branch's torn-repair (both directions), the
+# create-path torn repair, the PHASE-2 RE-CHECK link, the GHL-lookup adoption,
+# and the create write-back - and the phase-2 re-check link was the one the
+# round-13 sweep never counted and therefore never pinned. Its test is
+# `test_phase2_recheck_link_losing_the_race_returns_the_rows_id`, at the
+# bottom of this section.
+#
+# The round-13 note also described the technique as stealing the row "via a
+# genuinely separate connection". That is wrong and no test here does it:
 # `async_session` runs the whole test inside ONE outer transaction that only
-# ever releases SAVEPOINTs (see conftest.py) - nothing the test does is ever
-# visible to a genuinely separate connection. A "steal the row" race must
-# therefore write through the SAME session, exactly like the existing
+# ever releases SAVEPOINTs (see conftest.py), so nothing the test does is ever
+# visible to a genuinely separate connection - an attempt at one fails for the
+# wrong reason (the racer's write is invisible, not blocked). A "steal the
+# row" race must write through the SAME session, exactly like the existing
 # `test_sibling_recheck_links_a_racer_committed_mid_flight` above already
 # does: the write lands in the one open transaction the code under test
 # reads from, which is what makes the guard's WHERE clause legitimately see
 # zero matching rows when it runs.
+#
+# The property every test in this section needs, and the one the phase-2
+# re-check was missing: the racer must write to THE ROW THE GUARDED UPDATE
+# TARGETS (`WHERE id = :client_id`). Seeding the racer as a NEW sibling row
+# leaves this client's row still NULL, so the UPDATE matches exactly one row
+# and the fallback is unreachable however many racers exist.
 # --------------------------------------------------------------------------- #
 
 
@@ -4760,3 +4793,233 @@ async def test_create_path_torn_repair_losing_the_race_does_not_overwrite_the_ra
 
     assert replay.calls == []
     assert result.ghl_subaccount_id == "loc_stolen_during_torn_repair"
+
+
+@pytest.mark.db
+async def test_phase2_recheck_link_losing_the_race_returns_the_rows_id(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 14: the PHASE-2 RE-CHECK link UPDATE's rowcount==0 branch - the
+    sixth rowcount guard, and the one the round-13 sweep missed.
+
+    Both tests that reach this branch at all
+    (`test_sibling_recheck_links_a_racer_committed_mid_flight` and
+    `test_phase2_lock_and_recheck_run_even_after_a_phase1_collision`) seed
+    their racer as a NEW sibling row. The guarded UPDATE targets THIS client's
+    row (`WHERE id = :client_id AND ghl_subaccount_id IS NULL`), which those
+    racers never touch, so it always matched exactly one row and the fallback
+    was unreachable: neutering the branch to `if False:` left the whole suite
+    green.
+
+    Forcing it needs a racer on the row the UPDATE actually targets - this
+    client's OWN row, already linked by the time the re-check writes. That is
+    the at-least-once redelivery of this same client's action, running in the
+    window the mid-flight `in_progress` commit opens: it adopts a location by
+    email and writes that id back while this run is still deciding. Two
+    different ids are in play on purpose - the re-check intends to write the
+    sibling's `loc_recheck_sibling`, the row already holds the redelivery's
+    `loc_stolen_by_racer` - because if the racer wrote the SAME id the guard's
+    presence and absence would be indistinguishable. The row is the authority:
+    the id it holds is the one that must be reported.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="other@steal-recheck.example.com",
+        business_name="Steal Recheck Gym",
+        legal_entity="Steal Recheck Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0444",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(location=_ghl_location("loc_should_not_create"), lookup_result=None)
+
+    real_check = ghl_subaccount_module._db_sibling_check
+    checks = {"n": 0}
+
+    async def _check_then_race(session, **kwargs):
+        result = await real_check(session, **kwargs)
+        checks["n"] += 1
+        if checks["n"] == 1:
+            # Phase 1 scanned and found nothing. A sibling signing now
+            # commits in the gap the released phase-1 lock leaves open, so
+            # the phase-2 RE-CHECK will find it and take the link branch.
+            await _seed_client(
+                session,
+                email="ops@steal-recheck.example.com",
+                business_name="Steal Recheck Gym",
+                legal_entity="Steal Recheck Gym",
+                postal_code="E8 1AA",
+                phone="+44 20 7946 0444",
+                ghl_subaccount_id="loc_recheck_sibling",
+                created_at_offset_seconds=-5,
+            )
+        elif checks["n"] == 2:
+            # The phase-2 re-check has its sibling; now a redelivery of THIS
+            # client's own action wins the write-back before this run's link
+            # UPDATE runs, so that UPDATE's `ghl_subaccount_id IS NULL`
+            # predicate matches zero rows.
+            await session.execute(
+                text("UPDATE clients SET ghl_subaccount_id = :ghl_id WHERE id = :id"),
+                {"ghl_id": "loc_stolen_by_racer", "id": client_id},
+            )
+        return result
+
+    monkeypatch.setattr(ghl_subaccount_module, "_db_sibling_check", _check_then_race)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert checks["n"] == 2  # the re-check really ran, so the branch was live
+    assert ghl.calls == []  # no second location minted
+    assert result.created is False
+    assert result.skipped is True
+    assert result.ghl_subaccount_id == "loc_stolen_by_racer"
+    row = await async_session.execute(
+        text("SELECT ghl_subaccount_id, parent_client_id FROM clients WHERE id = :id"),
+        {"id": client_id},
+    )
+    surviving, parent_id = row.one()
+    assert surviving == "loc_stolen_by_racer"  # the racer's write was not clobbered
+    # The guarded UPDATE is all-or-nothing: it sets `parent_client_id` in the
+    # same statement, so losing the race leaves the row unparented too. The
+    # RESULT still carries the re-check sibling's root, which is a real
+    # divergence between what this run reports and what the row records - see
+    # the phase-1 branch, which returns no `parent_client_id` at all on this
+    # path.
+    assert parent_id is None
+
+
+@pytest.mark.db
+async def test_a_bare_head_office_number_does_not_merge_two_sites_of_one_brand(
+    async_session: AsyncSession,
+) -> None:
+    """Round 14 second pass - THE MIRROR of the extension case, end to end.
+
+    Identical to the test below except site B's document omits the extension
+    entirely rather than carrying a different one. The first cut of the
+    extension fix let this pair agree on the base number, so this exact chain
+    still auto-merged: same brand, same key, REAL postcode (bar 3 waived), one
+    head-office switchboard, two different signers.
+
+    That is the "fixed the reviewed example, shipped its mirror" shape that
+    cost rounds 9 through 13, reproduced inside the fix for it.
+    """
+    await _seed_client(
+        async_session,
+        email="ops@barebrand.example.com",
+        business_name="Bare Brand Gym",
+        legal_entity="Bare Brand Gym",
+        postal_code="E8 1AA",
+        phone="020 7946 0018 ext 21",
+        contact_first_name="Dana",
+        contact_last_name="Reed",
+        ghl_subaccount_id="loc_bare_site_one",
+    )
+    site_two_id = await _seed_client(
+        async_session,
+        email="ops@barebrand.example.com",
+        business_name="Bare Brand Gym",
+        legal_entity="Bare Brand Gym",
+        postal_code="E8 1AA",
+        phone="020 7946 0018",  # SAME switchboard, extension simply not recorded
+        contact_first_name="Priya",
+        contact_last_name="Raman",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_bare_site_two", name="Bare Brand Gym", postal_code="E8 1AA"),
+        lookup_result=None,
+    )
+
+    assert identity_key_module.postcode_is_weak_anchor("E8 1AA") is False
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=site_two_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True, "site 2 must provision its own sub-account"
+    assert result.parent_client_id is None, "the two sites must NOT be linked"
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :cid"),
+        {"cid": site_two_id},
+    )
+    assert flagged.scalar_one() is True, "the ambiguity must be visible to a human"
+
+
+@pytest.mark.db
+async def test_head_office_extensions_do_not_merge_two_sites_of_one_brand(
+    async_session: AsyncSession,
+) -> None:
+    """Round 14, P1.3 END TO END - the case the extension fix exists for.
+
+    Two sites of one brand share a name AND a REAL postcode (so the anchor is
+    STRONG and bar 3, the signer bar, is WAIVED - this is the keyed path whose
+    whole safety argument rests on bar 2). Head office signs both, from the
+    same switchboard, on its own extensions, and the two signers are different
+    people.
+
+    At `4519528` the extension was discarded from the phone reading, so bar 2
+    saw one identical number, every bar cleared, and site 2 was AUTO-LINKED
+    into site 1's sub-account with no flag. Round 12's tail comparison had
+    separated those two numbers correctly, so the `phonenumbers` rebuild was
+    strictly wider than what it replaced.
+
+    With the extension carried, bar 2 actively DISAGREES, so this splits and
+    flags instead of merging.
+    """
+    await _seed_client(
+        async_session,
+        email="ops@brandgyms.example.com",
+        business_name="Brand Gym",
+        legal_entity="Brand Gym",
+        postal_code="E8 1AA",
+        phone="020 7946 0018 ext 21",
+        contact_first_name="Dana",
+        contact_last_name="Reed",
+        ghl_subaccount_id="loc_site_one",
+    )
+    site_two_id = await _seed_client(
+        async_session,
+        email="ops@brandgyms.example.com",
+        business_name="Brand Gym",
+        legal_entity="Brand Gym",
+        postal_code="E8 1AA",  # SAME real postcode -> same identity key, strong anchor
+        phone="020 7946 0018 ext 45",  # same switchboard, different desk
+        contact_first_name="Priya",
+        contact_last_name="Raman",  # a different person signed
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_site_two", name="Brand Gym", postal_code="E8 1AA"),
+        lookup_result=None,
+    )
+
+    # The premise: the anchor really is STRONG here, so bar 3 is waived and
+    # bar 2 is the only thing standing between these two rows and a merge.
+    assert identity_key_module.postcode_is_weak_anchor("E8 1AA") is False
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=site_two_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True, "site 2 must provision its own sub-account"
+    assert result.parent_client_id is None, "the two sites must NOT be linked"
+    assert result.ghl_subaccount_id == "loc_site_two"
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :cid"),
+        {"cid": site_two_id},
+    )
+    assert flagged.scalar_one() is True, "the ambiguity must be visible to a human"

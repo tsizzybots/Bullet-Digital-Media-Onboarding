@@ -36,7 +36,16 @@ import re
 
 import pytest
 
-from bullet_api.worker.identity_key import compute_identity_key, normalize_postcode
+from bullet_api.worker.identity_key import (
+    _ORDINAL_INWARD,
+    PostcodeConfidence,
+    _digits_are_low_entropy,
+    _is_recognised_format,
+    classify_postcode,
+    compute_identity_key,
+    normalize_postcode,
+    postcode_is_weak_anchor,
+)
 
 # Separator forms a human actually types between parts of a postcode.
 SEPARATORS = ["", " ", "  ", "-", ",", ", ", ".", " - "]
@@ -394,3 +403,188 @@ class TestIdentityKeyInheritsTheInvariants:
         assert compute_identity_key("Brand Gym", "K1A 0B1") != compute_identity_key(
             "Brand Gym", "B1A 0K1"
         )
+
+
+class TestStrongIsAnAllowlist:
+    """Round 14: the property that ends rounds 9-13, stated as an IMPLICATION.
+
+    Every previous round asserted EXAMPLES of what must be weak, so each fix
+    was only as good as the examples whoever wrote it happened to think of -
+    and the reviewer then supplied the mirror the author had not thought of.
+    Five rounds, five mirrors.
+
+    This asserts the DIRECTION instead: STRONG implies positively-recognised.
+    Any future path that yields a strong anchor without a format match fails
+    here, whatever input shape reaches it, whether or not anybody thought of
+    that shape in advance. That is the difference between a test that pins the
+    last bug and a test that closes the class.
+
+    The converse is deliberately NOT asserted: a REAL value may still be weak
+    (an ordinal-shaped code, or filler digit content that fullmatches ZIP5),
+    which is the safe direction.
+    """
+
+    def _corpus(self) -> list[str]:
+        """Postcode-shaped and NOT-postcode-shaped inputs, deterministically.
+
+        The not-postcode half is the point. Round 13's P0.2 lived entirely in
+        values no postcode generator would ever emit ("Unit 3", "1st Floor",
+        "TBC 1"), because the old classifier only asked "does this look like
+        filler", never "is this a postcode at all".
+        """
+        rng = random.Random(20260907)
+        corpus: list[str] = []
+        for core in POSTCODE_CORES:
+            for separator in SEPARATORS:
+                parts = _parts(core)
+                corpus.append(separator.join(parts))
+        unit_words = [
+            "Unit",
+            "Suite",
+            "Studio",
+            "Gym",
+            "Bay",
+            "Pod",
+            "Kiosk",
+            "Cabin",
+            "Stall",
+            "Pitch",
+            "Annexe",
+            "Wing",
+            "Zone",
+            "Container",
+            "Berth",
+            "Arena",
+            "Court",
+            "Gate",
+            "Block",
+            "Floor",
+            "Room",
+            "Shop",
+            "Office",
+            "Lot",
+        ]
+        structure_words = ["Floor", "Street", "Avenue", "Road", "Lane", "Way", "Rise", "Park"]
+        ordinals = ["1st", "2nd", "3rd", "4th", "8th", "21st"]
+        outwards = ["B2", "E8", "C1", "C3", "N1", "EC1V", "SW1A", "B33", "Q9", "I4"]
+        inwards = ["1AA", "9BE", "2AM", "2PM", "1ST", "8TH", "0KZ", "3CV"]
+        placeholders = [
+            "Unit 3",
+            "1st Floor",
+            "Suite 100",
+            "Floor 2",
+            "PO Box 1",
+            "TBC 1",
+            "n/a 1",
+            "Head Office 1",
+            "EC1V",
+            "TBA",
+            "N/A",
+            "Unknown",
+            "11111",
+            "00000",
+            "99999",
+            "-",
+            "0",
+            "1",
+            "12",
+            "123",
+            "1234",
+            "12345",
+            "123456",
+            "1234567",
+        ]
+        corpus.extend(placeholders)
+        for _ in range(6000):
+            shape = rng.randrange(6)
+            if shape == 0:
+                corpus.append(
+                    f"{rng.choice(unit_words)} {rng.choice(outwards)}, {rng.choice(ordinals)}"
+                )
+            elif shape == 1:
+                corpus.append(
+                    f"{rng.choice(outwards)} {rng.choice(ordinals)} {rng.choice(structure_words)}"
+                )
+            elif shape == 2:
+                corpus.append(f"{rng.choice(outwards)} {rng.choice(inwards)}")
+            elif shape == 3:
+                corpus.append(
+                    f"{rng.choice(unit_words)} {rng.choice(outwards)} {rng.choice(inwards)}"
+                )
+            elif shape == 4:
+                corpus.append(str(rng.randrange(0, 10 ** rng.randrange(1, 7))))
+            else:
+                corpus.append(
+                    f"{rng.choice(outwards)} {rng.choice(inwards)}, "
+                    f"{rng.choice(outwards)} {rng.choice(inwards)}"
+                )
+        return corpus
+
+    def test_strong_implies_a_positively_recognised_format(self) -> None:
+        offenders: list[tuple[str, str]] = []
+        for raw in self._corpus():
+            result = classify_postcode(raw)
+            if not result.value:
+                # An EMPTY value is not a weak anchor and not a strong one - it
+                # is not an anchor at all, and the question does not apply. That
+                # is not a loophole: see
+                # `test_an_empty_value_can_never_anchor_anything` below, which
+                # proves an empty value always NULLs the key, so such a row
+                # takes the unkeyed path (bar 3 required in its own right) and
+                # the GHL leg routes it through its own `unknown` branch to
+                # UNDECIDABLE. Filtering here without that proof would be
+                # exactly the "loosen the test until it passes" move this file
+                # exists to prevent.
+                continue
+            if postcode_is_weak_anchor(raw):
+                continue
+            if result.confidence is not PostcodeConfidence.REAL or not _is_recognised_format(
+                result.value
+            ):
+                offenders.append((raw, result.value))
+        assert offenders == [], f"STRONG without a recognised format: {offenders[:10]}"
+
+    def test_a_strong_anchor_is_never_ordinal_shaped_or_low_entropy(self) -> None:
+        offenders: list[tuple[str, str]] = []
+        for raw in self._corpus():
+            if postcode_is_weak_anchor(raw):
+                continue
+            value = classify_postcode(raw).value
+            digits = "".join(ch for ch in value if ch.isdigit())
+            if _ORDINAL_INWARD.fullmatch(value[-3:]) is not None:
+                offenders.append((raw, value))
+            elif len(digits) >= 3 and _digits_are_low_entropy(digits):
+                offenders.append((raw, value))
+        assert offenders == [], f"STRONG but ordinal/filler-shaped: {offenders[:10]}"
+
+    def test_an_empty_value_can_never_anchor_anything(self) -> None:
+        """The proof that justifies the empty-value filter above.
+
+        `postcode_is_weak_anchor("")` is False, which in isolation reads like
+        "strong". It is safe only because an empty normalization NULLs the
+        identity key, and a NULL-keyed row never reaches the keyed path whose
+        bar 3 this function gates. Asserting that here means the filter above
+        rests on a tested property rather than on my reading of the caller.
+        """
+        for raw in self._corpus():
+            if classify_postcode(raw).value:
+                continue
+            assert compute_identity_key("Brand Gym", raw) is None
+
+    def test_the_value_never_depends_on_the_confidence(self) -> None:
+        # Key invariance as a property: `normalize_postcode` is exactly the
+        # value half, so no confidence rule can move a stored identity_key.
+        for raw in self._corpus():
+            assert normalize_postcode(raw) == classify_postcode(raw).value
+
+    def test_an_unenumerated_unit_word_is_never_safer_than_an_enumerated_one(self) -> None:
+        # The P0.1 INVERSION, pinned across the whole vocabulary rather than
+        # the two words the review happened to name. At head the ENUMERATED
+        # words rated STRONG and the unenumerated ones WEAK, so every entry
+        # added to `_UNIT_BEFORE` upgraded that word's anchor from weak to
+        # strong - the precise opposite of what its own comment claimed.
+        enumerated = ["Unit", "Suite", "Studio", "Gym", "Bay", "Pod", "Kiosk", "Cabin", "Stall"]
+        unenumerated = ["Pitch", "Annexe", "Wing", "Zone", "Container", "Berth", "Arena"]
+        for word in enumerated + unenumerated:
+            assert postcode_is_weak_anchor(f"{word} B2, 1st") is True
+            assert postcode_is_weak_anchor(f"{word} C1 2PM") is True

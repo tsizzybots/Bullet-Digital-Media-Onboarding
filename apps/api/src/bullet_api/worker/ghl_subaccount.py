@@ -96,10 +96,20 @@ Correctness rules:
   is a flag the team stops reading. A per-identity concurrency cap serialises
   same-identity processing so two returning signings cannot both pass the check
   concurrently.
-- **Commit the `in_progress` row BEFORE the GHL call**, then commit the
-  terminal (`success`/`failed`) state after. A crash mid-call therefore
-  leaves a visible `in_progress` row in the dashboard rather than a silent
-  gap - partial failures must be visible, never silent.
+- **Commit the `in_progress` row BEFORE the dedup lock and the GHL call**,
+  then commit the terminal (`success`/`failed`) state after. A crash mid-call
+  therefore leaves a visible `in_progress` row in the dashboard rather than a
+  silent gap - partial failures must be visible, never silent. The row is
+  claimed before the LOCK, not merely before the HTTP call (round 13, P1.5):
+  acquiring the lock is itself a statement that can fail, and claiming after
+  it meant a lock failure left no row at all.
+- **The dedup lock raises its own statement_timeout.** The engine sets a 5s
+  `statement_timeout` on every connection and Postgres applies that to time
+  spent BLOCKED ON A LOCK, so a racer waiting on the advisory lock was
+  cancelled at 5s while the holder legitimately keeps it for ~20s across two
+  GHL calls. `_acquire_dedup_lock` raises the ceiling to 30s for the wait
+  alone (`SET LOCAL`, restored immediately) so the lock can serialise the case
+  it exists for.
 - **Concurrency.** Two guards (Inngest's per-function max): a per-client cap
   of 1 eliminates a concurrent double-create for the same client, and a
   per-identity cap of 1 (`event.data.dedup_key` = identity_key when present,
@@ -132,6 +142,7 @@ the `create_client_record` split.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import Sequence
@@ -335,6 +346,56 @@ _SIBLING_BY_IDENTITY_KEY_SQL = text(
 # rejected: under a connection pool a leaked session lock blocks the email
 # forever, and the xact scope self-releases on every path including raises.
 _DEDUP_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtext('dedup:' || lower(:email)))")
+
+# THE LOCK WAIT MUST OUTLIVE THE ENGINE'S statement_timeout (round 13, P1.5).
+# `db/session.py` sets `server_settings={"statement_timeout": "5000"}` on every
+# connection, and Postgres applies that ceiling to a statement BLOCKED WAITING
+# ON A LOCK, not just to execution time. The phase-2 holder keeps this lock
+# from before the GHL lookup through `create_location` (10.0s httpx timeout
+# each, `ghl/client.py`) to the terminal commit - roughly 20s. So a racer
+# blocking on `pg_advisory_xact_lock` was cancelled at 5s with
+# `QueryCanceledError` instead of queueing behind the holder: the lock could
+# not serialise the exact case it was built for. Reproduced by execution
+# against the production `server_settings` before this fix (waiter raised at
+# 5.02s); with the raise, the same waiter blocks 7.99s and acquires.
+#
+# 30s covers the worst path (two 10s GHL calls plus the terminal commit) with
+# headroom. It is deliberately BOUNDED rather than disabled: an indefinite wait
+# would trade a cancelled racer for a pooled connection parked forever.
+#
+# `SET LOCAL` (transaction-scoped) rather than a `pg_try_advisory_xact_lock`
+# retry loop: the try-loop gives up its place in the lock queue on every
+# iteration, so a racer can starve under sustained contention, and it costs a
+# round-trip per attempt. Blocking keeps Postgres' own FIFO queueing.
+#
+# RESTORED IMMEDIATELY with `= DEFAULT`, which puts back the 5s that arrived in
+# asyncpg's startup packet (verified by execution - it does NOT reset to the
+# server's own postgresql.conf value). Without the restore the raised ceiling
+# would cover every later statement in the same transaction - the sibling scan,
+# the write-back, the terminal commit - which is a widening this fix has no
+# reason to make. `SET LOCAL` does not survive a COMMIT (also verified), so
+# phase 1 and phase 2 each acquire through this helper: one call cannot cover
+# both, because the `in_progress` commit between them resets the setting.
+_LOCK_WAIT_TIMEOUT_SQL = text("SET LOCAL statement_timeout = '30s'")
+_LOCK_WAIT_TIMEOUT_RESET_SQL = text("SET LOCAL statement_timeout = DEFAULT")
+
+
+async def _acquire_dedup_lock(session: AsyncSession, email: str) -> None:
+    """Take the transaction-scoped dedup advisory lock on `lower(email)`.
+
+    Raises whatever the lock statement raises (a `QueryCanceledError` wrapped
+    as `DBAPIError` if even 30s is not enough). Callers fail closed: the action
+    is recorded `failed` and Inngest retries, so a lost lock race never
+    provisions a second sub-account.
+
+    No `try/finally` around the reset: if the lock statement raises, the
+    transaction is already aborted, the reset would raise on it too, and the
+    setting dies with the transaction anyway.
+    """
+    await session.execute(_LOCK_WAIT_TIMEOUT_SQL)
+    await session.execute(_DEDUP_LOCK_SQL, {"email": email})
+    await session.execute(_LOCK_WAIT_TIMEOUT_RESET_SQL)
+
 
 # Fallback for a NULL identity_key. A document with no usable name or
 # postcode would otherwise have NO DB-side dedup signal at all, which was a
@@ -549,10 +610,12 @@ async def _db_sibling_check(
     """Run the full DB-sibling scan: keyed query first, then the email fallback.
 
     Returns `(sibling, collision)` exactly as `_pick_sibling` does. Extracted
-    (round 12, P1.4) so the scan can run TWICE: once before the `in_progress`
-    commit, and again under the re-acquired dedup lock in the transaction that
+    (round 12, P1.4) so the scan can run TWICE: once under the phase-1 dedup
+    lock, and again under the re-acquired phase-2 lock in the transaction that
     spans the GHL call - the re-run is what lets the second of two same-email
-    racers see the first one's committed write-back.
+    racers see the first one's committed write-back. (Both scans now run AFTER
+    the `in_progress` row is committed, not before it - round 13, P1.5 moved
+    that claim ahead of the phase-1 lock.)
 
     TWO-STAGE, and the second stage now also runs when the keyed stage found
     rows but neither matched nor name-collided (round 12, P2): a PURE prefix
@@ -935,20 +998,30 @@ async def create_ghl_subaccount_core(
 ) -> CreateSubaccountResult:
     """Create (or resume / reuse / skip) the GHL sub-account for one client.
 
-    Steps: load the client; short-circuit if already provisioned; reuse a
-    DB sibling's sub-account if this is a returning client whose full name
-    matches (link `parent_client_id`); else record an `in_progress` action +
-    COMMIT, look GHL up by email, reuse only a hit corroborated on name,
-    postcode AND phone (with no actively-divergent address), else POST create;
-    on success record `success` + write
-    `ghl_subaccount_id` back + COMMIT, or on error record `failed` + COMMIT and
-    re-raise. An uncorroborated match at either step flags `possible_duplicate`
-    and provisions its own sub-account rather than merging.
+    Steps: load the client; short-circuit if already provisioned; record an
+    `in_progress` action + COMMIT; take the dedup lock; reuse a DB sibling's
+    sub-account if this is a returning client whose full name matches (link
+    `parent_client_id`); else record the create payload + COMMIT, look GHL up
+    by email, reuse only a hit corroborated on name, postcode AND phone (with
+    no actively-divergent address), else POST create; on success record
+    `success` + write `ghl_subaccount_id` back + COMMIT, or on error record
+    `failed` + COMMIT and re-raise. An uncorroborated match at either step
+    flags `possible_duplicate` and provisions its own sub-account rather than
+    merging.
+
+    The `in_progress` row is claimed and committed BEFORE the dedup lock
+    (round 13, P1.5), not after it: the lock acquisition is a statement that
+    can fail, and claiming afterwards meant a lock failure produced no
+    `platform_actions` row at all - a silent gap, which this module's contract
+    forbids.
 
     Raises:
         ClientNotFoundError: no `clients` row for `client_id`. Rolls back.
-        Exception: any failure of the GHL lookup OR create-location call
-            (GhlClientError 4xx, GhlServerError 5xx/429, an httpx timeout /
+            Raised before the action row is claimed, so this is the one failure
+            that legitimately leaves no `platform_actions` row.
+        Exception: any failure of the dedup lock, the sibling scan, the GHL
+            lookup OR the create-location call (a cancelled lock wait,
+            GhlClientError 4xx, GhlServerError 5xx/429, an httpx timeout /
             transport error, or an empty-config GhlNotConfiguredError) is recorded as
             a `failed` action and committed, then re-raised unchanged so the
             wrapper can decide retriable vs not.
@@ -1019,16 +1092,121 @@ async def create_ghl_subaccount_core(
     # it falls back to the EMAIL sibling query - S1-26's original key. Without
     # that fallback those documents would have no DB-side dedup at all, which is
     # strictly worse than before this ticket.
+
+    # THE `in_progress` ROW IS CLAIMED AND COMMITTED FIRST (round 13, P1.5).
+    # This used to sit after the phase-1 lock and the sibling scan, on each
+    # branch separately, so anything that raised BEFORE it - most obviously the
+    # lock acquisition, which is a statement that can genuinely fail -
+    # propagated out with no `platform_actions` row ever created, contradicting
+    # this module's own contract that "a crash mid-call leaves a visible
+    # `in_progress` row rather than a silent gap". Claiming the row here, and
+    # COMMITTING it before the lock, is what makes a lock failure visible:
+    # an uncommitted INSERT would be rolled back by the very statement that
+    # aborts the transaction, so hoisting alone would have changed nothing.
+    #
+    # `payload=None` deliberately. The create path fills it in below, once it
+    # knows it is actually POSTing; the reuse paths must keep it NULL, both
+    # because a recorded request body we never sent misreads as one we did, and
+    # because the payload carries contact PII that those rows have never held.
+    begun = await begin_action(
+        session,
+        client_id=client_id,
+        event_id=onboarding_event_id,
+        platform=GHL_PLATFORM,
+        action=GHL_CREATE_SUBACCOUNT_ACTION,
+        idempotency_key=idempotency_key,
+        payload=None,
+        inngest_run_id=inngest_run_id,
+    )
+    await session.commit()
+
+    async def _record_failure(exc: Exception) -> None:
+        # Record ANY failure after the committed `in_progress` row - the dedup
+        # lock, the sibling scan, the GHL lookup or the create call - as
+        # `failed`, then the caller re-raises unchanged. Catching only
+        # GhlClientError/GhlServerError would let a transport-level error (an
+        # httpx timeout / connection reset, which carries no HTTP status)
+        # bypass fail_action and leave the row stuck `in_progress`; a
+        # response-lost read timeout is also the worst case of the at-least-once
+        # create window, so it must be visible. The wrapper still decides
+        # retriable-vs-not from the re-raised exception type.
+        #
+        # DEFINED HERE, above the phase-1 lock (round 13, P1.5), so the phase-1
+        # acquisition records `failed` exactly as the phase-2 acquisition
+        # already did. Leaving phase 1 as the one bare-propagate path would
+        # have left the two acquisitions of one lock behaving differently -
+        # and a bare propagate strands the row `in_progress` with no
+        # `last_error`, so an operator sees a stuck action and no reason.
+        #
+        # RECOVER FROM A DEACTIVATED TRANSACTION (review round 5). When `exc` is
+        # itself a DB error - exactly the case the `_flag_possible_duplicate`
+        # guards exist to catch, and the case a cancelled lock wait produces -
+        # SQLAlchemy has already deactivated the transaction, so this UPDATE
+        # raises `PendingRollbackError`. That propagates out of the handler, the
+        # action never reaches `failed`, and it is stranded `in_progress`
+        # forever: precisely the zombie those guards were added to prevent,
+        # reintroduced by their own recovery path.
+        #
+        # Rolled back ON DEMAND rather than unconditionally, because an
+        # unconditional rollback would DISCARD THE POSSIBLE-DUPLICATE FLAG on
+        # every ordinary failure. That flag is deliberately uncommitted when it
+        # is written - it rides this terminal commit (see the comments at both
+        # `_flag_possible_duplicate` call sites) - so a blanket rollback would
+        # silently drop the human's only signal that a signing was ambiguous,
+        # every time the GHL create failed. Trying the write first keeps the
+        # flag on the ordinary path and still recovers the DB-error path, where
+        # the flag write is the thing that failed anyway.
+        # Catches `SQLAlchemyError`, not just `PendingRollbackError`: which of
+        # the two surfaces depends on WHO notices the broken transaction first.
+        # If SQLAlchemy has already marked it deactivated it raises
+        # `PendingRollbackError`; if the statement reaches Postgres first the
+        # server rejects it and asyncpg's `InFailedSQLTransactionError` arrives
+        # wrapped as a `DBAPIError`. Both derive from `SQLAlchemyError`, and the
+        # savepoint-based test fixture reproduces the SECOND - so pinning only
+        # the first left the zombie open on the very path this recovers.
+        # The COMMIT is inside the guarded block, not after it. A Neon
+        # connection reset between a successful UPDATE and its COMMIT is routine
+        # on serverless Postgres, and with the commit outside, that reset
+        # propagates, the `failed` state never becomes durable, the row stays
+        # `in_progress`, and the original exception is masked so the wrapper
+        # classifies retriable-vs-not on the wrong type.
+        try:
+            await fail_action(session, action_id=begun.action_id, last_error=str(exc))
+            await session.commit()
+        except SQLAlchemyError:
+            await session.rollback()
+            await fail_action(session, action_id=begun.action_id, last_error=str(exc))
+            await session.commit()
+        log.warning(
+            "S1-25 GHL sub-account creation failed",
+            extra={
+                "client_id": str(client_id),
+                "action_id": str(begun.action_id),
+                "error": str(exc),
+            },
+        )
+
     # DEDUP LOCK, phase 1 (round 12, P1.4 - see `_DEDUP_LOCK_SQL`): serialise
     # the sibling scan against any same-email run currently holding the lock
     # across its GHL call, so this scan sees that run's committed write-back
-    # instead of an empty result. Transaction-scoped: released by the
-    # `in_progress` commit below, and re-acquired after it (phase 2).
-    await session.execute(_DEDUP_LOCK_SQL, {"email": client.email})
+    # instead of an empty result. Transaction-scoped, so it is released by the
+    # next commit - the payload commit on the create path below, or the
+    # terminal commit on a reuse path - and re-acquired after it (phase 2).
+    #
+    # GUARDED (round 13, P1.5): the lock wait is the one statement here that is
+    # SUPPOSED to block, so it is also the one that can be cancelled, and the
+    # `in_progress` row is already committed above - anything raising between
+    # that row and its terminal state must route through `_record_failure` or
+    # it strands the action forever.
+    try:
+        await _acquire_dedup_lock(session, client.email)
 
-    sibling, collision = await _db_sibling_check(
-        session, client=client, client_id=client_id, client_name=client_name
-    )
+        sibling, collision = await _db_sibling_check(
+            session, client=client, client_id=client_id, client_name=client_name
+        )
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
 
     if collision is not None:
         await _flag_possible_duplicate(session, client_id=client_id, sibling_id=collision.id)
@@ -1049,16 +1227,11 @@ async def create_ghl_subaccount_core(
         # so clear it rather than leaving the badge up forever (it would
         # otherwise saturate the board before S1-26e lands and stop being read).
         await _clear_possible_duplicate(session, client_id=client_id)
-        begun = await begin_action(
-            session,
-            client_id=client_id,
-            event_id=onboarding_event_id,
-            platform=GHL_PLATFORM,
-            action=GHL_CREATE_SUBACCOUNT_ACTION,
-            idempotency_key=idempotency_key,
-            payload=None,
-            inngest_run_id=inngest_run_id,
-        )
+        # `begun` is the row claimed and committed above, before the lock
+        # (round 13, P1.5). This branch used to claim its own; hoisting it made
+        # the claim unconditional, so BOTH the reuse and create paths now
+        # inherit the same committed `in_progress` row rather than each racing
+        # to create one after the lock.
         if not begun.already_succeeded:
             await complete_action(
                 session,
@@ -1190,18 +1363,28 @@ async def create_ghl_subaccount_core(
         postal_code=client.postal_code,
     )
 
-    begun = await begin_action(
-        session,
-        client_id=client_id,
-        event_id=onboarding_event_id,
-        platform=GHL_PLATFORM,
-        action=GHL_CREATE_SUBACCOUNT_ACTION,
-        idempotency_key=idempotency_key,
-        payload=payload,
-        inngest_run_id=inngest_run_id,
-    )
-    # COMMIT the in_progress row before the external calls so a crash
-    # mid-lookup / mid-POST leaves a visible row rather than a silent gap.
+    # RECORD THE PAYLOAD, now that this run is committed to POSTing it. The
+    # row itself was claimed with `payload=None` before the lock (round 13,
+    # P1.5); this is the create path's own write, so the reuse paths above keep
+    # a NULL payload exactly as they always have.
+    #
+    # A direct UPDATE rather than a second `begin_action(payload=payload)`:
+    # `begin_action`'s ON CONFLICT DO UPDATE only re-sets `idempotency_key`, so
+    # a second call against the already-inserted row would return the same row
+    # and silently DISCARD the payload - the audit trail would go quietly empty
+    # on every create.
+    #
+    # COMMIT the payload before the external calls so a crash mid-lookup /
+    # mid-POST leaves a visible row carrying the body we sent. The row's
+    # `in_progress` state is already durable from the commit before the lock.
+    #
+    # BOTH STATEMENTS ARE GUARDED, the commit included (round 13, P1.5, the
+    # same class round 8 closed at the terminal commit). Before the reorder
+    # this commit was the action row's FIRST, so a failure here stranded
+    # nothing - there was no committed row yet. Now there is one, so an
+    # unguarded raise would leave it `in_progress` with no `last_error` saying
+    # why: a Neon connection reset between the UPDATE and its COMMIT is exactly
+    # the case `_record_failure`'s own SQLAlchemyError path exists to recover.
     #
     # KNOWN AND DELIBERATE (review round 7 noted it as mitigation-without-
     # cause): on the flagged paths, `_flag_possible_duplicate`'s UPDATE runs
@@ -1212,7 +1395,15 @@ async def create_ghl_subaccount_core(
     # row and its terminal state. The exposure is bounded by the GHL client's
     # 10s timeout and is a single-row lock; 0013's `lock_timeout` protects
     # migrations queueing behind it. Trade accepted, not overlooked.
-    await session.commit()
+    try:
+        await session.execute(
+            text("UPDATE platform_actions SET payload = cast(:payload AS jsonb) WHERE id = :id"),
+            {"payload": json.dumps(payload), "id": begun.action_id},
+        )
+        await session.commit()
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
 
     # A replay whose action already succeeded short-circuits without a
     # second GHL call. (The already-provisioned check above normally
@@ -1273,64 +1464,7 @@ async def create_ghl_subaccount_core(
             extra={"client_id": str(client_id), "action_id": str(begun.action_id)},
         )
 
-    async def _record_failure(exc: Exception) -> None:
-        # Record ANY failure of the lookup OR create call as `failed`, then
-        # the caller re-raises unchanged. Catching only GhlClientError/
-        # GhlServerError would let a transport-level error (an httpx timeout /
-        # connection reset, which carries no HTTP status) bypass fail_action
-        # and leave the row stuck `in_progress`; a response-lost read timeout
-        # is also the worst case of the at-least-once create window, so it
-        # must be visible. The wrapper still decides retriable-vs-not from the
-        # re-raised exception type.
-        #
-        # RECOVER FROM A DEACTIVATED TRANSACTION (review round 5). When `exc` is
-        # itself a DB error - exactly the case the `_flag_possible_duplicate`
-        # guards exist to catch - SQLAlchemy has already deactivated the
-        # transaction, so this UPDATE raises `PendingRollbackError`. That
-        # propagates out of the handler, the action never reaches `failed`, and
-        # it is stranded `in_progress` forever: precisely the zombie those
-        # guards were added to prevent, reintroduced by their own recovery path.
-        #
-        # Rolled back ON DEMAND rather than unconditionally, because an
-        # unconditional rollback would DISCARD THE POSSIBLE-DUPLICATE FLAG on
-        # every ordinary failure. That flag is deliberately uncommitted when it
-        # is written - it rides this terminal commit (see the comments at both
-        # `_flag_possible_duplicate` call sites) - so a blanket rollback would
-        # silently drop the human's only signal that a signing was ambiguous,
-        # every time the GHL create failed. Trying the write first keeps the
-        # flag on the ordinary path and still recovers the DB-error path, where
-        # the flag write is the thing that failed anyway.
-        # Catches `SQLAlchemyError`, not just `PendingRollbackError`: which of
-        # the two surfaces depends on WHO notices the broken transaction first.
-        # If SQLAlchemy has already marked it deactivated it raises
-        # `PendingRollbackError`; if the statement reaches Postgres first the
-        # server rejects it and asyncpg's `InFailedSQLTransactionError` arrives
-        # wrapped as a `DBAPIError`. Both derive from `SQLAlchemyError`, and the
-        # savepoint-based test fixture reproduces the SECOND - so pinning only
-        # the first left the zombie open on the very path this recovers.
-        # The COMMIT is inside the guarded block, not after it. A Neon
-        # connection reset between a successful UPDATE and its COMMIT is routine
-        # on serverless Postgres, and with the commit outside, that reset
-        # propagates, the `failed` state never becomes durable, the row stays
-        # `in_progress`, and the original exception is masked so the wrapper
-        # classifies retriable-vs-not on the wrong type.
-        try:
-            await fail_action(session, action_id=begun.action_id, last_error=str(exc))
-            await session.commit()
-        except SQLAlchemyError:
-            await session.rollback()
-            await fail_action(session, action_id=begun.action_id, last_error=str(exc))
-            await session.commit()
-        log.warning(
-            "S1-25 GHL sub-account creation failed",
-            extra={
-                "client_id": str(client_id),
-                "action_id": str(begun.action_id),
-                "error": str(exc),
-            },
-        )
-
-    # DEDUP LOCK, phase 2 + RE-CHECK (round 12, P1.4). The in_progress commit
+    # DEDUP LOCK, phase 2 + RE-CHECK (round 12, P1.4). The payload commit above
     # released the phase-1 lock, so a same-email racer may have provisioned and
     # committed in the gap. Re-acquire the lock - this transaction now spans
     # the GHL call and the write-back, so it holds until the terminal commit -
@@ -1353,7 +1487,7 @@ async def create_ghl_subaccount_core(
     # overrides an earlier flag (the post-lock view is the authoritative
     # one), and a clean re-check leaves the phase-1 flag standing.
     try:
-        await session.execute(_DEDUP_LOCK_SQL, {"email": client.email})
+        await _acquire_dedup_lock(session, client.email)
         recheck_sibling, recheck_collision = await _db_sibling_check(
             session, client=client, client_id=client_id, client_name=client_name
         )

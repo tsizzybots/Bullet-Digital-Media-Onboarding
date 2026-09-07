@@ -11,8 +11,10 @@ import pytest
 from bullet_api.worker.identity_key import (
     _ORDINAL_INWARD,
     LEGAL_ENTITY_PLACEHOLDER,
+    PostcodeConfidence,
     _digits_are_low_entropy,
     addresses_materially_diverge,
+    classify_postcode,
     compute_identity_key,
     contact_name_agrees,
     corroborating_signal_agrees,
@@ -1510,4 +1512,314 @@ class TestFitnessIndustryRoleTitles:
         ],
     )
     def test_fitness_titles_never_corroborate(self, first: str, last: str) -> None:
+        assert contact_name_agrees(first, last, first, last) is False
+
+
+class TestPostcodeConfidenceIsCarriedNotReDerived:
+    """Round 14, P0.1 + P0.2 - the structural fix that ends rounds 9-13.
+
+    Rounds 9 to 13 each patched a POSITIONAL or ENUMERATION guess about how to
+    reconstruct, from the final key string, a fact `normalize_postcode` already
+    knew and discarded: whether it found a REAL postcode, DROPPED an ambiguous
+    candidate, or fell through to VERBATIM text. Every guess fixed the reviewed
+    example and left its mirror standing.
+
+    The fix stops reconstructing. `classify_postcode` returns the confidence
+    alongside the value, assigned where the information still exists, and
+    `postcode_is_weak_anchor` reads it instead of re-deriving it.
+    """
+
+    def test_a_dropped_candidate_cannot_pass_as_a_strong_anchor(self) -> None:
+        # P0.1, the headline. At head "Studio B2, 1st" (STUDIO enumerated in
+        # `_UNIT_BEFORE`, so the candidate is DROPPED) fell through to step 3,
+        # returned the verbatim "STUDIOB21ST" which is no longer UK-shaped, so
+        # the round-13 "an ordinal extraction is weak" clause never fired and
+        # the anchor was judged STRONG with bar 3 waived. The identical shape
+        # with an unenumerated word ("Pitch B2, 1st") was correctly WEAK - the
+        # code was strictly SAFER on the words it did not know.
+        assert postcode_is_weak_anchor("Studio B2, 1st") is True
+        assert postcode_is_weak_anchor("Pitch B2, 1st") is True
+        assert postcode_is_weak_anchor("Annexe B2, 1st") is True
+        # The enumeration must no longer decide safety at all: every one of
+        # these is weak whether or not its unit word was ever enumerated.
+        for unit_word in ("Studio", "Gym", "Unit", "Pitch", "Annexe", "Zone", "Container"):
+            assert postcode_is_weak_anchor(f"{unit_word} B2, 1st") is True
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "Unit 3",
+            "1st Floor",
+            "Suite 100",
+            "Floor 2",
+            "PO Box 1",
+            "TBC 1",
+            "n/a 1",
+            "Head Office 1",
+            "EC1V",
+        ],
+    )
+    def test_a_non_postcode_is_never_a_strong_anchor(self, value: str) -> None:
+        # P0.2. At head, weakness was decided by digit CONTENT alone once the
+        # UK regex missed, and "fewer than three digits" returned STRONG
+        # unconditionally - so any 3+ character string carrying one or two
+        # digits anchored a keyed merge as confidently as a real postcode. A
+        # 400k-input sweep found over 100,000 such fragments. "EC1V" is the
+        # sharpest: a real district-level OUTWARD code, covering thousands of
+        # addresses, is not a postcode and must not anchor one.
+        assert postcode_is_weak_anchor(value) is True
+
+    def test_strong_requires_a_positively_recognised_format(self) -> None:
+        # The invariant, stated as a test: STRONG is an ALLOWLIST. A value may
+        # waive bar 3 only by positively matching a published postal format,
+        # never by failing to look like filler.
+        assert postcode_is_weak_anchor("E8 1AA") is False
+        assert postcode_is_weak_anchor("EC1V 9BE") is False
+        assert postcode_is_weak_anchor("75008") is False
+        assert postcode_is_weak_anchor("D02X285") is False
+
+    @pytest.mark.parametrize("value", ["Q9 1AA", "V1 1AA", "X1 1AA"])
+    def test_an_outward_code_the_spec_never_issues_is_not_a_uk_postcode(self, value: str) -> None:
+        # Q, V and X never begin a UK postcode area; I, J and Z never appear in
+        # the second position. Closed character classes from the published
+        # spec, NOT a hand-maintained area table (which goes stale silently -
+        # the defect round 13 flagged in `_G7_KEY_CONSTANTS`).
+        assert postcode_is_weak_anchor(value) is True
+
+    @pytest.mark.parametrize(
+        "value", ["E8 1AA", "SW1A 1AA", "EC1V 9BE", "CR0 1AA", "N1 4AB", "M1 1AE", "ZE3 9JX"]
+    )
+    def test_real_outward_codes_survive_the_tighter_classes(self, value: str) -> None:
+        # The tightening must not cost any genuine UK client its anchor.
+        assert postcode_is_weak_anchor(value) is False
+
+    def test_a_valid_first_letter_that_is_not_a_real_area_still_classifies_real(self) -> None:
+        # The residual named in `_UK_POSTCODE_STRICT`'s comment, pinned with the
+        # exact literal that comment cites so G1 can see the coverage.
+        assert normalize_postcode("I4 1AA") == "I41AA"
+
+        # DISCLOSED RESIDUAL, pinned so it cannot be mistaken for closed. "I" is
+        # legal in first position (IG, IP, IV, IM are real areas), so "I4 1AA"
+        # is postcode-shaped by every published rule while not being an issued
+        # area. Only the 121-entry area table closes it, at the cost of a stale
+        # mirror. Failure direction: a strong anchor on a well-formed value.
+        assert postcode_is_weak_anchor("I4 1AA") is False
+
+    def test_an_unrecognised_inward_unit_is_not_a_uk_postcode(self) -> None:
+        # Round 13 P2: an inward half that is not an ordinal got neither the
+        # designator rules nor any downgrade, so "Gate C3 2AM" anchored STRONG.
+        # Real UK inward units exclude C, I, K, M, O and V, so "2AM"/"2PM" are
+        # not postcodes by the published spec - no enumeration of "Gate" or any
+        # other word required, which is the point.
+        assert postcode_is_weak_anchor("Gate C3 2AM") is True
+        assert postcode_is_weak_anchor("Studio C1 2PM") is True
+
+    def test_a_contextual_drop_cannot_crown_the_surviving_candidate(self) -> None:
+        # Round 13 P2 (tie counting): dropping one ordinal used to resurrect
+        # the other, so ONE unenumerated word flipped a refusal into a
+        # confident key. The value is left unchanged (round 11's
+        # "Unit B2 1st, E8 1ST" -> "E81ST" pin depends on a drop legitimately
+        # removing a non-postcode); what changes is that a survivor of a
+        # contested field can never be STRONG.
+        assert normalize_postcode("B2 1st, E8 2nd") == ""
+        assert postcode_is_weak_anchor("B2 1st, Gym E8 2nd") is True
+        assert postcode_is_weak_anchor("Unit B2 1st, E8 2nd") is True
+        assert normalize_postcode("Unit B2 1st, E8 1ST") == "E81ST"
+
+    def test_confidence_is_assigned_at_each_of_the_three_paths(self) -> None:
+        # Source trace for the four confidence values, so the PR body's
+        # "which line assigns this" question is answerable by a test rather
+        # than by reading.
+        assert classify_postcode("E8 1AA").confidence is PostcodeConfidence.REAL
+        assert classify_postcode("B33 8TH").confidence is PostcodeConfidence.AMBIGUOUS
+        assert classify_postcode("Unit 3").confidence is PostcodeConfidence.VERBATIM
+        assert classify_postcode("TBA").confidence is PostcodeConfidence.EMPTY
+        assert classify_postcode(None).confidence is PostcodeConfidence.EMPTY
+
+    def test_normalize_postcode_is_the_value_of_the_classification(self) -> None:
+        # `normalize_postcode` is retained as the value accessor so every
+        # existing caller (key computation, bar 5, the GHL leg) is unchanged
+        # BY CONSTRUCTION - which is what makes this rework key-invariant and
+        # therefore migration-free.
+        for raw in ["E8 1AA", "Studio B2, 1st", "75008", "TBA", "Unit B2 1st, E8 1ST", None]:
+            assert normalize_postcode(raw) == classify_postcode(raw).value
+
+
+class TestPhoneExtensionsDiscriminate:
+    """Round 14, P1.3 - the `phonenumbers` rebuild lost a discriminator.
+
+    `_phone_interpretations` kept only (country_code, national_number).
+    `phonenumbers.parse` puts the extension in a SEPARATE field, which was
+    discarded, so two different extensions on one switchboard corroborated.
+    Round 12's 9-digit tail produced "946001821" vs "946001845" and correctly
+    refused, so this was strictly WIDER than what it replaced - and it lands
+    exactly on the case bar 2 exists to narrow: same brand, same head-office
+    postcode, head office signing each site from its own extension.
+    """
+
+    @pytest.mark.parametrize(
+        ("phone_a", "phone_b"),
+        [
+            ("020 7946 0018 ext 21", "020 7946 0018 ext 45"),
+            ("0161 850 1234 ext 12", "0161 850 1234 ext 99"),
+            ("+44 20 7946 0018 x21", "+44 20 7946 0018 x45"),
+        ],
+    )
+    def test_different_extensions_on_one_switchboard_do_not_corroborate(
+        self, phone_a: str, phone_b: str
+    ) -> None:
+        assert corroborating_signal_agrees(phone_a=phone_a, phone_b=phone_b) is False
+
+    def test_the_same_extension_still_corroborates(self) -> None:
+        assert (
+            corroborating_signal_agrees(
+                phone_a="020 7946 0018 ext 21", phone_b="020 7946 0018 ext 21"
+            )
+            is True
+        )
+
+    def test_a_bare_number_does_not_agree_with_the_same_base_plus_an_extension(self) -> None:
+        # THE MIRROR of the reviewed finding, and the first cut of this fix got
+        # it wrong by letting it agree. Making only "ext 21 vs ext 45" refuse
+        # leaves the identical franchise chain standing whenever site B's
+        # document simply OMITS the extension: same key, REAL postcode so bar 3
+        # is waived, head office signing both sites, bar 2 agrees, auto-merge.
+        # Refusing costs a `possible_duplicate` flag (one S1-26e action); the
+        # permissive reading costs an unrecoverable merge.
+        assert (
+            corroborating_signal_agrees(phone_a="020 7946 0018", phone_b="020 7946 0018 ext 21")
+            is False
+        )
+        # Symmetric, like every other bar in this module.
+        assert (
+            corroborating_signal_agrees(phone_a="020 7946 0018 ext 21", phone_b="020 7946 0018")
+            is False
+        )
+
+    def test_two_bare_numbers_still_agree(self) -> None:
+        # The ordinary case must be untouched: absent-on-BOTH-sides is a match,
+        # so the extension rule cannot split the population that never records
+        # one at all.
+        assert corroborating_signal_agrees(phone_a="020 7946 0018", phone_b="020 7946 0018") is True
+
+    def test_a_plain_number_pair_is_unaffected(self) -> None:
+        assert (
+            corroborating_signal_agrees(phone_a="+44 7700 900123", phone_b="07700 900123") is True
+        )
+        assert (
+            corroborating_signal_agrees(phone_a="+44 7700 900123", phone_b="+44 7700 900999")
+            is False
+        )
+
+
+class TestBarThreeRefusesNonPersonSigners:
+    """Round 14, P1.4 - bar 3 was satisfiable by things that are not people.
+
+    The round-12/13 additions refused the exact instances that were reviewed
+    and missed the neighbouring class. Two shapes stand out beyond the
+    enumeration gap: `_PLACEHOLDER_NAME_STEMS` already contains "unknown" and
+    "test" but was consulted only by `identity_name`, never here; and bare
+    initials are name-shaped by construction, reducing bar 3 to roughly a
+    1-in-676 discriminator on the ONE path whose entire safety argument is
+    that two franchise sites have different individuals signing.
+    """
+
+    @pytest.mark.parametrize(
+        ("first", "last"),
+        [
+            ("General", "Enquiries"),
+            ("Main", "Contact"),
+            ("Info", "Contact"),
+            ("Site", "Contact"),
+            ("Customer", "Service"),
+            ("Test", "User"),
+            ("Unknown", "Person"),
+            ("Front", "House"),
+            ("New", "Client"),
+            ("Regional", "Contact"),
+            ("Chief", "Executive"),
+        ],
+    )
+    def test_a_function_is_not_a_signer(self, first: str, last: str) -> None:
+        assert contact_name_agrees(first, last, first, last) is False
+
+    @pytest.mark.parametrize(("first", "last"), [("J", "S"), ("A", "B"), ("X", "Y")])
+    def test_bare_initials_cannot_corroborate(self, first: str, last: str) -> None:
+        # Worse than a missing entry: initials are name-shaped by construction,
+        # so no shape rule catches them, and two unrelated sites collide on one
+        # pair far too easily for a bar that gates a merge.
+        assert contact_name_agrees(first, last, first, last) is False
+
+    def test_placeholder_stems_are_consulted_here_too(self) -> None:
+        # The set the module already maintains, finally read on this path.
+        assert contact_name_agrees("Unknown", "Unknown", "Unknown", "Unknown") is False
+        assert contact_name_agrees("Tbc", "Tba", "Tbc", "Tba") is False
+
+    def test_a_real_person_still_corroborates(self) -> None:
+        # The refusals must not swallow the population the bar exists to serve.
+        assert contact_name_agrees("Sarah", "Okafor", "Sarah", "Okafor") is True
+        assert contact_name_agrees("Priya", "Raman", "Priya", "Raman") is True
+
+    def test_refusal_is_symmetric(self) -> None:
+        # A corroboration signal must never depend on argument order (the
+        # round-13 non-commutativity bug); the new refusals keep that property.
+        for first, last in [("General", "Enquiries"), ("J", "S"), ("Unknown", "Person")]:
+            assert contact_name_agrees(first, last, "Sarah", "Okafor") == contact_name_agrees(
+                "Sarah", "Okafor", first, last
+            )
+
+    def test_hyphenated_surnames_are_untouched_by_this_round(self) -> None:
+        # Out of scope this round (round 13 P2, owned by the follow-up PR):
+        # pinned here so the P1.4 fix is proven NOT to have changed it.
+        assert contact_name_agrees("Sarah", "Jones-Smith", "Sarah", "Jones-Smith") is False
+
+
+class TestRoundFourteenSoleKillCases:
+    """Inputs that keep three PRE-EXISTING guards killable after the round-14 rework.
+
+    The mutation runner reported these three as SURVIVED once the confidence
+    allowlist landed - not because any guard stopped working, but because the
+    allowlist now refuses the old tests' inputs EARLIER, so breaking the guard
+    behind it changed nothing those tests could see. A guard whose only test
+    can no longer reach it is precisely the "guard that cannot fail" class this
+    project has been bounced for five times, so each one gets an input that
+    still reaches it.
+    """
+
+    def test_a_uk_postcodes_digit_content_is_too_short_to_analyse(self) -> None:
+        # Backs the claim in `postcode_is_weak_anchor`'s `len(digits) < 3`
+        # comment by COMPUTING it, so the comment cannot drift from the code
+        # (the G1 rule: a comment naming example data must have that data in a
+        # test). An ordinary UK postcode carries two digits, which is why the
+        # entropy analysis is skipped rather than applied to it.
+        digits = "".join(ch for ch in normalize_postcode("E8 1AA") if ch.isdigit())
+        assert digits == "81"
+        assert len(digits) < 3
+        assert postcode_is_weak_anchor("E8 1AA") is False
+
+    @pytest.mark.parametrize("value", ["B11 1AA", "B111AA"])
+    def test_a_recognised_format_with_filler_digits_is_still_weak(self, value: str) -> None:
+        # Keeps the digit-EXTRACTION line killable. "11111 USA" and "USA 11111"
+        # no longer distinguish leading-run extraction from full extraction,
+        # because both are VERBATIM and the allowlist refuses them first. A
+        # REAL format whose digits are NOT leading does distinguish: extracting
+        # only the leading run yields "" here, which reads as strong.
+        assert postcode_is_weak_anchor(value) is True
+
+    def test_a_separated_ordinal_reaching_the_verbatim_path_is_weak(self) -> None:
+        # Keeps the ordinal clause INSIDE `_is_recognised_format` killable.
+        # "B33 8TH" cannot do it: that goes through the ordinal-candidate pool
+        # and is marked AMBIGUOUS without ever consulting the allowlist. Only a
+        # value whose separators defeat candidate DISCOVERY reaches step 3 and
+        # then fullmatches the strict UK pattern - at which point the ordinal
+        # clause is the only thing standing between it and a strong anchor.
+        assert classify_postcode("B 33 8TH").confidence is PostcodeConfidence.VERBATIM
+        assert postcode_is_weak_anchor("B 33 8TH") is True
+
+    @pytest.mark.parametrize(("first", "last"), [("Morgan", "Morgan"), ("Taylor", "Taylor")])
+    def test_an_echoed_real_name_still_refuses(self, first: str, last: str) -> None:
+        # Keeps the ECHO guard (first == last) killable. The placeholder pairs
+        # the round-12 test used ("N/A"/"N/A", "Unknown"/"Unknown") are now
+        # refused by the placeholder-stem check that runs before it, so only an
+        # echoed name that is NOT a placeholder can still reach the echo rule.
         assert contact_name_agrees(first, last, first, last) is False

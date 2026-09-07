@@ -493,6 +493,16 @@ _G7_KEY_FUNCTIONS = frozenset(
     {
         "normalize_name",
         "normalize_postcode",
+        # Round 14: `normalize_postcode` is now a one-line delegation to
+        # `classify_postcode`, which holds every candidate rule that shapes the
+        # stored key. Fingerprinting only the wrapper would have left G7
+        # watching a line that can never change again - the refactor silently
+        # blinded the gate to the exact code it exists to guard. Both are
+        # listed so the delegation cannot become a hiding place, and
+        # `_classified` joins them because it decides which value a produced
+        # candidate resolves to.
+        "classify_postcode",
+        "_classified",
         "compute_identity_key",
         "identity_name",
         "_fold_unicode",
