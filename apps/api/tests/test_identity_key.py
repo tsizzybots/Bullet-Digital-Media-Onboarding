@@ -9,10 +9,18 @@ from __future__ import annotations
 import pytest
 
 from bullet_api.worker.identity_key import (
+    _FORENAMES,
+    _NON_DIGIT,
     _ORDINAL_INWARD,
+    _PHONE_MIN_DIGITS,
     LEGAL_ENTITY_PLACEHOLDER,
     PostcodeConfidence,
     _digits_are_low_entropy,
+    _is_recognised_format,
+    _is_repeating_pair,
+    _is_sequential_digits,
+    _part_tokens,
+    _phone_interpretations,
     addresses_materially_diverge,
     classify_postcode,
     compute_identity_key,
@@ -356,6 +364,47 @@ class TestSequentialDigitFiller:
         assert corroborating_signal_agrees(phone_a="1234567890", phone_b="1234567890") is False
 
 
+class TestBothFillerCheckPathsRefuse:
+    """The filler rules on BOTH paths through `normalize_phone`, pinned apart.
+
+    ROUND 15 SPLIT THIS FUNCTION IN TWO AND ONLY ONE HALF WAS GUARDED. Section
+    3 made the significant tail come from the PARSED national number, so a
+    number libphonenumber understands is filler-checked on the parsed tail and
+    never reaches the raw-digit fallback below it. The two existing guards both
+    target the FALLBACK - they were written when it was the only path - so the
+    real landlines and standard fillers their tests seed now take the parsed
+    path, and breaking either fallback rule stopped changing any verdict.
+
+    The fix is not to pick one path. Both run, both must refuse filler, and
+    each rule on each path is now pinned by an input measured to reach that
+    path: `_phone_interpretations` yields no usable national number for the
+    fallback cases below, which is what puts them there.
+    """
+
+    @pytest.mark.parametrize(
+        ("value", "path"),
+        [
+            # Parsed path: libphonenumber reads these, so the tail is the
+            # national number's, and the rule sees a clean repeating pair.
+            ("+44 7121212121", "parsed"),
+            ("+44 7123456789", "parsed"),
+            # Fallback path: no region parses these, so the raw digits are
+            # filler-checked rather than waved through.
+            ("00121212121", "fallback"),
+            ("00123456789", "fallback"),
+        ],
+        ids=["parsed_repeating", "parsed_sequential", "fallback_repeating", "fallback_sequential"],
+    )
+    def test_filler_is_refused_on_both_paths(self, value: str, path: str) -> None:
+        # The premise, asserted rather than assumed: a test claiming to cover
+        # the fallback is worthless if the input actually parses. This is the
+        # check whose absence let both guards go quietly revert-green.
+        readings = _phone_interpretations(value)
+        usable = [str(n) for _, n, _ in readings if len(str(n)) >= _PHONE_MIN_DIGITS]
+        assert bool(usable) is (path == "parsed")
+        assert normalize_phone(value) == ""
+
+
 class TestRealLandlinesSurvive:
     """Review round 5: the filler check was rejecting real UK landlines.
 
@@ -369,16 +418,27 @@ class TestRealLandlinesSurvive:
     """
 
     @pytest.mark.parametrize(
-        "value",
+        ("value", "distinct_digits"),
         [
-            "+44 20 7700 0000",  # London landline
-            "020 7000 0000",
-            "0800 100 1000",  # freephone
-            "+44 161 200 2000",
+            ("+44 20 7700 0000", 2),  # London landline, tail "077000000"
+            ("020 7000 0000", 2),  # tail "070000000"
+            ("0800 100 1000", 2),  # freephone, tail "001001000"
+            ("+44 161 200 2000", 4),  # tail "612002000" - see below
         ],
+        ids=["london", "london_bare", "freephone", "manchester"],
     )
-    def test_real_landline_is_usable(self, value: str) -> None:
-        assert normalize_phone(value) != ""
+    def test_real_landline_is_usable(self, value: str, distinct_digits: int) -> None:
+        tail = normalize_phone(value)
+        assert tail != ""
+        # THE DISTINCT-DIGIT COUNT IS ASSERTED, not left implicit (round 15).
+        # Three of these four have exactly TWO distinct digits in their tail,
+        # which is what the pre-round-5 floor `len(set(tail)) <= 2` refused and
+        # what makes them able to kill that guard. The Manchester number has
+        # FOUR, so the old floor never bit it and it cannot fail when the guard
+        # is broken - it is a CONTROL, present to show the rule is not simply
+        # refusing every landline. Asserting the count is what stops the fourth
+        # row reading as an unexplained value.
+        assert len(set(tail)) == distinct_digits
 
     def test_london_landline_tail_is_the_documented_literal(self) -> None:
         # Pins the exact 9-digit tail the docstrings cite ("077000000"). The
@@ -896,12 +956,27 @@ class TestPostcodeIsWeakAnchor:
         # safe direction - documented, not accidental.
         assert postcode_is_weak_anchor("111 11") is True
 
-    @pytest.mark.parametrize("value", ["75008", "10115", "E8 1AA", "SW1A 1AA", "E1 1EE"])
+    @pytest.mark.parametrize("value", ["E8 1AA", "SW1A 1AA", "E1 1EE"])
     def test_a_postcode_with_real_entropy_is_strong(self, value: str) -> None:
-        # High-entropy digit content ("75008") or a letter-structured code
-        # ("E8 1AA", "E1 1EE" - repeated digits but under three of them) is a
-        # real anchor.
+        # A letter-structured code ("E8 1AA", "E1 1EE" - repeated digits but
+        # under three of them) is a real anchor.
+        #
+        # ROUND 15 REMOVED "75008" AND "10115" FROM THIS ROW, and what they used
+        # to pin was wrong. They pinned "high-entropy digit content is a real
+        # anchor", which conflated two different questions: whether the DIGITS
+        # look like filler, and whether the VALUE is a postcode at all. Entropy
+        # only ever answered the first. A bare digit run passed because a
+        # `[0-9]{3,6}` wildcard sat in the allowlist, and that wildcard is not a
+        # format - it is the union of about a hundred of them, which is how a
+        # street number ("182") and a year ("2026") certified themselves. See
+        # `TestNumericValuesAreNeverStrongAnchors`.
         assert postcode_is_weak_anchor(value) is False
+
+    @pytest.mark.parametrize("value", ["75008", "10115"])
+    def test_a_bare_numeric_postcode_is_no_longer_strong(self, value: str) -> None:
+        # The other half of the row above, asserted rather than deleted so the
+        # behaviour change is visible in the file that used to claim otherwise.
+        assert postcode_is_weak_anchor(value) is True
 
     def test_three_digit_doubled_run_is_not_filler(self) -> None:
         # "B33 8TH" has digit content "338" - one doubled digit plus a tail is
@@ -921,10 +996,78 @@ class TestPostcodeIsWeakAnchor:
         assert postcode_is_weak_anchor("1000") is True
 
     @pytest.mark.parametrize("value", [None, "", "TBA", "00000"])
-    def test_absent_or_filler_postcode_is_not_a_weak_anchor(self, value: str | None) -> None:
-        # Absence / filler normalizes to "" (no key exists to anchor), and the
-        # weak regex cannot match an empty string, so the gate abstains.
-        assert postcode_is_weak_anchor(value) is False
+    def test_an_absent_postcode_keeps_the_signer_bar(self, value: str | None) -> None:
+        # WHAT THIS USED TO PIN (round 15). It asserted False and called that
+        # "the gate abstains" - but this gate has no abstain. Its return feeds
+        # `require_contact_name` directly, so False is not "no opinion", it is
+        # "waive bar 3". All four of these normalize to "" with confidence
+        # EMPTY (measured), and the old answer rated absent evidence a strong
+        # enough anchor to make name + phone sufficient for a merge.
+        #
+        # Nothing merged on it: both call sites screen the empty case out
+        # first, which is why the direction survived eleven rounds unnoticed.
+        # The reachability argument was in the docstring and it was correct;
+        # what was missing is that a function's unknown case should not depend
+        # on it. EMPTY did not match a published format, so it keeps the bar.
+        assert postcode_is_weak_anchor(value) is True
+
+
+class TestEachDigitEntropyRuleIsStillLoadBearing:
+    """One REAL-format value per digit-entropy rule, found by execution.
+
+    ROUND 15 WROTE THIS BECAUSE SIX GUARDS WENT REVERT-GREEN AT ONCE. The
+    round's two allow-side inversions moved the deny rules downstream of a
+    gate that already refused every fixture those guards had: the allowlist
+    (`confidence is not REAL -> weak`) answers first, and Section 1 removed
+    the numeric-national wildcard, so a bare five-digit string is no longer a
+    recognised format at all. `TestWeakAnchorDigitContent` seeds exactly such
+    strings, so breaking any single digit rule stopped changing its verdict.
+    The rules were still correct; the tests had stopped being able to fail.
+
+    So each rule needed a value that PASSES the allowlist and is refused by
+    that rule alone. UK postcodes carry at most three digits, which cannot
+    reach the four-digit rules, so the corpus was widened to Eircodes (five
+    digits) and searched: 60,000 generated Eircode-shaped candidates, of which
+    roughly 59,800 classify REAL - the exact count moves with the random
+    sample, so the reproducible figure is the 60,000 generated, not the REAL
+    count. Each rule was broken in turn, keeping only inputs whose verdict
+    FLIPPED.
+    Every rule had hits - 240, 240, 258, 91, 26 and 41 respectively - so none
+    is dead code, and the values below are drawn from those hit sets rather
+    than invented. Each is pinned as its own case so its rule is killed alone.
+    """
+
+    @pytest.mark.parametrize(
+        ("case", "postcode", "digits"),
+        [
+            ("constant_step", "E12 3AA", "123"),
+            ("repeating_pair", "E12 1AA", "121"),
+            ("two_distinct", "A22 N52T", "2252"),
+            ("triple_run", "A23 S111", "23111"),
+            ("palindrome", "D68 D386", "68386"),
+            ("doubled_run", "A22 440A", "22440"),
+        ],
+        # EXPLICIT ids: pytest's default builds one from all three params, which
+        # embeds spaces and makes the case unquotable in the mutation manifest.
+        # Each manifest entry names its own case, so the id is an interface.
+        ids=[
+            "constant_step",
+            "repeating_pair",
+            "two_distinct",
+            "triple_run",
+            "palindrome",
+            "doubled_run",
+        ],
+    )
+    def test_the_rule_is_the_sole_refuser(self, case: str, postcode: str, digits: str) -> None:
+        result = classify_postcode(postcode)
+        # The premise, asserted rather than assumed: this value reaches the
+        # digit rules at all only because the allowlist recognised its format.
+        # If a future format change drops it, this line fails loudly instead of
+        # the test quietly going vacuous the way its predecessor did.
+        assert result.confidence is PostcodeConfidence.REAL
+        assert "".join(ch for ch in result.value if ch.isdigit()) == digits
+        assert postcode_is_weak_anchor(postcode) is True
 
 
 class TestPostcodesMateriallyDiverge:
@@ -1137,9 +1280,15 @@ class TestWeakAnchorDigitContent:
 
     @pytest.mark.parametrize(
         "value",
-        ["E1 1EE", "SW1A 1AA", "E8 1AA", "75008", "60601", "D02X285"],
+        ["E1 1EE", "SW1A 1AA", "E8 1AA", "D02X285"],
     )
     def test_real_postcodes_stay_strong(self, value: str) -> None:
+        # ROUND 15: "75008" and "60601" left this row. They are real postcodes
+        # and they still KEY - nothing about the stored key changed - but they
+        # are no longer STRONG, because a bare digit run cannot certify itself
+        # as a published format. The distinction this row now draws is between
+        # "is a real code" (both still are) and "may waive the signer bar"
+        # (only a positively recognised format may).
         assert postcode_is_weak_anchor(value) is False
 
     def test_ordinal_shaped_extraction_is_weak_regardless_of_digit_content(self) -> None:
@@ -1275,9 +1424,25 @@ class TestPhoneCountryCodeConflict:
 
     def test_malta_and_us_numbers_sharing_a_tail_do_not_agree(self) -> None:
         # The premise, computed not asserted in prose: both numbers really do
-        # share the 9-digit tail - which is exactly why the tail alone must
+        # share a 9-digit RAW tail - which is exactly why the tail alone must
         # not decide.
-        assert normalize_phone("+356 2912 3456") == "629123456"
+        #
+        # ROUND 15 UPDATED THIS PREMISE, and what it used to assert is worth
+        # recording. It read `normalize_phone("+356 2912 3456") == "629123456"`,
+        # and that leading "6" is a digit of Malta's COUNTRY CODE (356) bleeding
+        # into a window taken over the raw field. That contamination is the
+        # defect Section 3 fixed: the filler tail is now taken from the parsed
+        # NATIONAL number, so Malta yields "29123456" and the country code can
+        # no longer masquerade as part of the subscriber number.
+        #
+        # The hazard this test exists for is unchanged, so it is asserted on the
+        # raw digits directly rather than deleted - the two numbers still
+        # collide on a naive nine-digit window, and the parse is what keeps them
+        # apart.
+        raw_malta = _NON_DIGIT.sub("", "+356 2912 3456")[-9:]
+        raw_us = _NON_DIGIT.sub("", "+1 (562) 912-3456")[-9:]
+        assert raw_malta == raw_us == "629123456", "the naive-window collision must still exist"
+        assert normalize_phone("+356 2912 3456") == "29123456"
         assert normalize_phone("+1 (562) 912-3456") == "629123456"
         assert (
             corroborating_signal_agrees(phone_a="+356 2912 3456", phone_b="+1 (562) 912-3456")
@@ -1422,6 +1587,55 @@ class TestOrdinalHijackViaUnenumeratedUnitWord:
         if key_real is not None:
             anchor_postcode = key_real.partition("|")[2]
             assert postcode_is_weak_anchor(anchor_postcode) is True
+
+
+class TestEachBarThreeShapeRuleIsStillLoadBearing:
+    """One fixture per deny-side shape rule, each reaching it THROUGH the gate.
+
+    ROUND 15, and the same story as `TestEachDigitEntropyRuleIsStillLoadBearing`
+    one class down the file. Section 2 put an allow-side gate
+    (`_looks_like_a_personal_name`) in front of these deny rules: the first
+    part must be a single listed forename. Every fixture the existing guards
+    used - "Club Manager", "Gym Owner", "Test User", bare initials on both
+    parts - is refused by that gate before any rule below it runs, so breaking
+    a rule stopped changing the verdict and six guards went revert-green at
+    once. The rules were right; their tests had lost the ability to fail.
+
+    A fixture that still discriminates needs a REAL forename in the first part
+    (so the gate passes) and the refused shape in the LAST part. Found by
+    executing each mutation against every (forename, role-noun) pair: 256 hits
+    for the role-noun rule, 8 for the fitness lexicon, 4 for the single-char
+    rule. This is the cohort the gate does NOT cover, which is the useful
+    thing the class documents - a signer really can be "James Manager".
+    """
+
+    def test_a_role_noun_in_the_last_part_still_refuses(self) -> None:
+        # The gate passes "James": it is a listed forename and "manager" is not
+        # a function word. Only the role-noun rule refuses this pair.
+        assert contact_name_agrees("James", "Manager", "James", "Manager") is False
+
+    def test_a_fitness_lexicon_word_in_the_last_part_still_refuses(self) -> None:
+        # Round 13 added "personal"/"studio" for the gym cohort specifically.
+        assert contact_name_agrees("James", "Studio", "James", "Studio") is False
+
+    def test_a_single_character_last_part_still_refuses(self) -> None:
+        # An initial is name-shaped by construction, so no other rule sees it.
+        assert contact_name_agrees("James", "B", "James", "B") is False
+
+    def test_a_fused_shape_on_side_b_still_refuses(self) -> None:
+        # THE BOTH-SIDES LOOP, reached through the gate. Both sides carry the
+        # forename "James", so the gate passes both; side A's "SmithManager"
+        # is one token that matches no rule, while side B's "Smith Manager"
+        # is caught by the role-noun and multi-token rules. They join to the
+        # same string, so a side-A-only loop lets the pair corroborate.
+        assert contact_name_agrees("James", "SmithManager", "James", "Smith Manager") is False
+        # The mirrored order is asserted by `test_result_is_order_independent`
+        # below; only this order can catch a side-A-only loop, because the
+        # other order puts the caught shape on the side that is still checked.
+
+    def test_a_real_signer_still_corroborates(self) -> None:
+        # The control the four refusals above are worthless without.
+        assert contact_name_agrees("Sarah", "Connor", "Sarah", "Connor") is True
 
 
 class TestContactNameShapeCheckIsCommutative:
@@ -1575,8 +1789,12 @@ class TestPostcodeConfidenceIsCarriedNotReDerived:
         # never by failing to look like filler.
         assert postcode_is_weak_anchor("E8 1AA") is False
         assert postcode_is_weak_anchor("EC1V 9BE") is False
-        assert postcode_is_weak_anchor("75008") is False
         assert postcode_is_weak_anchor("D02X285") is False
+        # Round 15: "75008" moved from this list to the weak side. It was the
+        # counter-example to the invariant it was written to demonstrate - a
+        # value that waived bar 3 without matching any published format, only a
+        # wildcard standing in for one.
+        assert postcode_is_weak_anchor("75008") is True
 
     @pytest.mark.parametrize("value", ["Q9 1AA", "V1 1AA", "X1 1AA"])
     def test_an_outward_code_the_spec_never_issues_is_not_a_uk_postcode(self, value: str) -> None:
@@ -1823,3 +2041,348 @@ class TestRoundFourteenSoleKillCases:
         # refused by the placeholder-stem check that runs before it, so only an
         # echoed name that is NOT a placeholder can still reach the echo rule.
         assert contact_name_agrees(first, last, first, last) is False
+
+
+class TestNumericValuesAreNeverStrongAnchors:
+    """Round 15, P0 - the numeric wildcard was an enumeration wearing an allowlist.
+
+    Round 14 replaced "weak unless it looks like junk" with "strong only when it
+    positively matches a published format", and that inversion killed the class.
+    But one member of the allowlist was `[0-9]{3,6}`, which is not a format: it
+    is the union of about a hundred of them. So any bare digit run certified
+    itself, and the module was enumerative in substance exactly where it decided
+    whether to waive the signer bar.
+
+    The reviewer's exhibits are all ordinary HubSpot `Company.Zip` junk: a street
+    number ("182"), a year ("2026"), a dialling code ("0161"). Each rated REAL
+    and STRONG, which waives bar 3 on the keyed path and lets two franchisees of
+    one brand auto-merge on nothing but a shared street number.
+
+    A purely numeric value is now never REAL. It still KEYS - the stored key is
+    byte-identical, proven by the value-invariance sweep - it simply keeps the
+    signer bar.
+
+    WHY THESE CLASSIFY VERBATIM AND NOT AMBIGUOUS, since executing
+    `classify_postcode("182")` raises the question. The confidence labels are
+    PROVENANCE facts, not severity grades. AMBIGUOUS means a candidate existed
+    and was dropped or tied; VERBATIM means nothing ever matched and step 3
+    returned the flat string. "182" is never UK-shaped, so it never enters the
+    candidate pool at all - labelling it AMBIGUOUS would fabricate a history it
+    does not have. At the previous head it read REAL only because `_classified`
+    upgrades a verbatim value that matches a recognised format, and the numeric
+    wildcard made it match; that upgrade path is correct and still load-bearing
+    for Eircodes (see its comment). The security-relevant fact is unchanged
+    either way: every one of these rates `weak_anchor=True`, so bar 3 stays on.
+    """
+
+    @pytest.mark.parametrize(
+        "raw,expected_value",
+        [
+            ("182", "182"),
+            ("#182", "182"),
+            ("2026", "2026"),
+            ("0161", "0161"),
+            ("75008", "75008"),
+            ("11111", "11111"),
+            ("60601", "60601"),
+            ("1000", "1000"),
+            ("111", "111"),
+        ],
+    )
+    def test_a_bare_numeric_value_is_never_a_strong_anchor(
+        self, raw: str, expected_value: str
+    ) -> None:
+        result = classify_postcode(raw)
+        assert result.value == expected_value, "the KEY must not move; only confidence does"
+        assert result.confidence is not PostcodeConfidence.REAL
+        assert postcode_is_weak_anchor(raw) is True
+
+    def test_the_key_itself_is_unchanged_for_numeric_values(self) -> None:
+        # The whole safety of this change rests on it being metadata-only: a
+        # numeric postcode still produces the same identity key it always did,
+        # so no stored row is orphaned and no recompute migration is owed.
+        assert normalize_postcode("75008") == "75008"
+        assert compute_identity_key("Paris Gym", "75008") == "parisg|75008"
+
+    def test_the_two_recognised_formats_still_certify_themselves(self) -> None:
+        # The allowlist is now exactly UK-strict and Eircode. Both must survive,
+        # or this change would have cost the primary market its anchor.
+        assert postcode_is_weak_anchor("E8 1AA") is False
+        assert postcode_is_weak_anchor("SW1A 1AA") is False
+        assert postcode_is_weak_anchor("D02 X285") is False
+
+    def test_an_ordinal_shaped_uk_postcode_still_keys_but_stays_weak(self) -> None:
+        # Unchanged from round 14, asserted here because Section 1 edits the same
+        # function and a regression would be silent.
+        assert classify_postcode("B33 8TH").value == "B338TH"
+        assert postcode_is_weak_anchor("B33 8TH") is True
+
+    def test_low_entropy_remains_reachable_on_the_real_path(self) -> None:
+        # Checked rather than assumed when the numeric wildcard was removed. The
+        # obvious reading is that this guard is now dead, since only UK-strict
+        # and Eircode reach REAL and both carry letters. It is not: the digit
+        # CONTENT of a letter-bearing code can still be filler, so the guard
+        # stays. See `_digits_are_low_entropy`'s docstring.
+        assert _is_recognised_format("A77T7YH") is True
+        assert _digits_are_low_entropy("777") is True
+        assert postcode_is_weak_anchor("A77 T7YH") is True
+
+
+class TestBarThreeRequiresAPositivePersonalName:
+    """Round 15, P1 - bar 3's vocabulary is inverted from DENY to ALLOW.
+
+    Until round 15 `contact_name_agrees` enumerated what a name is NOT: role
+    nouns, placeholder stems, single-character parts. Everything unlisted
+    therefore corroborated, so the unknown case failed toward MERGE, and the
+    reviewer supplied fourteen two-word placeholders that walked straight
+    through. Extending the pair list was explicitly forbidden - it is the same
+    open-vocabulary chase that cost rounds 9 to 13.
+
+    Bar 3 now corroborates only when both sides positively read as a person.
+    Unknown forenames refuse, which routes to CREATE plus a flag: the unknown
+    case fails toward SPLIT.
+    """
+
+    REVIEWER_EXHIBITS = [
+        ("Not", "Provided"),
+        ("To", "Confirm"),
+        ("No", "Name"),
+        ("Awaiting", "Details"),
+        ("Same", "Above"),
+        ("Web", "Form"),
+        ("Authorised", "Signatory"),
+        ("Company", "Signatory"),
+        ("Master", "Franchisee"),
+        ("Regional", "Franchisee"),
+        ("Franchise", "Holder"),
+        ("Multi", "Site"),
+        ("Group", "Operations"),
+        ("Legal", "Counsel"),
+    ]
+    ROUND_FOURTEEN = [
+        ("General", "Enquiries"),
+        ("Main", "Contact"),
+        ("Info", "Contact"),
+        ("Site", "Contact"),
+        ("Customer", "Service"),
+        ("Test", "User"),
+        ("Unknown", "Person"),
+        ("Front", "House"),
+        ("New", "Client"),
+        ("Regional", "Contact"),
+        ("Chief", "Executive"),
+        ("J", "S"),
+        ("A", "B"),
+    ]
+    # Invented for this round, appearing in no vocabulary anywhere in the repo.
+    # This block is the ENUMERATION-INDEPENDENCE PROOF: the rule refuses them
+    # because "Pending" is not a forename, not because anyone listed them.
+    INVENTED = [
+        ("Pending", "Assignment"),
+        ("Vacant", "Position"),
+        ("Interim", "Custodian"),
+        ("Nominated", "Proxy"),
+        ("Deferred", "Signatory"),
+        ("Placeholder", "Entry"),
+        ("Unassigned", "Contact"),
+        ("Provisional", "Delegate"),
+        ("Temporary", "Steward"),
+        ("Escalation", "Owner"),
+    ]
+
+    @pytest.mark.parametrize("pair", REVIEWER_EXHIBITS + ROUND_FOURTEEN + INVENTED)
+    def test_a_placeholder_self_pair_cannot_corroborate(self, pair: tuple[str, str]) -> None:
+        first, last = pair
+        assert contact_name_agrees(first, last, first, last) is False
+
+    @pytest.mark.parametrize(
+        "first,last",
+        [
+            ("Sarah", "Bennett"),
+            ("Dan", "Okoro"),
+            ("Priya", "Sharma"),
+            ("Wei", "Zhang"),
+            ("Will", "Smith"),
+        ],
+    )
+    def test_a_real_person_still_corroborates(self, first: str, last: str) -> None:
+        assert contact_name_agrees(first, last, first, last) is True
+
+    @pytest.mark.parametrize(
+        "first,last",
+        [("José", "García"), ("Bjørn", "Andersen"), ("Søren", "Kjaer"), ("François", "Dubois")],
+    )
+    def test_a_diacritic_forename_from_each_cohort_market_corroborates(
+        self, first: str, last: str
+    ) -> None:
+        # The list is compared against `_part_tokens` output, which folds first.
+        # An entry added UNFOLDED is dead on arrival and silently narrows
+        # coverage for exactly the INT cohort. This caught a real gap when the
+        # rule first landed: "François" refused because "francois" was missing.
+        assert contact_name_agrees(first, last, first, last) is True
+
+    def test_every_forename_survives_its_own_fold_round_trip(self) -> None:
+        # The list's STALENESS GUARD, same shape as G7's existence test. Without
+        # it the next curator adds "Åsa" unfolded, it never matches anything,
+        # and the gap reopens silently.
+        unfolded = [n for n in _FORENAMES if _part_tokens(n) != [n]]
+        assert unfolded == [], f"entries not in folded form: {unfolded[:10]}"
+
+    def test_an_unlisted_forename_refuses_and_that_cost_is_priced(self) -> None:
+        # The disclosed SPLIT cost of an allow-side list. A real person whose
+        # forename is not listed is FLAGGED, not merged - one S1-26e click.
+        assert contact_name_agrees("Xochitl", "Nkemelu", "Xochitl", "Nkemelu") is False
+
+    def test_the_hyphenated_surname_deferral_is_unchanged(self) -> None:
+        # Refused at the previous head too, by the tokenisation deferral. Pinned
+        # so round 15 cannot be blamed for it and cannot silently change it.
+        assert contact_name_agrees("Mohammed", "Al-Rashid", "Mohammed", "Al-Rashid") is False
+
+
+class TestForenameHomonymPlaceholders:
+    """Round 15 - the forename allowlist's one specific weakness, bounded and named.
+
+    English forenames collide with function words, so a placeholder whose FIRST
+    token happens to be a name slips past an allow-side forename check.
+    ("Bill", "To") is an ordinary CRM billing placeholder and "bill" is on any
+    forename list.
+
+    A closed-class function-word check on the SURNAME side closes "Bill To".
+    Seven shapes survive it, and they are enumerated here so the residual
+    cannot grow silently. Do not close them by adding "Period" or "Capacity" to
+    a vocabulary: measured in round 15, none of those tokens is a job title or
+    means "no value", so it would be a new list wearing an old list's name.
+    Ticketed as S1-26k.
+    """
+
+    CLOSED = [
+        ("Bill", "To"),
+        ("Mark", "Pending"),
+        ("Art", "Department"),
+        ("Sue", "Pending"),
+        ("Guy", "Unknown"),
+        ("Curt", "Reply"),
+        ("Norm", "Reference"),
+        ("Bob", "Pending"),
+    ]
+    RESIDUAL = [
+        ("Will", "Confirm"),
+        ("Will", "Advise"),
+        ("Grace", "Period"),
+        ("Max", "Capacity"),
+        ("Bill", "Payer"),
+        ("Miles", "Remaining"),
+        ("Frank", "Discussion"),
+    ]
+
+    @pytest.mark.parametrize("pair", CLOSED)
+    def test_the_closed_homonym_shapes_refuse(self, pair: tuple[str, str]) -> None:
+        first, last = pair
+        assert contact_name_agrees(first, last, first, last) is False
+
+    @pytest.mark.parametrize("pair", RESIDUAL)
+    def test_the_residual_is_exactly_these_seven(self, pair: tuple[str, str]) -> None:
+        # Asserting the KNOWN-BAD behaviour on purpose. If a future change
+        # closes one of these, this test fails and the residual list plus the
+        # PR-body disclosure must shrink with it. A residual that is not pinned
+        # is a residual that grows.
+        first, last = pair
+        assert contact_name_agrees(first, last, first, last) is True
+
+
+class TestExtensionDigitsCannotLaunderFiller:
+    """Round 15, P1 - the filler gauntlet ran on the wrong digits.
+
+    `normalize_phone` took the last nine digits of everything in the field. An
+    extension's digits are in the field, so they shifted that window and slid
+    real filler out of it: "020 0000 0000 ext 12" produced "000000012", which
+    is neither a repeating pair nor a sequential run, so a placeholder
+    switchboard number passed the filler check and could corroborate bar 2.
+    That is the merge direction.
+
+    The digit source is now the PARSED NATIONAL NUMBER, so an extension cannot
+    move the window at all.
+    """
+
+    @pytest.mark.parametrize(
+        "raw", ["020 0000 0000 ext 12", "0123456789 ext 12", "020 0000 0000 ext 345"]
+    )
+    def test_an_extension_cannot_launder_a_placeholder_number(self, raw: str) -> None:
+        assert normalize_phone(raw) == ""
+
+    @pytest.mark.parametrize(
+        "raw", ["020 7946 0018 ext 90", "020 7946 0018", "+44 7700 900123", "0161 850 1234"]
+    )
+    def test_a_real_number_survives_with_or_without_an_extension(self, raw: str) -> None:
+        assert normalize_phone(raw) != ""
+
+    def test_the_laundered_tail_was_clean_looking_which_is_why_it_passed(self) -> None:
+        # The literal the fix's comment names, computed rather than asserted in
+        # prose. Taking the last nine digits of the RAW field for
+        # "020 0000 0000 ext 12" yields "000000012", and that string is neither
+        # a repeating pair nor a sequential run - which is exactly why a
+        # placeholder switchboard number passed the filler check and could
+        # corroborate bar 2. The parsed national number has no such window.
+        raw_tail = _NON_DIGIT.sub("", "020 0000 0000 ext 12")[-9:]
+        assert raw_tail == "000000012"
+        assert _is_repeating_pair(raw_tail) is False
+        assert _is_sequential_digits(raw_tail) is False
+        assert normalize_phone("020 0000 0000 ext 12") == ""
+
+    def test_the_poisoning_mirror_was_measured_not_assumed(self) -> None:
+        # The mirror concern - an extension poisoning a REAL number into
+        # permanent refusal via the same window shift - returned ZERO cases
+        # across 540,000 generated combinations, re-run at round-15 final head
+        # (the grid is described in `normalize_phone`'s docstring). This pins
+        # the one shape most
+        # often cited for it: a real number whose tail is clean stays clean with
+        # an extension attached. See `normalize_phone`'s docstring.
+        assert normalize_phone("020 7946 0018") == normalize_phone("020 7946 0018 ext 90")
+
+    def test_a_sequential_number_is_filler_with_or_without_an_extension(self) -> None:
+        # Stated because it is easy to mistake for a poisoning case:
+        # "020 1234 5678" is refused either way, and the extension is not the
+        # cause - "12345678" is a sequential run, which is filler by shape.
+        assert normalize_phone("020 1234 5678") == ""
+        assert normalize_phone("020 1234 5678 ext 90") == ""
+
+    def test_extension_comparison_ignores_leading_zeros(self) -> None:
+        # Round 15, P3. "ext 021" and "ext 21" are one extension; treating them
+        # as different would split a returning client for a formatting choice.
+        assert (
+            corroborating_signal_agrees(
+                phone_a="020 7946 0018 ext 021", phone_b="020 7946 0018 ext 21"
+            )
+            is True
+        )
+        assert (
+            corroborating_signal_agrees(
+                phone_a="020 7946 0018 ext 021", phone_b="020 7946 0018 ext 45"
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "020 7000 0000",
+            "020 7946 0018",
+            "0161 850 1234",
+            "+44 20 7946 0018",
+            "+33 1 42 68 53 00",
+            "+353 1 679 8900",
+        ],
+    )
+    def test_a_degenerate_cross_region_reading_never_refuses_a_real_number(self, raw: str) -> None:
+        # THE NEAR-MISS THIS PINS. Trying every candidate region means a real
+        # number can also parse under an unrelated one as a stub:
+        # "020 7000 0000" yields a 10-digit GB national AND a one-digit RU
+        # reading of "0". The first cut of the round-15 filler fix treated any
+        # too-short reading as disqualifying, which would have shipped a
+        # merge-BLOCKING regression on ordinary London landlines - caught only
+        # because a real number was in the fixture list.
+        #
+        # Pinned as a CLASS rather than for "020 7000 0000" alone: the next
+        # region added to `_PHONE_CANDIDATE_REGIONS` can introduce a new
+        # degenerate stub shape, and this test fails when it does.
+        assert normalize_phone(raw) != ""

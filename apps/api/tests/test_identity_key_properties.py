@@ -31,6 +31,8 @@ round-6 generator's `{digits} {letters}` values could not.
 
 from __future__ import annotations
 
+import json
+import pathlib
 import random
 import re
 
@@ -43,6 +45,7 @@ from bullet_api.worker.identity_key import (
     _is_recognised_format,
     classify_postcode,
     compute_identity_key,
+    identity_name,
     normalize_postcode,
     postcode_is_weak_anchor,
 )
@@ -494,6 +497,32 @@ class TestStrongIsAnAllowlist:
             "123456",
             "1234567",
         ]
+        # Round 15, P0: bare digit runs at every length the removed
+        # `[0-9]{3,6}` wildcard used to admit, plus the lengths either side of
+        # it, plus the "#"-prefixed and separator-bearing forms a HubSpot
+        # `Company.Zip` actually arrives in, plus the reviewer's own exhibits.
+        # These are the inputs that certified themselves as a published format
+        # while being a street number, a year or a dialling code.
+        numeric_shapes = [
+            "1",
+            "12",
+            "182",
+            "2026",
+            "0161",
+            "75008",
+            "606010",
+            "1234567",
+            "12345678",
+            "123456789",
+            "1234567890",
+            "#182",
+            "# 182",
+            "No. 182",
+            "182-184",
+            "182 ",
+            " 182",
+        ]
+        placeholders.extend(numeric_shapes)
         corpus.extend(placeholders)
         for _ in range(6000):
             shape = rng.randrange(6)
@@ -572,10 +601,25 @@ class TestStrongIsAnAllowlist:
             assert compute_identity_key("Brand Gym", raw) is None
 
     def test_the_value_never_depends_on_the_confidence(self) -> None:
-        # Key invariance as a property: `normalize_postcode` is exactly the
-        # value half, so no confidence rule can move a stored identity_key.
-        for raw in self._corpus():
-            assert normalize_postcode(raw) == classify_postcode(raw).value
+        # REPLACED THE TAUTOLOGY IT USED TO BE (round 15). This asserted
+        # `normalize_postcode(raw) == classify_postcode(raw).value`, and
+        # `normalize_postcode` is literally `return classify_postcode(x).value`
+        # - so it compared a value to itself and would have held no matter what
+        # the normalizer did. The real invariance claim is now carried by the
+        # GOLDEN FILE (see `TestGoldenFile`), which is a committed artifact CI
+        # re-measures on every run rather than a sentence someone must remember
+        # to re-earn.
+        #
+        # What remains here is the narrow structural fact that is NOT a
+        # tautology: the accessor must keep delegating, so no caller can be
+        # handed a value the classifier did not produce.
+        import inspect
+
+        source = inspect.getsource(normalize_postcode)
+        assert "classify_postcode(postcode).value" in source, (
+            "normalize_postcode must remain the value half of classify_postcode; "
+            "a second implementation is how the two halves drift apart"
+        )
 
     def test_an_unenumerated_unit_word_is_never_safer_than_an_enumerated_one(self) -> None:
         # The P0.1 INVERSION, pinned across the whole vocabulary rather than
@@ -588,3 +632,75 @@ class TestStrongIsAnAllowlist:
         for word in enumerated + unenumerated:
             assert postcode_is_weak_anchor(f"{word} B2, 1st") is True
             assert postcode_is_weak_anchor(f"{word} C1 2PM") is True
+
+
+class TestGoldenFile:
+    """The invariance claim as a committed artifact, not a sentence.
+
+    WHY THIS EXISTS, stated plainly because the reason is a near-miss rather
+    than a theory. Round 15 quoted "proven by the value-invariance sweep" in a
+    docstring BEFORE running the sweep that round - the harness had been lost
+    with the previous session's scratchpad. The claim happened to be true, which
+    is luck, not process: nothing in the suite, the gate or the manifest checks
+    whether a quoted figure was ever measured. The reviewer asked for this file
+    for exactly that reason, in their words, because the real evidence "exists
+    nowhere in the suite and cannot be re-run".
+
+    So this is not a snapshot of expected values. It is the mechanism that makes
+    the invariance claim SELF-VERIFYING: the claim can never again be quoted
+    without being simultaneously re-earned, because CI re-measures it here on
+    every run.
+
+    TWO COLUMNS, TWO DIFFERENT INVARIANTS:
+      `value`      pins the never-changes-without-a-migration property. A diff
+                   here means a stored identity_key is orphaned and a recompute
+                   migration is owed - it must fail loudly and force that
+                   conversation, never be regenerated to make CI green.
+      `confidence` pins THIS round's classification so future drift is visible.
+                   A diff here is a behaviour change that may be legitimate, but
+                   it must be a decision, not a surprise.
+
+    The `identity_keys` section covers business names whose key depends on
+    `_PLACEHOLDER_NAME_STEMS` - "Capacity" is the measured case, where adding
+    "capacity" to the stems flips a live key to null. Stem drift therefore fails
+    this file AND G7: two independent mechanisms, both already built.
+
+    UPDATE PROCEDURE: regenerate ONLY with a recorded reason and, for any
+    `value` or `identity_keys` change, a migration. Regenerating to silence a
+    failure defeats the entire point of the file.
+    """
+
+    GOLDEN = pathlib.Path(__file__).parent / "golden" / "identity_key_golden.json"
+
+    def _golden(self) -> dict:
+        return json.loads(self.GOLDEN.read_text())
+
+    def test_every_postcode_value_and_confidence_matches_the_golden_file(self) -> None:
+        golden = self._golden()["postcodes"]
+        drift = []
+        for raw, value, confidence in golden:
+            result = classify_postcode(raw)
+            if result.value != value or result.confidence.value != confidence:
+                drift.append((raw, (value, confidence), (result.value, result.confidence.value)))
+        assert drift == [], (
+            f"{len(drift)} record(s) drifted from the golden file; first 5: {drift[:5]}. "
+            "A VALUE diff means a stored identity_key is orphaned and owes a migration."
+        )
+
+    def test_every_identity_key_matches_the_golden_file(self) -> None:
+        drift = []
+        for name, postcode, key in self._golden()["identity_keys"]:
+            live = compute_identity_key(identity_name(name, None), postcode)
+            if live != key:
+                drift.append((name, key, live))
+        assert drift == [], f"identity keys drifted from the golden file: {drift}"
+
+    def test_the_golden_file_covers_a_stem_dependent_key(self) -> None:
+        # The belt described in the class docstring. Without a record whose key
+        # depends on `_PLACEHOLDER_NAME_STEMS`, stem drift would be caught by G7
+        # alone; with it, two independent mechanisms fail.
+        records = {name: key for name, _, key in self._golden()["identity_keys"]}
+        assert records.get("Capacity") == "capaci|E81AA", (
+            "the golden file must contain a business name whose key depends on "
+            "the placeholder stems, or stem drift is only caught by G7"
+        )

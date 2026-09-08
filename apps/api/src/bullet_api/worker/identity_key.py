@@ -35,8 +35,7 @@ key already does and corroborates nothing (review round 2, finding 2). It IS a
 DISQUALIFIER (review round 5, finding 1) - `addresses_materially_diverge` - and
 the two directions are not symmetric: a signal that collapses with the key can
 never GRANT a link it did not already imply, but a DIFFERING address can still
-refuse one. It does NOT close the one-owner-two-sites case (corrected round 6,
-and this header missed the correction until round 7): one owner with ONE
+refuse one. It does NOT close the one-owner-two-sites case: one owner with ONE
 company record and two deals produces two rows identical on address as well as
 postcode, so every bar clears and site 2 still auto-links - see
 `test_one_company_record_two_deals_still_auto_links`, which pins that gap as
@@ -162,7 +161,7 @@ _PHONE_CANDIDATE_REGIONS = (
 )
 
 
-def _phone_interpretations(phone: str) -> list[tuple[int, int]]:
+def _phone_interpretations(phone: str) -> list[tuple[int, int, str | None]]:
     """Every plausible (country_code, national_number) reading of `phone`.
 
     Round 13 replaced the old tail-suffix heuristic here (round 12's
@@ -208,7 +207,8 @@ def _phone_interpretations(phone: str) -> list[tuple[int, int]]:
             # the extension was strictly WIDER than what it replaced
             # - and it lands on the case bar 2 exists to narrow: one head
             # office signing two sites of the same brand from its own desks.
-            readings.append((parsed.country_code, parsed.national_number, parsed.extension or None))
+            extension = (parsed.extension or "").lstrip("0") or None
+            readings.append((parsed.country_code, parsed.national_number, extension))
     return readings
 
 
@@ -270,19 +270,19 @@ _ORDINAL_INWARD = re.compile(r"[0-9](?:ST|ND|RD|TH)")
 # position AFTER the ordinal. Every entry only ever DROPS a candidate, which
 # fails toward SPLIT - the module's safe direction - so the list is generous.
 #
-# THAT SENTENCE WAS FALSE FROM ROUND 9 TO ROUND 13, AND IS TRUE AGAIN NOW; the
-# difference is worth stating because the claim reads identically either way.
-# A drop sends the value to step 3, which returns the flat verbatim string. That
-# string is no longer UK-shaped, so the old weak-anchor check - which
-# re-inspected the FINAL STRING - stopped recognising it as an ordinal
-# extraction and rated it STRONG. Adding a word here therefore UPGRADED that
-# word's anchor from weak to strong: the code was strictly safer on the words
-# nobody had enumerated (round 13, P0.1, proven by execution). Round 14 removed
-# the re-inspection entirely: `classify_postcode` records that a candidate was
-# dropped, the value comes back VERBATIM rather than REAL, and
-# `postcode_is_weak_anchor` reads that instead of guessing from the string. So
-# a drop now genuinely taints the result, and this list can be extended freely
-# in the SPLIT direction, which is what it always claimed.
+# WHY THAT IS TRUE, stated as a PRECONDITION rather than as history. A drop
+# sends the value to step 3, and `classify_postcode` RECORDS that a candidate
+# was dropped, so the result comes back VERBATIM and `postcode_is_weak_anchor`
+# reads that recorded fact. A dropped candidate therefore cannot rate STRONG,
+# and a word added here can only ever cost a SPLIT.
+#
+# The precondition is load-bearing and quiet to break: if confidence ever goes
+# back to being inferred FROM THE FINAL STRING, adding a word here silently
+# UPGRADES that word's anchor from weak to strong, because the flat verbatim
+# string is no longer UK-shaped and stops reading as an ordinal extraction.
+# The sentence above then becomes false while reading identically, which is
+# why it is worth naming the mechanism and not just the conclusion. The rounds
+# in which it WAS false are in the CHANGELOG, not here.
 _STRUCTURE_AFTER = re.compile(
     r"[\s,.\-/]*(?:FLOOR|FLR|FL|LEVEL|LVL|STREET|ST|AVENUE|AVE|AV|ROAD|RD"
     r"|LANE|LN|BOULEVARD|BLVD|WAY|DRIVE|DR|CLOSE|COURT|CT|PLACE|PL"
@@ -301,17 +301,15 @@ _STRUCTURE_AFTER = re.compile(
 # minted the genuine Birmingham client's key. STUDIO/GYM/BAY/POD/KIOSK/CABIN/
 # STALL added as defense in depth.
 #
-# The round-13 entry here used to claim `postcode_is_weak_anchor`'s
-# ordinal-SHAPE clause was "the real, class-level fix (a word we still failed
-# to enumerate here is caught there instead)". That claim was wrong, and the
-# reviewer disproved it by execution: the shape clause inspected the value
-# AFTER a drop had rewritten it, so it never fired for exactly the enumerated
-# words it was supposed to backstop. The real class-level fix is the one in
-# `classify_postcode` / `PostcodeConfidence`: a value that was not positively
-# matched against a published postal format cannot be a strong anchor, whether
-# or not any word here was enumerated. This list is now genuinely
-# belt-and-braces - it sharpens the extracted VALUE, and it is no longer load
-# bearing for whether that value may waive the signer bar.
+# THIS LIST IS NOT THE CLASS-LEVEL FIX and must not be treated as one. It
+# sharpens the extracted VALUE; it does not decide whether that value may
+# waive the signer bar. The class-level fix lives in `classify_postcode` /
+# `PostcodeConfidence`: a value not positively matched against a published
+# postal format cannot be a strong anchor, whether or not any word here was
+# enumerated. So a word nobody thought of costs a sharper value, not a merge.
+# (An earlier version of this comment claimed the backstop was
+# `postcode_is_weak_anchor`'s ordinal-SHAPE clause; the CHANGELOG records why
+# that was wrong.)
 _UNIT_BEFORE = re.compile(
     r"\b(?:UNIT|SUITE|STE|APT|APARTMENT|FLAT|ROOM|RM|SHOP|BLOCK|BLDG"
     r"|BUILDING|OFFICE|LOT|NO|NUMBER|STUDIO|GYM|BAY|POD|KIOSK|CABIN|STALL)[\s,.\-/#]*$"
@@ -419,9 +417,18 @@ class PostcodeResult(NamedTuple):
 # every published rule, which is a materially smaller target than "any two
 # letters".
 _UK_POSTCODE_STRICT = re.compile(r"[A-PR-UWYZ][A-HK-Y]?[0-9][A-Z0-9]?[0-9][ABD-HJLNP-UW-Z]{2}")
-# Purely numeric national codes, 3 to 6 digits: FR "75008", DE "10115", US ZIP5
-# "60601", IS "111", BE "1000", IT, ES, AU, SE and most of the world.
-_NUMERIC_NATIONAL = re.compile(r"[0-9]{3,6}")
+# ROUND 15 REMOVED `_NUMERIC_NATIONAL = [0-9]{3,6}` FROM THE ALLOWLIST, and the
+# reason generalises past this one constant. It was written to admit FR "75008",
+# DE "10115", US ZIP5 "60601", IS "111", BE "1000" and most of the world - but a
+# wildcard is not a format, it is the union of about a hundred of them, so the
+# "allowlist" was enumerative in substance exactly where it mattered. Any bare
+# digit run of 3 to 6 characters certified itself: a HubSpot `Company.Zip` of
+# "182" (a street number), "2026" (a year), "0161" (a dialling code) all rated
+# REAL, waived the signer bar, and let two franchisees of one brand auto-merge.
+#
+# A purely numeric value is now NEVER REAL. It still KEYS - nothing about the
+# stored key changes - it simply keeps the signer bar, which is this module's
+# stated posture for every format it does not positively recognise.
 # Irish Eircode: routing key (letter + two digits) then a four-character unique
 # identifier - "D02X285", pinned strong by this module's corpus since round 12.
 _IE_EIRCODE = re.compile(r"[A-Z][0-9]{2}[A-Z0-9]{4}")
@@ -438,10 +445,239 @@ def _is_recognised_format(value: str) -> bool:
     still KEY but keep the signer bar - the same safe-direction trade the
     round-13 hardening pass intended and could not enforce, because it was
     testing a string the drop path had already rewritten.
+
+    REAL means UK-strict fullmatch or Eircode fullmatch. Nothing else. This
+    function enumerates the ALLOW side, and its unknown case - a national
+    format nobody listed here - fails toward SPLIT: the value keys, and bar 3
+    (the signer) stays required. Round 15 removed a `[0-9]{3,6}` numeric
+    wildcard from this line for exactly that reason; see the constant block
+    above.
+
+    DISCLOSED COST: every bare-numeric national format (FR, DE, BE, SE, US
+    ZIP5, and the rest) drops from STRONG to weak, so those clients clear bar 3
+    on every signing instead of being auto-linked on the postcode alone. GB,
+    the primary market, is unaffected. The upgrade that would restore them -
+    reading a country signal (currency, phone region, address country) and
+    admitting the matching national format - is deliberately NOT built here:
+    confidence is computed from the postcode string alone, threading external
+    context through `classify_postcode` changes its signature, every call site
+    and the stored-key round-trip property, and a country-signal rule is itself
+    a new enumeration with new mirrors. Ticketed as S1-26j.
     """
     if _UK_POSTCODE_STRICT.fullmatch(value):
         return _ORDINAL_INWARD.fullmatch(value[-3:]) is None
-    return bool(_NUMERIC_NATIONAL.fullmatch(value) or _IE_EIRCODE.fullmatch(value))
+    return bool(_IE_EIRCODE.fullmatch(value))
+
+
+# ---------------------------------------------------------------------------
+# Bar 3's ALLOW-side vocabulary (round 15, P1).
+# ---------------------------------------------------------------------------
+# THE INVERSION. Until round 15 `contact_name_agrees` enumerated the DENY side:
+# role nouns, placeholder stems, single-character parts. Every shape nobody had
+# listed therefore CORROBORATED, so the unknown case failed toward MERGE. The
+# reviewer supplied fourteen two-word placeholders that sailed through
+# (("Not", "Provided"), ("Authorised", "Signatory"), ("Awaiting", "Details"), ...) and
+# explicitly forbade extending the pair list, because that is the same
+# open-vocabulary chase that cost rounds 9 to 13.
+#
+# The rule is now: bar 3 may corroborate ONLY when both sides' forename field
+# is a single token present in this list. Unknown forenames REFUSE, which
+# routes to `collided` - CREATE plus a `possible_duplicate` flag, one S1-26e
+# click - so the unknown case now fails toward SPLIT. A placeholder nobody has
+# ever seen is refused not because it was listed but because "Awaiting" is not
+# a forename.
+#
+# PROVENANCE: hand-curated for this engagement's markets - UK primary, plus the
+# INT PandaDoc account's cohort (IE, FR, DE, NL, BE, ES, IT, PL, SE, DK, NO,
+# plus South Asian, East Asian, Arabic and West African forenames common in the
+# UK gym-owner population). It is deliberately SMALL and auditable rather than
+# scraped: a bloated list compiled under time pressure is the hand-maintained
+# mirror that goes stale silently, which is the defect this repo keeps being
+# burned by. "The list is too small" is a one-line, data-only, SPLIT-direction
+# fix; "the list is wrong" is not.
+#
+# UPDATE PROCEDURE: add the name in FOLDED form - lowercase, diacritics already
+# resolved ("jose", not "José"; "bjorn", not "Bjørn"). Entries are compared
+# against `_part_tokens` output, which folds and casefolds first, so an
+# unfolded entry is dead on arrival and silently narrows coverage for exactly
+# the INT cohort. `test_every_forename_survives_its_own_fold_round_trip` is the
+# staleness guard and will fail loudly if you forget.
+_FORENAMES = frozenset(
+    """
+aaron aase abbie abby abdul abdullah abigail adam addison adele aditya adrian agnes agnetha
+ahmed aidan aiden aileen aimee aisha aisling alan albert alberto alex alexa alexander
+alexandra alexis alfie alfred ali alice alicia alina alison alistair allan allison alma
+amanda amber amelia amina amir amit amy ana anastasia anders andre andrea andres andrew
+andy aneta anette angel angela angelo anika anita anja ann anna annabel anne annette annie
+annika anthony antoine anton antonia antonio anya april arjun arlene armando arne arnold
+arthur arun asa ashley asif astrid aubrey audrey august augusto aurora austin ava avery
+axel ayaan ayesha barbara barry bartosz beata beatrice becky belinda ben benedict benjamin
+bent bernadette bernard bertha beth bethany betty beverly bianca bilal bill billy birgit
+birgitta bjorn blake blanca bo bob bobby bonnie boris brad bradley brandon brenda brendan
+brent brett brian bridget brooke bruce bruno bryan bryony caitlin caleb callum calvin
+cameron camila camilla candice cara carl carla carlos carmen carol carole caroline carrie
+carsten casey cassandra catalina catherine cathy cecilia cedric celia chad chandra charlene
+charles charlie charlotte chelsea cheryl chi chloe chris christian christina christine
+christopher chuck cindy claire clara clare clarence claudia clayton clifford clint clive
+colin colleen conor constance cora corey cormac courtney craig cristina crystal curtis
+cynthia dafydd dagny daisy dale damian damien dan dana daniel daniela danielle danny daphne
+darcy daria darius darlene darren darryl dave david davide dawn dean deborah declan dee
+deirdre delia denis denise dennis derek dermot desmond dev devon diana diane diego dimitri
+dinesh dion dominic dominika don donald donna donovan dora doreen doris dorothy douglas
+drew duncan dustin dylan eamon earl ebba ed eddie eden edgar edith edmund eduardo edward
+edwin efe eileen eirik elaine eleanor elena eli elias elif elijah elin elisa elise eliza
+elizabeth ella ellen ellie elliot elliott elsa elsie emanuel emil emilia emily emma
+emmanuel enrique eric erica erik erin ernest esme espen esther ethan eugene eva evan evelyn
+ewa fabian faisal faith farah fatima felicity felix ferdinand fergus fernando finn fiona
+flora florence floyd frances francesca francis francisco frank franklin fraser fred freddie
+frederick freya frida gabriel gabriela gabrielle gail gareth garry gary gavin gemma gene
+geoff geoffrey george georgia georgina gerald geraldine gerard gerry gill gillian gina
+giovanni giulia glen glenn gloria godwin gordon grace graeme graham grant greg gregory
+greta griffin guillermo gunilla gunnar gurpreet gus guy gwen hadley hafiz hakan hakim haley
+halvor hamish hamza hana hank hannah hanne hans harold harriet harry harvey hassan hayden
+hayley hazel heather hector heidi helen helena helge henri henrik henry herbert herman
+hilary hina hiroshi holly hope horace howard hugh hugo hunter hussain ian ibrahim ida idris
+ieuan ifeoma ignacio ilya iman imani imran ines inga inger ingrid irene irina iris isaac
+isabel isabella isabelle isla ismail israel ivan ivy jack jackie jackson jacob jacqueline
+jade jaime jake jamal james jamie jan jane janet janice jared jasmine jason javier jay
+jayden jean jeanette jeff jeffrey jenna jennifer jenny jens jeremy jerome jerry jesper jess
+jessica jesus jill jim jimmy jo joakim joan joanna joanne joaquin jodie joe joel johan
+johanna john johnny jon jonas jonathan jordan jorge jorgen jose joseph josephine josh
+joshua joy joyce juan judith judy julia julian julie juliet julius june justin justine kai
+kaitlin kajal kamal kaplan kara karen kari karim karin karl karol kate katherine kathleen
+kathryn kathy katie katrina kay kayla keith kelly kelvin ken kendra kenneth kerry kevin
+khalid kieran kim kimberly kirsten kirsty kit kjell klara klaus knut kofi kris krishna
+kristen kristina krzysztof kurt kwame kyle kyra lachlan laila lakshmi lana lance lara larry
+lars laura lauren laurence lawrence layla leah lee leigh leila len lena lene leo leon
+leonard leonie leslie lewis lia liam lidia lila lilian lily linda lindsay linnea lisa liu
+liz lloyd logan lois lola lorenzo loretta lorna lorraine louis louise luca lucas lucia lucy
+luigi luis luka lukas luke luz lydia lyn lynn mabel mackenzie madeline madison magda
+magdalena maggie magnus mahmoud maia maja malcolm mandy manuel marc marcel marcia marco
+marcos marcus maren margaret maria mariam marian marianne marie marilyn marina mario marion
+marisa marit marius mark marlene marta martha martin martina marvin mary maryam mason mateo
+mathew matilda matt matteo matthew maureen maurice max maxine maya mayra megan mehmet mei
+melanie melissa melvin mercedes meredith mette mia micah michael michaela michelle miguel
+mikael mike mikhail mikkel mila milan miles miller milly miranda miriam mitchell moe
+mohamed mohammad mohammed moira mona monica monika morgan morten moses muhammad murray
+mustafa myles nadia nadine nancy naomi natalia natalie natasha nathan nathaniel neal ned
+neil nelson nia nicholas nick nicola nicole nigel nikhil nikita nils nina noah noel nora
+norman nuala odd olav ole olga oliver olivia oluwaseun omar ophelia oscar oskar owen pablo
+paige pam pamela paola parker pascal pat patricia patrick paul paula pauline pavel pawel
+pearl pedro peggy penelope penny per percy perry pete peter petra petter phil philip
+philippa phoebe phyllis pierre pieter piotr polly poppy prakash preeti priya priyanka qasim
+quentin quinn rachel radha rafael ragnar raheem rahul raj rajesh ralph ramon randall randy
+raphael raquel rashid rasmus ravi ray raymond rebecca reece reg regina reginald rene renee
+rex rhian rhys ricardo richard rick ricky rikke rita roar rob robert roberta roberto robin
+rocco rod rodney roger rohan roland rolf roman ron ronald ronan rory rosa rosalind rose
+rosemary ross rowan roxanne roy ruby rudolf rufus runa russell ruth ryan sabrina sadie
+safia sahil said sally salma sam samantha samir samuel sandeep sandra sandy sanjay sara
+sarah sasha saul scarlett scott sean sebastian selina serena sergio seth shane shannon
+shaun shauna shawn sheila shelley sheryl shirley sian sid sidney signe sigrid simon sinead
+siobhan siri sofia sofie sonia sonya sophia sophie soren spencer stacey stan stanley stefan
+stefanie stella stephanie stephen steve steven stewart stig stuart sue sultan sunil susan
+susanna suzanne svein sven svetlana sylvia tahir tamara tammy tania tanya tara tariq tasha
+ted terence teresa terje terry tessa thabo thea thelma theo theodore theresa thomas thor
+tim timothy tina tobias toby todd tom tomasz tommy tone toni tony torbjorn tracey tracy
+travis trevor tricia trine trisha tristan troy trygve tyler tyrone ulla ulrik ursula uzma
+valentina valerie vanessa vera veronica vicky victor victoria viggo vijay vikram vincent
+viola violet virginia vivian vivien wade walter wanda warren wayne wei wendy wesley whitney
+wilfred will willa william willie wilson winston wojciech xavier xu yan yara yasmin yasmine
+yohannes yolanda yousef youssef yuki yusuf yvonne zac zach zachary zahra zain zainab zara
+zeynep zoe zofia zoltan
+francois francoise herve jerome cecile aurelie sebastien stephane frederic remi
+loic gael mathieu thierry aurelien clement juergen guenter joerg bjoern soeren
+oyvind havard
+""".split()
+)
+
+# A grammatically CLOSED class - prepositions, particles, conjunctions,
+# determiners, modals, pronouns. Applied to the SURNAME side only.
+#
+# WHY THIS EXISTS: the forename allowlist has one specific weakness, and it is
+# that English forenames collide with function words. ("Bill", "To") is an
+# ordinary CRM billing placeholder, "bill" is on any forename list, and "To" is
+# neither a role noun nor a placeholder stem - so the self-pair corroborated,
+# and on the email-fallback path that is a merge.
+#
+# WHY SURNAME-SIDE ONLY, and do not "fix" this into both-sides. Measured in
+# round 15: applying it to both sides closes two more placeholder shapes
+# (("Will", "Confirm"), ("Will", "Advise")) at the cost of refusing every real person
+# whose forename is a function word - ("Will", "Smith") and every re-signing they
+# ever make. Run the two failure modes to their consequences. The placeholder
+# residual needs a CONJUNCTION of three conditions (the same placeholder on
+# both sibling rows, a key match, and a weak or unkeyed anchor) and its worst
+# case is one wrong auto-link. The false refusal is chronic and certain: it
+# fires on every re-signing of every real Will, forever, on the primary market.
+# Trading a chronic certain cost for two entries off a bounded residual is the
+# wrong trade.
+#
+# This is technically a deny-list, and it is the one place round 15 uses one.
+# It is admissible because the class is grammatically CLOSED - a few dozen
+# words that cannot grow adversarially - which is exactly what the open
+# role-noun vocabulary was not.
+_FUNCTION_WORDS = frozenset(
+    """
+    a an the to of in on at by for from with without within into onto upon as per via
+    and or nor but so yet if then than that this these those there here
+    is are was were be been being am do does did done has have had having
+    will would shall should can could may might must ought
+    i you he she it we they me him her us them my your his its our their
+    no not none any all some each every other another same such
+    up down out off over under again more most less least very too also only just
+    """.split()
+)
+
+
+def _part_tokens(value: str | None) -> list[str]:
+    """Fold, casefold and tokenize one contact-name part.
+
+    Hoisted to module level in round 15 so `_looks_like_a_personal_name` uses
+    the SAME tokenizer as the comparison it gates. When it was nested inside
+    `contact_name_agrees`, the only way to reuse it was to retype the
+    expression, and a second copy of a normalizer is how this module's two
+    repair idioms diverged in the first place.
+    """
+    return _ALNUM_TOKEN.findall(_fold_unicode(value or "").casefold())
+
+
+def _looks_like_a_personal_name(first: str | None, last: str | None) -> bool:
+    """True when this side positively reads as a person, not a placeholder.
+
+    The ALLOW-side gate for bar 3 (round 15, P1). Two conditions:
+
+    1. the forename field is a single token present in `_FORENAMES`, and
+    2. no token of the SURNAME field is a closed-class function word.
+
+    Everything else refuses, and a refusal is not a divergence - it routes to
+    `_pick_sibling`'s `collided` path, so the outcome is CREATE plus a
+    `possible_duplicate` flag rather than a merge. That is the whole point: the
+    unknown case now fails toward SPLIT.
+
+    DISCLOSED RESIDUAL, measured rather than assumed: SEVEN forename-homonym
+    placeholder shapes still corroborate. Five because their discriminator is
+    the SURNAME being an ordinary noun - ("Grace", "Period"), ("Max", "Capacity"),
+    ("Bill", "Payer"), ("Miles", "Remaining"), ("Frank", "Discussion") - and two more,
+    ("Will", "Confirm") and ("Will", "Advise"), because the function-word check is
+    surname-side only and "will" sits in the FORENAME field. Both-sides would
+    close those two and refuse every real Will Smith forever; see
+    `_FUNCTION_WORDS` for why that trade is refused. Closing them needs
+    either a surname allowlist (which would refuse nearly every real person) or
+    a common-English-word denylist (which would refuse Baker, Smith, Brown,
+    Green, Cook, King, Wood, Hill, Ford, Fox, Bell, Price, Young and Long - a
+    large fraction of genuine British surnames). Neither is admissible, and
+    feeding the five into an existing vocabulary was measured and rejected:
+    none of "period", "capacity", "payer", "remaining" or "discussion" is a job
+    title (`_ROLE_NOUNS`) or means "no value" (`_PLACEHOLDER_NAME_STEMS`), so
+    adding them would be inventing a new list wearing an old list's name. Each
+    residual needs the SAME placeholder on both sibling rows plus a key match
+    plus a weak or unkeyed anchor. Named here, pinned by
+    `TestForenameHomonymPlaceholders`, and ticketed as S1-26k so it cannot grow
+    silently.
+    """
+    first_tokens = _part_tokens(first)
+    if len(first_tokens) != 1 or first_tokens[0] not in _FORENAMES:
+        return False
+    return not any(token in _FUNCTION_WORDS for token in _part_tokens(last))
 
 
 # Role/department nouns that mark a signing-contact "name" as a JOB TITLE, not
@@ -705,9 +941,9 @@ def classify_postcode(postcode: str | None) -> PostcodeResult:
        after it ("1st Floor", "3rd Avenue", "2nd Street") or a unit designator
        before it ("Unit B2 1st"). A non-ordinal candidate is REAL.
     2. CANDIDATE SELECTION, failing toward SPLIT whenever position would have
-       to guess (round 12 P0.1/P0.2 - the ordinal rule was wrong three ways in
-       three rounds precisely because skip-all/keep-first/keep-last are all
-       positional guesses with positional mirrors):
+       to guess. Position is never the discriminator: skip-all, keep-first and
+       keep-last are all positional rules, and every positional rule has a
+       positional mirror that defeats it. Selection is by COUNT and KIND:
          exactly one REAL        -> that candidate ("Unit B2, 1st Floor,
                                     E8 1AA" -> "E81AA"; a REAL candidate also
                                     beats any surviving ordinal, so
@@ -797,6 +1033,22 @@ def classify_postcode(postcode: str | None) -> PostcodeResult:
     # evidence drops what it can prove is not a postcode, a REAL candidate
     # outranks what remains, and any residual tie fails toward SPLIT ("" ->
     # NULL key -> fail-safe CREATE), never toward a guess.
+    # NAMING WARNING - "real" here means NON-ORDINAL, not REAL confidence, and
+    # the two meanings collided the moment round 14 introduced
+    # `PostcodeConfidence.REAL`. A candidate in this list has an inward half
+    # that is not an English ordinal; whether it is REAL is decided later and
+    # separately by `_classified`, which asks `_is_recognised_format`. So
+    # `real_candidates[0]` can perfectly well come back AMBIGUOUS - see the
+    # `_classified(..., AMBIGUOUS)` call below, which is not a contradiction.
+    #
+    # The rename to `non_ordinal_candidates` is deferred to S1-26l rather than
+    # taken here, and the reason is specific: `classify_postcode` is inside
+    # `_G7_KEY_FUNCTIONS`, and round 15 proved by execution that the fingerprint
+    # moves on ANY change to this body, identifier names included. Spending the
+    # gate's first proven movement on a cosmetic rename teaches the next
+    # maintainer that fingerprint moves are sometimes noise, which is how a gate
+    # decays. The extraction PR changes this body for real reasons, so the move
+    # is earned there. The clarity this comment buys costs nothing.
     real_candidates: list[str] = []
     ordinal_candidates: list[str] = []
     for uk_match in _UK_POSTCODE.finditer(upper):
@@ -880,6 +1132,15 @@ def _classified(value: str, unrecognised: PostcodeConfidence) -> PostcodeResult:
     Routing both paths through one function is deliberate: a path added here
     later cannot default to STRONG by forgetting to classify itself.
     """
+    # THE UPGRADE PATH, and it is general rather than a leftover. A value can
+    # reach here labelled VERBATIM (step 3 found no UK-shaped candidate at all)
+    # and still be a recognised format, which is exactly how every Irish client
+    # keys strongly: "D02 X285" produces ZERO hits from the UK candidate probe,
+    # falls to step 3, and is upgraded to REAL here by the Eircode branch.
+    # Checked by execution in round 15 rather than assumed, because removing the
+    # numeric wildcard made it look like this upgrade only ever existed to serve
+    # bare digit runs. It did not, and deleting it would silently un-anchor the
+    # whole IE cohort.
     if _is_recognised_format(value):
         return PostcodeResult(value, PostcodeConfidence.REAL)
     return PostcodeResult(value, unrecognised)
@@ -963,24 +1224,70 @@ def normalize_phone(phone: str | None) -> str:
     NOT the comparison mechanism, and the docstring said otherwise for two
     rounds after it stopped being true (round 13 moved identity comparison to
     `_phone_interpretations`; round 14 corrected this text). What survives here
-    is the pre-filter: digits only, then the LAST `_PHONE_SIGNIFICANT_DIGITS`,
-    which is long enough for the shape checks below to tell filler
-    ("000000000", "123456789") from a real number. Whether two real numbers are
-    the SAME number is decided by per-country numbering-plan structure in
-    `_phone_interpretations`, not by comparing these tails - a tail comparison
-    cannot distinguish "one number written two ways" from "two countries'
-    numbers that happen to share nine digits".
+    is the pre-filter: take the LAST `_PHONE_SIGNIFICANT_DIGITS` of the PARSED
+    NATIONAL NUMBER, which is long enough for the shape checks below to tell
+    filler ("000000000", "123456789") from a real number. Whether two real
+    numbers are the SAME number is decided by per-country numbering-plan
+    structure in `_phone_interpretations`, not by comparing these tails - a
+    tail comparison cannot distinguish "one number written two ways" from "two
+    countries' numbers that happen to share nine digits".
+
+    ROUND 15 MOVED THE DIGIT SOURCE from the raw field to the parse, and the
+    reason is a merge-direction defect: the raw field includes an EXTENSION's
+    digits, which shifted the nine-digit window and slid real filler out of it.
+    "020 0000 0000 ext 12" yielded the tail "000000012" - neither a repeating
+    pair nor a sequential run - so a placeholder switchboard number passed this
+    check and could corroborate bar 2. Every plausible reading is now checked
+    and any filler-shaped one refuses, which errs toward SPLIT.
+
+    MEASURED AND NOT FIXED, because it is not reachable: the mirror concern -
+    that an extension could poison a REAL number into permanent refusal by the
+    same window shift - returned ZERO cases across 540,000 generated
+    combinations at round-15 final head (6 national prefixes across GB/IE/US,
+    200 line endings each, 150 extensions, 3 extension spellings). The figure
+    is quoted with its own grid because an earlier, smaller grid in this round
+    gave a different one; the two are not a trend, they are two grids.
+    Adding two or three digits to the right of a nine-digit window essentially
+    never produces a constant-step or repeating-pair run. Stated here rather
+    than claimed as fixed.
 
     Returns "" when there are too few digits to be meaningful, so a truncated
-    field never reaches real-number interpretation at all. Note this says
-    nothing about EXTENSIONS: an extension is not stripped here, it is carried
-    into the reading by `_phone_interpretations` and can actively refuse a
-    match (round 14, P1.3). The previous wording - "an extension ... never
-    corroborates anything" - conflated the two and read as if extensions were
-    already handled, while the code was ignoring them.
+    field never reaches real-number interpretation at all. An extension is not
+    stripped: it is carried into the reading by `_phone_interpretations` and can
+    actively refuse a match (round 14, P1.3), with leading zeros normalised so
+    "ext 021" and "ext 21" are one extension (round 15, P3).
     """
     if not phone:
         return ""
+    # THE DIGIT SOURCE IS THE PARSED NATIONAL NUMBER, NOT THE RAW FIELD
+    # (round 15, P1). Taking the last nine digits of everything in the field
+    # meant an EXTENSION's digits shifted the window and slid real filler out of
+    # it: "020 0000 0000 ext 12" produced the tail "000000012", which is neither
+    # a repeating pair nor a sequential run, so a placeholder switchboard number
+    # passed the check and could corroborate bar 2. That is the merge direction,
+    # which is why it is fixed here rather than documented.
+    #
+    # Every plausible reading is checked and ANY filler-shaped one refuses. That
+    # is deliberate over "the first reading" or "all readings": a refusal costs
+    # bar 2 a corroboration and flags for a human, so erring toward refusal
+    # fails toward SPLIT.
+    readings = _phone_interpretations(phone)
+    # DEGENERATE READINGS ARE DROPPED, NOT FAILED ON. Trying every candidate
+    # region means a real number can also parse under an unrelated one as a
+    # stub: "020 7000 0000" yields a 10-digit GB national AND a one-digit RU
+    # reading of "0". Treating a too-short reading as disqualifying killed that
+    # genuine London landline outright, so the length rule filters the list
+    # rather than rejecting the number.
+    nationals = [
+        str(national) for _, national, _ in readings if len(str(national)) >= _PHONE_MIN_DIGITS
+    ]
+    if nationals:
+        tails = [n[-_PHONE_SIGNIFICANT_DIGITS:] for n in nationals]
+        if any(_is_repeating_pair(t) or _is_sequential_digits(t) for t in tails):
+            return ""
+        return tails[0]
+    # Unparseable by every candidate region: fall back to the raw digits so a
+    # malformed field is still filler-checked rather than waved through.
     digits = _NON_DIGIT.sub("", phone)
     if len(digits) < _PHONE_MIN_DIGITS:
         return ""
@@ -1108,14 +1415,14 @@ def corroborating_signal_agrees(*, phone_a: str | None, phone_b: str | None) -> 
     # this rule was WIDENED to cover in round 14's second pass - a bare number
     # does not agree with the same base carrying an extension.
     #
-    # WHY THE BARE-VS-EXTENSION CASE REFUSES, since the first cut of this fix
-    # let it agree and that was wrong. The reviewed finding was "ext 21 agrees
-    # with ext 45"; making only that refuse leaves its exact mirror standing -
-    # two sites of one brand, same key, REAL postcode so bar 3 is waived, head
-    # office signing both from one switchboard, and site B's document simply
-    # OMITS the extension. Bar 2 would agree and the two sites auto-merge. That
-    # is the same "fix the reviewed example, ship its mirror" shape that cost
-    # rounds 9 through 13.
+    # WHY THE BARE-VS-EXTENSION CASE REFUSES, and not only the differing-
+    # extension case it is easy to stop at. Refusing "ext 21 vs ext 45" alone
+    # leaves its exact mirror standing: two sites of one brand, same key, REAL
+    # postcode so bar 3 is waived, head office signing both from one
+    # switchboard, and site B's document simply OMITS the extension. Bar 2
+    # would agree and the two sites auto-merge. A rule that refuses a
+    # DIFFERENCE must also refuse an ABSENCE on the same field, or it only
+    # closes the half of the case that happened to be reported.
     #
     # The cost of refusing is not a split. An unsatisfied bar 2 routes through
     # `_pick_sibling`'s `collided` path: CREATE plus a `possible_duplicate`
@@ -1200,9 +1507,6 @@ def contact_name_agrees(
     # unicode fold, so an accented signer whose two documents differ only by
     # an accent ("José" vs "Jose") made bar 3 permanently unsatisfiable - the
     # exact class the fold fixed for business names in round 5.
-    def _part_tokens(value: str | None) -> list[str]:
-        return _ALNUM_TOKEN.findall(_fold_unicode(value or "").casefold())
-
     first_tokens_a, last_tokens_a = _part_tokens(first_a), _part_tokens(last_a)
     first_tokens_b, last_tokens_b = _part_tokens(first_b), _part_tokens(last_b)
     if not (first_tokens_a and last_tokens_a and first_tokens_b and last_tokens_b):
@@ -1218,6 +1522,14 @@ def contact_name_agrees(
     # dependence that bug produced (agrees(a, a, b, b) != agrees(b, b, a, a)
     # for exactly this shape), which a symmetric corroboration signal must
     # never exhibit.
+    # THE ALLOW-SIDE GATE (round 15, P1) - applied before the deny-side shape
+    # checks below, which are retained as defence in depth rather than as the
+    # primary mechanism. Both sides must positively read as a person.
+    if not (
+        _looks_like_a_personal_name(first_a, last_a)
+        and _looks_like_a_personal_name(first_b, last_b)
+    ):
+        return False
     both_sides = ((first_tokens_a, last_tokens_a), (first_tokens_b, last_tokens_b))
     for first_tokens, last_tokens in both_sides:
         if any(token in _ROLE_NOUNS for token in first_tokens + last_tokens):
@@ -1348,6 +1660,16 @@ def _digits_are_low_entropy(digits: str) -> bool:
     covers "11223"; a palindrome of four-plus covers "12321". Real codes have
     none of these shapes ("75008", "60601", "D02X285"). Over-matching is the
     SAFE direction - the only consumer keeps bar 3 REQUIRED for a weak anchor.
+
+    STILL REACHABLE AFTER ROUND 15, checked rather than assumed. Dropping the
+    numeric wildcard from the allowlist means only UK-strict and Eircode values
+    reach the REAL path, and both carry letters, so the obvious reading is that
+    this guard is now dead. It is not: the digit CONTENT of a letter-bearing
+    code can still be filler. Executed examples - the Eircode shape "A77T7YH"
+    (digits "777") and the UK-strict "ZQ616SW" (digits "616") are both REAL and
+    both low-entropy. The guard is kept with its existing test rather than
+    tidied away; deleting a guard because it looks unreachable is how the next
+    round starts.
     """
     diffs = {(int(b) - int(a)) % 10 for a, b in zip(digits, digits[1:], strict=False)}
     if len(diffs) == 1:
@@ -1443,10 +1765,20 @@ def postcode_is_weak_anchor(postcode: str | None) -> bool:
     """
     result = classify_postcode(postcode)
     if not result.value:
-        # No key exists to anchor anything, so there is nothing to classify.
-        # The caller's keyed path is unreachable for a NULL key; it falls back
-        # to the email-sibling check, which requires bar 3 in its own right.
-        return False
+        # No value, so nothing was positively recognised, so the signer bar
+        # STAYS ON. This returned False until round 15, on the argument that
+        # the keyed path is unreachable for a NULL key and the email fallback
+        # requires bar 3 in its own right. That argument is still true - both
+        # call sites were checked by execution, and neither can reach here:
+        # `compute_identity_key` never mints a key with an empty postcode half
+        # (probed across every filler shape), and the GHL leg returns
+        # UNDECIDABLE on an empty postcode before it ever asks this question.
+        # But "no caller can reach it" is a property of today's callers, and
+        # this function answered the unknown case with the MERGE direction:
+        # absent evidence rated a strong anchor. The allowlist reading below
+        # is the whole point of this function, and it applies here too - an
+        # empty value did not match a published format either.
+        return True
     if result.confidence is not PostcodeConfidence.REAL:
         # THE ALLOWLIST. Anything not positively matched against a published
         # format keeps the signer bar, with no further questions asked about

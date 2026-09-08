@@ -20,6 +20,8 @@ Card spec mandates:
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import uuid
 from datetime import timedelta
 
@@ -44,10 +46,14 @@ from bullet_api.worker import identity_key as identity_key_module
 from bullet_api.worker.ghl_subaccount import (
     _DEDUP_LOCK_SQL,
     _GHL_HIT_SAME_BUSINESS,
+    _GHL_HIT_UNDECIDABLE,
     _SIBLING_CANDIDATE_LIMIT,
     GHL_CREATE_SUBACCOUNT_ACTION,
+    GHL_SKIP_REASON_DB_SIBLING,
     ClientNotFoundError,
     _classify_ghl_hit,
+    _location_phone,
+    _location_postcode,
     create_ghl_subaccount,
     create_ghl_subaccount_core,
 )
@@ -1317,8 +1323,13 @@ async def test_null_identity_key_email_fallback_links_when_phone_corroborates(
         email="nopostcode@example.com",
         postal_code=None,
         phone="+44 7700 900123",  # bar 2
-        contact_first_name="Sample",  # bar 3 - the same person, both times
-        contact_last_name="Signer",
+        # Round 15: was "Sample Signer", which the allow-side bar-3 rule now
+        # correctly refuses - "Sample" is not a forename, it is a fixture
+        # placeholder, and refusing it is the rule working. This test's subject
+        # is phone corroboration on the unkeyed path, so it needs a fixture
+        # that reads as a person.
+        contact_first_name="Sarah",  # bar 3 - the same person, both times
+        contact_last_name="Bennett",
         ghl_subaccount_id="loc_parent",
         created_at_offset_seconds=-60,
     )
@@ -1327,8 +1338,8 @@ async def test_null_identity_key_email_fallback_links_when_phone_corroborates(
         email="nopostcode@example.com",
         postal_code=None,
         phone="+44 7700 900123",
-        contact_first_name="Sample",
-        contact_last_name="Signer",
+        contact_first_name="Sarah",
+        contact_last_name="Bennett",
     )
     event_id = await _seed_onboarding_event(async_session)
     # A create location is configured but must NEVER be used on this path.
@@ -1745,21 +1756,35 @@ async def test_weak_anchor_gate_reads_the_key_not_the_stored_postcode(
     """Review round 11, P2 - the gate judges the postcode the key MATCHED on.
 
     The keyed query anchors on the postcode INSIDE `identity_key`; under
-    COALESCE drift the stored `postal_code` can disagree with it. Normalizing
-    the stored value let the gate report STRONG (bar 3 waived) off a postcode
-    the match never used: here the child's stored postcode is a placeholder
-    that normalizes to "" while its KEY carries the filler "11111" - so bar 5
-    abstains AND the stored-value gate abstains, and two different signers'
-    sites merged. Reading the anchor from the key restores bar 3, and the
-    different signer splits-and-flags.
+    COALESCE drift the stored `postal_code` can disagree with it. Reading the
+    stored value lets the gate report STRONG (bar 3 waived) off a postcode the
+    match never used, and two different signers' sites merge.
+
+    FIXTURE REBUILT IN ROUND 15, and the reason is a lesson in its own right.
+    The drift here used to be a stored value that normalizes to "" ("TBA")
+    against a key carrying the filler "11111". That discriminated only because
+    `postcode_is_weak_anchor("")` answered False - "no value, so not weak, so
+    waive bar 3" - which round 15 corrected to True. The correction is right
+    and it silently made this test vacuous: both readings then said "weak", the
+    mutation became a no-op, and the guard went revert-green. Caught by the
+    manifest on the same run that made the change, which is the entire reason
+    every guard names the test that kills it.
+
+    The drift is now the shape the COALESCE upsert actually produces: both rows
+    were re-signed with their REAL postcode, so `postal_code` says "E8 1AA" on
+    each, while `identity_key = COALESCE(clients.identity_key, EXCLUDED....)`
+    preserved the older key minted from filler. Bar 5 compares the stored
+    values, which agree, so it abstains and leaves bar 3 as the only separator:
+    the stored reading waives it and merges Bob into Alice's sub-account, the
+    key reading keeps it and splits-and-flags.
     """
     parent_id = await _seed_client(
         async_session,
         email="ops@rep-brand.example.com",
         business_name="Rep Brand Fitness",
         legal_entity="Rep Brand Fitness",
-        postal_code="11111",
-        identity_key_override="repbra|11111",
+        postal_code="E8 1AA",  # stored: real, and the SAME on both rows so
+        identity_key_override="repbra|11111",  # bar 5 abstains; key: filler
         phone="+44 20 7946 1000",
         contact_first_name="Alice",  # DIFFERENT signer from the child
         contact_last_name="North",
@@ -1771,7 +1796,7 @@ async def test_weak_anchor_gate_reads_the_key_not_the_stored_postcode(
         email="ops@rep-brand.example.com",
         business_name="Rep Brand Fitness",
         legal_entity="Rep Brand Fitness",
-        postal_code="TBA",  # drift: stored value normalizes to "" ...
+        postal_code="E8 1AA",  # drift: stored value is a STRONG anchor ...
         identity_key_override="repbra|11111",  # ... but the KEY carries filler
         phone="+44 20 7946 1000",
         contact_first_name="Bob",  # bar 3 refuses: a different site's signer
@@ -3404,10 +3429,23 @@ async def test_numeric_phone_and_postcode_from_json_still_corroborate(
     """An unquoted number in the GHL payload must not read as "absent".
 
     JSON parses `"postalCode": 75008` and `"phone": 442070000000` as ints, and
-    both `_location_postcode` and `_location_phone` coerce them. Untested, both
-    coercions could be deleted with the suite still green - so a genuinely
-    corroboratable INT location would be sent down the undecidable path and
-    flagged for no reason, on every signing.
+    both `_location_postcode` and `_location_phone` coerce them.
+
+    ROUND 15 CHANGED WHAT THIS TEST CAN PROVE, and it nearly became a tautology.
+    It used to assert REUSE. After the numeric wildcard left the allowlist,
+    "75008" is a WEAK anchor, and a weak anchor downgrades the GHL leg to
+    UNDECIDABLE (round 11, P0.2) whatever the phone says, so the outcome is now
+    provision-and-flag.
+
+    That matters for COVERAGE, not just for the assertion: with a weak anchor a
+    DELETED coercion and a WORKING one produce the SAME verdict, because an
+    absent postcode is also undecidable. This test can no longer prove the
+    coercion at all. It is proven directly by
+    `test_the_json_int_coercions_are_load_bearing`; what remains here is the
+    honest integration outcome - an INT location on a bare-numeric postcode is
+    flagged for a human rather than silently reused. That is the priced cost of
+    the round-15 allowlist and the same queue the reviewer's INT-UNDECIDABLE P2
+    describes.
     """
     client_id = await _seed_client(
         async_session,
@@ -3434,13 +3472,49 @@ async def test_numeric_phone_and_postcode_from_json_still_corroborate(
         company_id=COMPANY_ID,
     )
 
-    # Corroborated on all three signals -> REUSED, not duplicated-and-flagged.
-    assert result.created is False
-    assert result.ghl_subaccount_id == "loc_int"
+    # Weak numeric anchor -> UNDECIDABLE -> own sub-account plus a flag naming
+    # the suspected location. Not a silent reuse, and not a silent duplicate.
+    assert result.created is True
     flagged = await async_session.execute(
         text("SELECT possible_duplicate FROM clients WHERE id = :id"), {"id": client_id}
     )
-    assert flagged.scalar_one() is False
+    assert flagged.scalar_one() is True
+
+
+def test_the_json_int_coercions_are_load_bearing() -> None:
+    """Round 15 - the coercion proof, moved out of the integration test above.
+
+    Asserted directly because that path can no longer distinguish a working
+    coercion from a deleted one: both an absent postcode and a weak one yield
+    UNDECIDABLE.
+    """
+    numeric = GhlLocation(
+        id="loc_int",
+        name="Int Gym",
+        company_id=COMPANY_ID,
+        raw={"id": "loc_int", "postalCode": 75008, "phone": 442070000000},
+    )
+    assert _location_postcode(numeric) == "75008"
+    assert _location_phone(numeric) == "442070000000"
+
+    # A UK location exercises the same coercion on the path where the verdict
+    # IS observable, so the helpers stay covered end to end.
+    uk = GhlLocation(
+        id="loc_uk",
+        name="Brand Gym",
+        company_id=COMPANY_ID,
+        raw={"id": "loc_uk", "postalCode": "E8 1AA", "phone": 442070000000},
+    )
+    assert (
+        _classify_ghl_hit(
+            uk,
+            client_name="Brand Gym",
+            client_postcode="E8 1AA",
+            client_phone="442070000000",
+            client_address=None,
+        )
+        == _GHL_HIT_SAME_BUSINESS
+    )
 
 
 @pytest.mark.db
@@ -4479,6 +4553,25 @@ async def test_phase2_lock_and_recheck_run_even_after_a_phase1_collision(
     assert ghl.calls == []
     assert result.ghl_subaccount_id == "loc_racer_won"
     assert result.parent_client_id is not None
+    # THE PHASE-2 CLEAR, pinned (round 15). Phase 1 flagged this row against
+    # the phone-mismatched candidate; the post-lock re-check then found a
+    # corroborated sibling and linked to it, which answers the question the
+    # flag was asking - the post-lock view is the authoritative one. Nothing
+    # asserted the clear at THIS call site before round 15: the phase-1 site
+    # had a pin, the phase-2 site did not, so neutering it left the suite
+    # green while every raced-then-corroborated link kept its badge up
+    # forever, waiting on a human resolution it no longer needed.
+    flagged = await async_session.execute(
+        text(
+            "SELECT possible_duplicate, possible_duplicate_of, possible_duplicate_ghl_id "
+            "FROM clients WHERE id = :id"
+        ),
+        {"id": client_id},
+    )
+    dup, dup_of, dup_ghl = flagged.one()
+    assert dup is False
+    assert dup_of is None
+    assert dup_ghl is None
 
 
 @pytest.mark.db
@@ -4886,12 +4979,38 @@ async def test_phase2_recheck_link_losing_the_race_returns_the_rows_id(
     surviving, parent_id = row.one()
     assert surviving == "loc_stolen_by_racer"  # the racer's write was not clobbered
     # The guarded UPDATE is all-or-nothing: it sets `parent_client_id` in the
-    # same statement, so losing the race leaves the row unparented too. The
-    # RESULT still carries the re-check sibling's root, which is a real
-    # divergence between what this run reports and what the row records - see
-    # the phase-1 branch, which returns no `parent_client_id` at all on this
-    # path.
+    # same statement, so losing the race leaves the row unparented too.
     assert parent_id is None
+    # WHAT THIS TEST USED TO PIN, and why that was wrong (round 15). It
+    # asserted only the ROW's parent, above, and never the RESULT's - so it
+    # passed while the phase-2 branch returned
+    # `parent_client_id=recheck_sibling.root_id` unconditionally: the id read
+    # back from the row, the parent taken from a sibling this run never linked
+    # to. Half the rule, and the half it dropped is the one that invents a
+    # merge. The comment here called that "a real divergence" and left it
+    # standing as expected behaviour, which is how a defect survives a test.
+    # `CreateSubaccountResult`'s docstring and both create-path `rowcount == 0`
+    # branches say the row is the authority; the result must now agree with it
+    # on BOTH fields, so an unparented row reports no parent.
+    assert result.parent_client_id == parent_id
+    assert result.parent_client_id is None
+    # THE AUDIT ROW IS THE THIRD SURFACE, and it carried the same invented
+    # merge until round 15 moved the write after the link. The dashboard reads
+    # this payload, so a parent recorded here is a merge a human will believe.
+    recorded = (
+        await async_session.execute(
+            text(
+                "SELECT external_id, response FROM platform_actions "
+                "WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+    assert recorded.external_id == "loc_stolen_by_racer"
+    assert recorded.response["raced_concurrent_signing"] is True
+    assert recorded.response["reason"] == GHL_SKIP_REASON_DB_SIBLING
+    assert recorded.response["ghl_subaccount_id"] == "loc_stolen_by_racer"
+    assert recorded.response["parent_client_id"] is None
 
 
 @pytest.mark.db
@@ -5023,3 +5142,633 @@ async def test_head_office_extensions_do_not_merge_two_sites_of_one_brand(
         {"cid": site_two_id},
     )
     assert flagged.scalar_one() is True, "the ambiguity must be visible to a human"
+
+
+@pytest.mark.db
+async def test_a_shared_street_number_zip_cannot_merge_two_franchisees(
+    async_session: AsyncSession,
+) -> None:
+    """Round 15, P0 END TO END - the reviewer's merge chain, through the real code.
+
+    Two F45 franchisees whose HubSpot `Company.Zip` is the street number "182".
+    Same brand, so bar 1 passes. Same key, because the key is
+    first6(name)|normalize(zip) and both sides are identical. Head office signs
+    both from one switchboard, so bar 2 passes. Neither row carries an address,
+    so bar 4 abstains. Different people sign, so bar 3 is the ONLY bar that can
+    refuse - and at `baf52c7` it was never asked, because "182" matched the
+    `[0-9]{3,6}` wildcard, classified REAL, and waived the signer requirement.
+
+    Executed through `_db_sibling_check` and `_pick_sibling` rather than
+    asserted on the classifier, because the classifier being right is not the
+    claim: the claim is that this pair no longer links.
+    """
+    await _seed_client(
+        async_session,
+        email="ops@f45franchise.example.com",
+        business_name="F45 Training",
+        legal_entity="F45 Training",
+        postal_code="182",
+        phone="020 7946 0018",
+        contact_first_name="Dana",
+        contact_last_name="Reed",
+        ghl_subaccount_id="loc_site_one",
+    )
+    site_two_id = await _seed_client(
+        async_session,
+        email="ops@f45franchise.example.com",
+        business_name="F45 Training",
+        legal_entity="F45 Training",
+        postal_code="182",
+        phone="020 7946 0018",
+        contact_first_name="Priya",
+        contact_last_name="Raman",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    ghl = FakeGhlClient(
+        location=_ghl_location("loc_site_two", name="F45 Training", postal_code="182"),
+        lookup_result=None,
+    )
+
+    # The premise: "182" is the anchor, and it must NOT be strong.
+    assert identity_key_module.postcode_is_weak_anchor("182") is True
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=site_two_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True, "site 2 must provision its own sub-account"
+    assert result.parent_client_id is None, "the two franchisees must NOT be linked"
+    flagged = await async_session.execute(
+        text("SELECT possible_duplicate FROM clients WHERE id = :cid"),
+        {"cid": site_two_id},
+    )
+    assert flagged.scalar_one() is True, "the ambiguity must be visible to a human"
+
+
+def test_a_street_number_zip_cannot_corroborate_a_ghl_reuse() -> None:
+    """Round 15, P0 - the GHL-leg control for the chain above.
+
+    The lost-create-response path: our own POST succeeded, the response was
+    lost, and the retry finds the orphan by email. `Zip = "182"` on both sides
+    used to read as postcode corroboration and return SAME_BUSINESS, which
+    reuses a location the DB leg never got to judge. A weak anchor must
+    downgrade it to UNDECIDABLE - own sub-account plus a flag naming the
+    suspected location - matching the DB leg's posture so the weaker leg is not
+    the way in.
+    """
+    verdict = _classify_ghl_hit(
+        GhlLocation(
+            id="loc_orphan",
+            name="F45 Training",
+            company_id=COMPANY_ID,
+            raw={"postalCode": "182", "phone": "020 7946 0018"},
+        ),
+        client_name="F45 Training",
+        client_postcode="182",
+        client_phone="020 7946 0018",
+        client_address=None,
+    )
+    assert verdict == _GHL_HIT_UNDECIDABLE
+
+
+@pytest.mark.db
+async def test_a_late_failure_cannot_erase_a_committed_success(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 15, P1 - the reviewer's sequence, proven under the call-site guard.
+
+    Round 14 hoisted `begin_action` above the dedup lock so a lock failure would
+    leave a visible `in_progress` row. That hoist made a state reachable the old
+    ordering could not produce: a REDELIVERY of an action that already committed
+    `success` can hit a late failure and overwrite the terminal state.
+
+    Guarded at the call site rather than in `fail_action`'s WHERE clause. The
+    SQL variant was written, measured and removed: inside its own transaction a
+    caller's OWN uncommitted, abandoned success reads exactly like a committed
+    prior one, so the guard silently no-ops on the second case and breaks round
+    8's guarantee that a run whose terminal commit failed lands `failed`. Only
+    `begin_action`'s `already_succeeded` can tell the two apart. See
+    `fail_action`'s docstring.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@lateflail.example.com",
+        business_name="Late Flail Gym",
+        legal_entity="Late Flail Gym",
+        postal_code="E8 1AA",
+        phone="+44 7700 900321",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+
+    # Run 1: completes normally and COMMITS success.
+    first = await create_ghl_subaccount_core(
+        async_session,
+        FakeGhlClient(location=_ghl_location("loc_committed"), lookup_result=None),
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert first.created is True
+
+    # TEAR THE STATE. This is what makes `_record_failure` reachable while the
+    # action is already `success`, and finding it took three attempts that each
+    # failed the sole-kill check - worth recording, because each failure is a
+    # different way a concurrency test lies:
+    #
+    #   1. failing the GHL call: `already_succeeded`'s torn-state return fires
+    #      long before any GHL request, so the injection never ran.
+    #   2. failing the phase-1 lock on an intact row: a pre-`begin_action`
+    #      short-circuit returns as soon as `clients.ghl_subaccount_id` is set,
+    #      so the lock never ran either.
+    #
+    # Only the TORN state reaches it: the action says `success` and holds the
+    # id, the client row lost it, so the early returns are skipped and the
+    # phase-1 lock (which runs BEFORE the torn-state repair) is live.
+    await async_session.execute(
+        text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": client_id}
+    )
+    await async_session.commit()
+
+    async def _explode(session_arg: object, email: str) -> None:
+        raise GhlServerError("simulated lock failure on a torn redelivery")
+
+    monkeypatch.setattr(ghl_subaccount_module, "_acquire_dedup_lock", _explode)
+
+    with contextlib.suppress(Exception):
+        await create_ghl_subaccount_core(
+            async_session,
+            FakeGhlClient(location=_ghl_location("loc_unused"), lookup_result=None),
+            client_id=client_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    row = (
+        await async_session.execute(
+            text(
+                "SELECT status, external_id FROM platform_actions "
+                "WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+    assert row.status == "success", "a committed success must not be erased by a later run"
+    assert row.external_id == "loc_committed"
+
+
+async def _action_row(session: AsyncSession, client_id: uuid.UUID) -> object:
+    return (
+        await session.execute(
+            text(
+                "SELECT status, last_error FROM platform_actions "
+                "WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+
+
+@pytest.mark.db
+async def test_a_failure_flagging_a_collision_lands_failed_not_stranded(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 15, region 1 - the collision flag write was outside every guard.
+
+    `_flag_possible_duplicate` is a DB write sitting after the committed
+    `in_progress` row. Unguarded, an error there propagates with the action
+    still `in_progress` and no `last_error`: an operator sees a stuck action and
+    no reason, which is the zombie this module's own contract forbids.
+    """
+    await _seed_client(
+        async_session,
+        email="ops@collideguard.example.com",
+        business_name="Collide Guard Gym",
+        legal_entity="Collide Guard Gym",
+        postal_code="E8 1AA",
+        phone="+44 7700 900111",
+        contact_first_name="Sarah",
+        contact_last_name="Bennett",
+        ghl_subaccount_id="loc_first",
+    )
+    second = await _seed_client(
+        async_session,
+        email="other@collideguard.example.com",
+        # Same NAME, not a diverging one: a pure prefix collision sets no flag
+        # at all (round 6), so bar 1 must PASS and a later bar must fail for the
+        # collision path to be reached. The phone diverges, so bar 2 refuses.
+        business_name="Collide Guard Gym",
+        legal_entity="Collide Guard Gym",
+        postal_code="E8 1AA",
+        phone="+44 7700 900222",
+        contact_first_name="Priya",
+        contact_last_name="Raman",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+
+    async def _explode(*args: object, **kwargs: object) -> None:
+        raise SQLAlchemyError("simulated failure writing the possible-duplicate flag")
+
+    monkeypatch.setattr(ghl_subaccount_module, "_flag_possible_duplicate", _explode)
+
+    with contextlib.suppress(Exception):
+        await create_ghl_subaccount_core(
+            async_session,
+            FakeGhlClient(location=_ghl_location("loc_unused"), lookup_result=None),
+            client_id=second,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    row = await _action_row(async_session, second)
+    assert row.status == "failed"
+    assert row.last_error, "a failure with no last_error tells an operator nothing"
+
+
+@pytest.mark.db
+async def test_a_failure_in_the_reuse_branch_lands_failed_not_stranded(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 15, region 2 - the DB-sibling reuse branch's writes and commit."""
+    await _seed_client(
+        async_session,
+        email="ops@reuseguard.example.com",
+        business_name="Reuse Guard Gym",
+        legal_entity="Reuse Guard Gym",
+        postal_code="E8 1AA",
+        phone="+44 7700 900333",
+        contact_first_name="Sarah",
+        contact_last_name="Bennett",
+        ghl_subaccount_id="loc_parent",
+        created_at_offset_seconds=-60,
+    )
+    child = await _seed_client(
+        async_session,
+        email="ops@reuseguard.example.com",
+        business_name="Reuse Guard Gym",
+        legal_entity="Reuse Guard Gym",
+        postal_code="E8 1AA",
+        phone="+44 7700 900333",
+        contact_first_name="Sarah",
+        contact_last_name="Bennett",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+
+    async def _explode(*args: object, **kwargs: object) -> None:
+        raise SQLAlchemyError("simulated failure clearing the duplicate flag")
+
+    monkeypatch.setattr(ghl_subaccount_module, "_clear_possible_duplicate", _explode)
+
+    with contextlib.suppress(Exception):
+        await create_ghl_subaccount_core(
+            async_session,
+            FakeGhlClient(location=_ghl_location("loc_unused"), lookup_result=None),
+            client_id=child,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    row = await _action_row(async_session, child)
+    assert row.status == "failed"
+    assert row.last_error
+
+
+@pytest.mark.db
+async def test_a_failure_in_the_torn_action_repair_lands_failed_not_stranded(
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Round 15, region 3 - the torn-action repair's write-back and commit.
+
+    Reached only in the TORN state: the action row recorded `success` and holds
+    the id, but the write-back to `clients` did not land. The repair writes the
+    id back and commits, both after the committed `in_progress` row, so an error
+    there strands the action with no `last_error`.
+
+    The wrap for this region is cut at the RETURN, not at the commit. Cutting at
+    the commit orphans the trailing log and return after the `except`, and the
+    torn path then falls through to the create branch and mints a second
+    location - the orphan-creation shape round 14's P1 was about. Two existing
+    torn-state tests caught that miscut when it was made.
+
+    THE PRESCRIBED ASSERTION IS IMPOSSIBLE HERE, and the reason is structural
+    rather than a gap in the test. Regions 1, 2 and 4 assert the action lands
+    `failed`. This region sits INSIDE `if begun.already_succeeded:`, so by
+    construction the action is already `success` - and round 15's own
+    terminal-success guard then makes `_record_failure` decline to overwrite it.
+    Asserting `failed` would require the guard it was just given.
+
+    So what the guard actually buys here is the RECORD, not a status change: the
+    failure is logged against the action and the exception is re-raised, instead
+    of propagating with nothing written anywhere. That is what is asserted, and
+    it is a real kill - deleting the guard removes the log line. Asserting only
+    "status stays success" would pass with the guard deleted, which is the
+    harmless-path pin this round has already produced four times.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@tornguard.example.com",
+        business_name="Torn Guard Gym",
+        legal_entity="Torn Guard Gym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    first = await create_ghl_subaccount_core(
+        async_session,
+        FakeGhlClient(location=_ghl_location("loc_torn_ok"), lookup_result=None),
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert first.created is True
+
+    # Tear it: action still says success and holds the id, client row loses it.
+    await async_session.execute(
+        text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": client_id}
+    )
+    await async_session.commit()
+
+    real_execute = async_session.execute
+
+    async def _explode_on_repair(statement: object, *args: object, **kwargs: object) -> object:
+        if "SET ghl_subaccount_id = :ghl_id" in str(statement):
+            raise SQLAlchemyError("simulated failure repairing the torn client row")
+        return await real_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(async_session, "execute", _explode_on_repair)
+
+    with caplog.at_level(logging.WARNING), contextlib.suppress(Exception):
+        await create_ghl_subaccount_core(
+            async_session,
+            FakeGhlClient(location=_ghl_location("loc_unused"), lookup_result=None),
+            client_id=client_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    monkeypatch.undo()
+    row = await _action_row(async_session, client_id)
+    # The committed success is preserved (round 15's terminal-success guard)...
+    assert row.status == "success"
+    # ...and the failure was RECORDED rather than propagating silently. This is
+    # the assertion that dies when the guard is removed.
+    assert any("failure after a completed action" in r.message for r in caplog.records), (
+        "the guard must route the failure through _record_failure, not let it propagate bare"
+    )
+
+
+@pytest.mark.db
+async def test_a_failure_in_the_ghl_lookup_adoption_lands_failed_not_stranded(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 15, region 4 - the GHL-lookup adoption's writes and commit.
+
+    The at-least-once backstop: our own POST succeeded, the response was lost,
+    and the retry finds the orphan by email. Adopting it completes the action,
+    writes the id back, repairs a lost race and commits - all after the
+    committed `in_progress` row. The reviewer named this region as pre-existing
+    and same-class as the reuse branch.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@adoptguard.example.com",
+        business_name="Adopt Guard Gym",
+        legal_entity="Adopt Guard Gym",
+        postal_code="E8 1AA",
+        phone="+44 7700 900444",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    orphan = _ghl_location("loc_orphan", name="Adopt Guard Gym", postal_code="E8 1AA")
+    orphan.raw["phone"] = "+44 7700 900444"
+    ghl = FakeGhlClient(location=_ghl_location("loc_unused"), lookup_result=orphan)
+
+    async def _explode(*args: object, **kwargs: object) -> None:
+        raise SQLAlchemyError("simulated failure completing the adopted action")
+
+    monkeypatch.setattr(ghl_subaccount_module, "complete_action", _explode)
+
+    with contextlib.suppress(Exception):
+        await create_ghl_subaccount_core(
+            async_session,
+            ghl,
+            client_id=client_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    monkeypatch.undo()
+    row = await _action_row(async_session, client_id)
+    assert row.status == "failed"
+    assert row.last_error
+
+
+@pytest.mark.db
+async def test_the_window_fixture_collides_at_phase_one(async_session: AsyncSession) -> None:
+    """Section 5 step 1: prove the fixture collides BEFORE using it in the window.
+
+    Derived from bar semantics, not chosen and checked:
+
+      bar 1 (name)     MUST PASS   - identical business_name.
+      bar 2 (phone)    MUST FAIL   - different NATIONAL numbers, so no
+                                     (cc, nsn, ext) reading can be shared under
+                                     any candidate region. Structural.
+      bar 3 (signer)   NOT CONSULTED - a real UK postcode is a strong anchor,
+                                     so `require_contact_name` is False.
+      bar 4 (address)  ABSTAINS    - both NULL.
+      bar 5 (postcode) ABSTAINS    - identical.
+
+    Exactly one bar refuses, for a reason that holds for every pair with
+    distinct national numbers - not because of the particular digits chosen.
+    That is what makes the window test below a real test rather than a
+    coincidence: if this proof fails, the window test proves nothing.
+    """
+    await _seed_client(
+        async_session,
+        email="ops@windowrace.example.com",
+        business_name="Window Race Gym",
+        legal_entity="Window Race Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0018",
+        ghl_subaccount_id="loc_racer",
+        created_at_offset_seconds=-60,
+    )
+    client_id = await _seed_client(
+        async_session,
+        email="other@windowrace.example.com",
+        business_name="Window Race Gym",
+        legal_entity="Window Race Gym",
+        postal_code="E8 1AA",
+        phone="+44 161 850 1234",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=None),
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    assert result.created is True, "the refusing bar must prevent a link"
+    assert result.parent_client_id is None
+    flagged = (
+        await async_session.execute(
+            text("SELECT possible_duplicate FROM clients WHERE id = :id"), {"id": client_id}
+        )
+    ).scalar_one()
+    assert flagged is True, "a name-matching, non-corroborating sibling must FLAG"
+
+
+@pytest.mark.db
+async def test_a_racer_landing_in_the_phase_one_to_phase_two_window_is_flagged(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 15, P1 - the phase-2 collision block was revert-green in the MERGE direction.
+
+    THE SCENARIO. A same-key sibling that passes bar 1 and fails bar 2 does not
+    exist when phase-1 scans, and is committed before the phase-2 re-check. The
+    re-check must find it, flag, set `collision`, and thereby suppress the GHL
+    leg so `_classify_ghl_hit` never re-judges the racer.
+
+    THE FIXTURE IS DERIVED FROM BAR SEMANTICS, not chosen and checked - see
+    `test_the_window_fixture_collides_at_phase_one`, which proves this same pair
+    collides on the ordinary phase-1 path before it is used here. Bar 1 passes
+    (identical names), bar 2 fails (different NATIONAL numbers, so no
+    (cc, nsn, ext) reading can be shared under any candidate region), bar 3 is
+    not consulted (a real UK postcode is a strong anchor), bars 4 and 5 abstain.
+
+    THE RACER CARRIES A ghl_subaccount_id ON PURPOSE. `_SIBLING_SELECT` filters
+    `ghl_subaccount_id IS NOT NULL` (round 14, P0), so a racer without one is
+    invisible to the phase-2 scan and this test would assert against a collision
+    that never happened. It is also the realistic shape: the racer finished
+    first.
+
+    THE GHL FAKE IS SEEDED TO RETURN THE RACER'S LOCATION, also on purpose. With
+    the phase-2 block deleted, `collision` stays None, the suppression does not
+    fire, and the lookup re-judges - and the fake's location carries NO phone,
+    so GHL-leg corroboration abstains and collapses to the name check bar 1
+    already passed. The deleted-block outcome is therefore an actual MERGE into
+    the racer's location, which is the reviewer's danger scenario. Without this
+    seeding the deleted-block run would simply create, and the sole-kill would
+    fail for an incidental reason while appearing to pin the merge.
+    """
+    racer_id = await _seed_client(
+        async_session,
+        email="shared@windowracer.example.com",
+        business_name="Window Racer Gym",
+        legal_entity="Window Racer Gym",
+        postal_code="E8 1AA",
+        phone="+44 20 7946 0018",
+        ghl_subaccount_id="loc_RACER",
+        created_at_offset_seconds=-60,
+    )
+    client_id = await _seed_client(
+        async_session,
+        email="shared@windowracer.example.com",  # shared, so the GHL lookup finds the racer
+        business_name="Window Racer Gym",
+        legal_entity="Window Racer Gym",
+        postal_code="E8 1AA",
+        phone="+44 161 850 1234",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+
+    # The racer is NOT visible at phase-1: it is unlinked until the window.
+    await async_session.execute(
+        text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": racer_id}
+    )
+    await async_session.commit()
+
+    # The location CORROBORATES on all three GHL-leg signals - name, postcode
+    # and phone. That is what makes the unsuppressed path an actual MERGE rather
+    # than an undecidable-and-flag, and it is the difference between a sole-kill
+    # that proves the reviewer's danger scenario and one that fails for an
+    # incidental reason. Measured: with no phone on the location the GHL leg
+    # returns UNDECIDABLE, the client creates its own sub-account anyway, and
+    # `created is True` still passes with the block deleted - the kill would
+    # then rest only on the suppression assertion and would NOT demonstrate a
+    # merge.
+    #
+    # The phone is the CLIENT's, not the racer row's, which is the shape that
+    # makes this dangerous: the DB row carries the number that fails bar 2,
+    # while the GHL location carries the shared head-office number that
+    # corroborates. The two legs judge different data, which is round 2's
+    # finding restated.
+    orphan = GhlLocation(
+        id="loc_RACER",
+        name="Window Racer Gym",
+        company_id=COMPANY_ID,
+        raw={"id": "loc_RACER", "postalCode": "E8 1AA", "phone": "+44 161 850 1234"},
+    )
+    ghl = FakeGhlClient(location=_ghl_location("loc_own"), lookup_result=orphan)
+
+    # SPY: make the two preconditions observable rather than inferred.
+    real_check = ghl_subaccount_module._db_sibling_check
+    calls: list[tuple[object, object]] = []
+
+    async def _spy(*args: object, **kwargs: object) -> tuple[object, object]:
+        out = await real_check(*args, **kwargs)
+        calls.append(out)
+        return out
+
+    monkeypatch.setattr(ghl_subaccount_module, "_db_sibling_check", _spy)
+
+    # SEAM: land the racer between the phases. Same session, because conftest's
+    # savepoint fixture makes anything a separate connection writes invisible to
+    # this test (round 13's documented finding), so a second connection cannot
+    # simulate a racer here at all.
+    real_lock = ghl_subaccount_module._acquire_dedup_lock
+    lock_calls = {"n": 0}
+
+    async def _lock_then_land_racer(session_arg: AsyncSession, email: str) -> None:
+        lock_calls["n"] += 1
+        # Asserted on EVERY acquisition, not only the seam: gating an assertion
+        # behind a condition read from the system under test is what G4 refuses,
+        # and unconditional is the stronger check anyway - nothing should be
+        # pending at either lock, so a commit here can only be the racer.
+        assert not list(session_arg.new), "unexpected pending inserts at a lock"
+        assert not list(session_arg.dirty), "unexpected pending updates at a lock"
+        if lock_calls["n"] == 2:  # phase 2, after phase-1 scanned and saw nothing
+            await session_arg.execute(
+                text("UPDATE clients SET ghl_subaccount_id = :gid WHERE id = :id"),
+                {"gid": "loc_RACER", "id": racer_id},
+            )
+            await session_arg.commit()
+        await real_lock(session_arg, email)
+
+    monkeypatch.setattr(ghl_subaccount_module, "_acquire_dedup_lock", _lock_then_land_racer)
+
+    result = await create_ghl_subaccount_core(
+        async_session,
+        ghl,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+
+    monkeypatch.undo()
+
+    # PRECONDITIONS, observed not inferred.
+    assert len(calls) == 2, f"expected a phase-1 and a phase-2 scan, got {len(calls)}"
+    assert calls[0] == (None, None), f"phase-1 must have seen NOTHING, saw {calls[0]}"
+    assert calls[1][1] is not None, "phase-2 must have found the racer as a collision"
+
+    # THE ASSERTIONS.
+    assert result.created is True, "the racer must not be merged into"
+    assert result.ghl_subaccount_id != "loc_RACER"
+    flagged = (
+        await async_session.execute(
+            text("SELECT possible_duplicate FROM clients WHERE id = :id"), {"id": client_id}
+        )
+    ).scalar_one()
+    assert flagged is True, "the window racer must raise the possible-duplicate flag"
+    # `calls` records create payloads; `lookup_calls` records lookups. The
+    # suppression at the GHL leg means the lookup must never have run.
+    assert ghl.lookup_calls == [], (
+        "the GHL leg must be suppressed once a collision is set - a lookup here "
+        "means `_classify_ghl_hit` was given the chance to re-judge the racer"
+    )

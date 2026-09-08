@@ -522,6 +522,19 @@ _G7_KEY_CONSTANTS = frozenset(
         "_TRAILING_SUFFIXES",
         "_TRANSLITERATIONS",
         "_NAME_PREFIX_LEN",
+        # Round 15: `_PLACEHOLDER_NAME_STEMS` shapes KEYS, not just bar 3.
+        # `identity_name` consults it, so adding one stem flips every business
+        # whose normalized name matches it from a live key to NULL - measured:
+        # "Capacity" moved from "capaci|E81AA" to None when "capacity" joined
+        # the set. That is a silent population split, which is exactly what G7
+        # exists to refuse, and the constant was missing from this list.
+        "_PLACEHOLDER_NAME_STEMS",
+        # DELIBERATELY ABSENT: `_is_recognised_format`, `_UK_POSTCODE_STRICT`,
+        # `_IE_EIRCODE`. They decide CONFIDENCE (may this value waive the signer
+        # bar), never the key's VALUE, so a change to them cannot orphan a
+        # stored `identity_key` and must not fire G7. Adding them would make
+        # every confidence tweak demand a migration it does not owe. Do not
+        # "complete" this set by symmetry with the module's other regexes.
         "KEY_SEPARATOR",
         "LEGAL_ENTITY_PLACEHOLDER",
     }

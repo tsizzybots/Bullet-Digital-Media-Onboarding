@@ -252,6 +252,27 @@ class TestTwoxxParseGuard:
             await client.create_location({"name": "Sample Gym", "companyId": "comp_1"})
         assert "LIKELY EXISTS" in str(excinfo.value)
 
+    async def test_the_lookup_also_guards_its_2xx_body(self) -> None:
+        # ROUND 15 - the same guard, on the same class of failure, in the same
+        # file. Raised twice by the reviewer and deferred twice.
+        #
+        # This one is WORSE than the create-path version it mirrors: the lookup
+        # runs BEFORE the POST on every attempt, so a bare `ValueError` here is
+        # classified retriable and burns the entire retry budget on a request
+        # that cannot heal - and the create path is never reached at all.
+        transport = _transport(200, "<html>WAF interstitial</html>")
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlClientError) as excinfo:
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+        assert "could not be parsed" in str(excinfo.value)
+
+    async def test_the_lookup_guard_does_not_swallow_a_valid_empty_result(self) -> None:
+        # The mirror worth pinning: an empty `locations` array is a legitimate
+        # "no match", not a parse failure, and must still return None.
+        transport = _transport(200, {"locations": [], "traceId": "t-1"})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        assert await client.find_location_by_email("ops@example.com", company_id="comp_1") is None
+
 
 class TestTransportLevelErrors:
     """Round 12, test gap 6: the status-code mapping was well covered but a

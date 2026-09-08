@@ -245,15 +245,56 @@ async def test_acquire_dedup_lock_restores_the_engine_ceiling() -> None:
         )
 
         after = (await session.execute(text("SHOW statement_timeout"))).scalar_one()
-        # Compared against the BASELINE this connection actually had, not the
-        # literal "5s": the property under test is "the raise did not leak",
-        # which holds whatever the environment's default is. Under the
-        # pre-fix code `after` is "30s" and this fails in every environment.
-        assert after == before, (
-            f"the raised ceiling leaked into the rest of the transaction: "
-            f"{after} (baseline was {before})"
+        # ROUND 15 CHANGED WHAT THE RESET RESTORES, so this assertion changed
+        # with it. The reset was `= DEFAULT`, which puts back whatever arrived
+        # in the startup packet - 5s on local Docker, but "0" (no ceiling at
+        # all) on Neon, so on the endpoint production uses it handed the rest of
+        # the transaction an unbounded budget. It now sets the literal '5s', so
+        # the property is environment-INDEPENDENT: after the acquisition the
+        # ceiling is 5s everywhere, whatever the connection started with.
+        #
+        # Under the pre-fix code `after` is "30s" and this still fails, which is
+        # the kill this test exists for.
+        assert after == "5s", (
+            f"the lock helper must leave a bounded ceiling behind, got {after} "
+            f"(this connection's baseline was {before})"
         )
 
+        await _safe_rollback(session)
+    await engine.dispose()
+
+
+@pytest.mark.db
+async def test_the_reset_bounds_the_transaction_even_with_no_engine_ceiling() -> None:
+    """Round 15 - the reset must not hand Neon an unbounded budget.
+
+    The reset was `SET LOCAL statement_timeout = DEFAULT`, which restores
+    whatever arrived in the startup packet. On local Docker that is 5s; on
+    Neon it is "0", because the proxy discards `server_settings` - so on the
+    endpoint production actually uses, releasing the lock handed every
+    following statement in that transaction an UNLIMITED budget.
+
+    Built without `server_settings` on purpose, which reproduces the Neon
+    condition exactly (`SHOW statement_timeout` -> "0"). The literal reset must
+    leave 5s behind regardless of what the connection started with.
+    """
+    engine = create_async_engine(
+        get_async_database_url(),
+        poolclass=NullPool,
+        connect_args={"ssl": get_settings().database_ssl_mode},
+    )
+    async with engine.connect() as conn:
+        session = AsyncSession(bind=conn)
+        baseline = (await session.execute(text("SHOW statement_timeout"))).scalar_one()
+        assert baseline == "0", "this test is meaningless unless the ceiling is absent"
+
+        await ghl_subaccount_module._acquire_dedup_lock(session, "neon-sim@example.com")
+
+        after = (await session.execute(text("SHOW statement_timeout"))).scalar_one()
+        assert after == "5s", (
+            "releasing the lock must leave a bounded ceiling even where the engine's "
+            f"startup parameter never arrived, got {after}"
+        )
         await _safe_rollback(session)
     await engine.dispose()
 

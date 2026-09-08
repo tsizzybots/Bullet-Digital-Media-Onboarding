@@ -263,8 +263,28 @@ class HttpGhlClient:
                 params={"companyId": company_id, "email": email, "limit": 1},
             )
         if 200 <= response.status_code < 300:
-            body = response.json()
-            locations = body.get("locations") or []
+            # GUARDED (round 15) - the same guard `create_location` got in round
+            # 12, applied to the same class of failure in the same file. Raised
+            # twice by the reviewer and deferred twice.
+            #
+            # A 2xx carrying a CDN or WAF interstitial is not JSON, so
+            # `response.json()` raised a bare `ValueError`. The wrapper reads
+            # that as RETRIABLE, and a shape mismatch cannot heal on retry, so
+            # the signing burned its whole retry budget on a deterministically
+            # failing request. Worse than the create-path version of this bug:
+            # this lookup runs BEFORE the POST on every attempt, so the create
+            # path was never reached at all.
+            try:
+                body = response.json()
+                locations = body.get("locations") or []
+            except (ValueError, AttributeError, TypeError) as exc:
+                raise GhlClientError(
+                    response.status_code,
+                    "2xx location-search response could not be parsed "
+                    f"({type(exc).__name__}); the lookup runs before every create, so "
+                    f"a retriable classification here burns the whole budget: "
+                    f"{response.text[:500]}",
+                ) from exc
             if not locations:
                 return None
             hit = locations[0]

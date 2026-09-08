@@ -501,3 +501,56 @@ class TestMutateRunnerFlowGuards:
         out = capsys.readouterr().out
         assert rc == 1
         assert "selects no test" in out
+
+
+class TestG7FingerprintCoversWhatItClaims:
+    """Round 15, P1 - G7's own additions were never proven to do anything.
+
+    Round 14 added `classify_postcode` and `_classified` to
+    `review_gate._G7_KEY_FUNCTIONS` and shipped no test that the fingerprint actually moves
+    when they change. Round 15 adds `_PLACEHOLDER_NAME_STEMS` to
+    `review_gate._G7_KEY_CONSTANTS` for a measured reason: `identity_name` consults it, so
+    adding one stem flips every business whose normalized name matches from a
+    live key to NULL. Executed: "Capacity" moved from "capaci|E81AA" to None.
+    That is the silent population split G7 exists to refuse, and the constant
+    was missing from the list.
+    """
+
+    def _source(self) -> str:
+        return pathlib.Path(review_gate._IDENTITY_KEY_MODULE).read_text()
+
+    def test_adding_a_placeholder_stem_moves_the_fingerprint(self) -> None:
+        source = self._source()
+        mutated = source.replace('    "pending",\n', '    "pending",\n    "capacity",\n', 1)
+        assert mutated != source, "anchor missing - inspect _PLACEHOLDER_NAME_STEMS"
+        assert review_gate._normalizer_fingerprint(mutated) != review_gate._normalizer_fingerprint(
+            source
+        )
+
+    def test_the_stem_constant_is_actually_in_the_watched_set(self) -> None:
+        # The sole-kill half: without the entry, the same edit is invisible.
+        assert "_PLACEHOLDER_NAME_STEMS" in review_gate._G7_KEY_CONSTANTS
+
+    def test_a_rule_change_inside_classify_postcode_moves_the_fingerprint(self) -> None:
+        # Round 14's own addition, proven rather than assumed.
+        source = self._source()
+        anchor = '    return PostcodeResult("", PostcodeConfidence.EMPTY)'
+        assert source.count(anchor) >= 1
+        mutated = source.replace(anchor, anchor.replace("EMPTY", "VERBATIM"), 1)
+        assert review_gate._normalizer_fingerprint(mutated) != review_gate._normalizer_fingerprint(
+            source
+        )
+
+    def test_every_watched_name_resolves_to_a_real_attribute(self) -> None:
+        # THE STALENESS GUARD. `_normalizer_fingerprint` skips a name it cannot
+        # find, so a renamed or deleted constant silently drops out of the
+        # fingerprint and G7 goes quiet about the very code it watches - the
+        # hand-maintained-mirror failure this repo keeps hitting.
+        import bullet_api.worker.identity_key as module
+
+        missing = sorted(
+            name
+            for name in (review_gate._G7_KEY_FUNCTIONS | review_gate._G7_KEY_CONSTANTS)
+            if not hasattr(module, name)
+        )
+        assert missing == [], f"watched names that no longer exist: {missing}"

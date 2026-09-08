@@ -49,11 +49,14 @@ from bullet_api.config import get_async_database_url, get_settings
 # queueing. On Neon it does NOT, per the correction above, so the production
 # exposure was the opposite one - an unbounded wait with nothing to cancel it.
 # Either way the dedup advisory lock in `worker/ghl_subaccount.py`, held across
-# two 10s-timeout GHL calls, raises the ceiling for itself with `SET LOCAL
-# statement_timeout` and puts it back with `SET LOCAL statement_timeout =
-# DEFAULT`: on Docker that stops it being cancelled, on Neon it imposes a
-# 30s bound where there would otherwise be none. Both are transaction-scoped,
-# so the engine default below is what every other statement sees.
+# two 10s-timeout GHL calls, sets its own 30s ceiling with `SET LOCAL
+# statement_timeout`: on Docker that stops it being cancelled, on Neon it
+# imposes the only bound that exists. It then puts back the LITERAL '5s'
+# rather than `= DEFAULT` (round 15) - `= DEFAULT` restores the startup-packet
+# value, which is "0" on Neon, so the reset was handing the rest of that
+# transaction an unbounded budget on the endpoint production actually uses.
+# Both are transaction-scoped, so the engine default below is what every other
+# statement sees.
 #
 # The value is per-STATEMENT, not per-transaction (verified: three sequential
 # 2s statements complete inside one transaction under this 5s ceiling), so a
