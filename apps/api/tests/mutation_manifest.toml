@@ -123,20 +123,6 @@ replace = "    if False:"
 must_fail = "tests/test_identity_key.py::TestNormalizePostcode::test_too_short_rejected"
 
 [[mutation]]
-# The R7 "single-repeated-digit shape" entry is GONE (round 8): deleting
-# `_is_repeating_pair`'s set-size gate made it subsume the caller's
-# `len(set(tail)) == 1` clause, the runner reported that clause's kill
-# SURVIVED, and the clause was deleted per the module's bar. The repdigit case
-# is now owned by `_is_repeating_pair`, killed below.
-name = "R8 - _is_repeating_pair owns single-AND-double-digit filler"
-file = "src/bullet_api/worker/identity_key.py"
-find = "    return all(ch == digits[index % 2] for index, ch in enumerate(digits))"
-replace = "    return len(set(digits)) == 2 and all(ch == digits[index % 2] for index, ch in enumerate(digits))"
-must_fail = "tests/test_identity_key.py::TestRealLandlinesSurvive::test_shape_filler_is_still_rejected"
-
-# Round 6 named both of these as revert-green with no manifest entry.
-
-[[mutation]]
 name = "R6 - names_materially_diverge treats an EMPTY stem as divergence"
 file = "src/bullet_api/worker/identity_key.py"
 find = "    if not stem_a or not stem_b:\n        return True"
@@ -223,8 +209,11 @@ file = "src/bullet_api/worker/identity_key.py"
 # fourth ("+44 161 200 2000") has FOUR distinct digits in its tail, so the floor
 # never bit it - it is a control, and the test now asserts its count so the row
 # is not an unexplained value.
-find = "        if any(_is_repeating_pair(t) or _is_sequential_digits(t) for t in tails):"
-replace = "        if any(len(set(t)) <= 2 or _is_sequential_digits(t) for t in tails):"
+# RETARGETED round 15 second pass: the two paths were merged into the shared
+# `_is_filler_number` helper, so the old parsed-path line no longer exists. The
+# mutation is unchanged in meaning; only its address moved.
+find = "    if _is_repeating_pair(tail) or _is_sequential_digits(tail):"
+replace = "    if len(set(tail)) <= 2 or _is_sequential_digits(tail):"
 must_fail = "tests/test_identity_key.py::TestRealLandlinesSurvive"
 
 [[mutation]]
@@ -657,6 +646,21 @@ find = "            await _clear_possible_duplicate(session, client_id=client_id
 replace = "            pass\n            # `begun` is the row claimed and committed above, before the lock"
 must_fail = "tests/test_ghl_subaccount.py::test_a_confident_link_clears_an_earlier_possible_duplicate_flag"
 requires_db = true
+
+# REMOVED round 15 second pass: "R8 - _is_repeating_pair owns single-AND-double-
+# digit filler". Its mutation added a `len(set(digits)) == 2` gate, which breaks
+# only the single-repeated-digit case ("000000000"). `_is_repeated_block`, added
+# this pass, catches every repdigit at block size 1, so that case is now owned by
+# a rule with its own pin and the R8 mutation became behaviourally INERT:
+# measured, it changes `normalize_phone` on 0 of 4,340 probed inputs, so it could
+# only ever report SURVIVED. A mutation that cannot change behaviour cannot prove
+# a guard, and leaving it would be a permanent false finding.
+#
+# `_is_repeating_pair` itself is still pinned twice - by "R15 - the parsed-tail
+# filler check refuses a repeating pair" (removes it from the check) and by "F5
+# area - landline rejection" (swaps it for the distinct-digit floor) - so the
+# function is not left unguarded, only this one redundant claim about it is gone.
+# Same disposition, and same reason, as the entry round 14 removed.
 
 # --- the gate's own detectors (round 7: "the gate itself has no self-tests") --
 
@@ -1671,8 +1675,11 @@ must_fail = "tests/test_identity_key.py::TestForenameHomonymPlaceholders::test_t
 # corroborating number. Merge direction.
 name = "R15 - the filler check runs on the parsed number, not the raw field"
 file = "src/bullet_api/worker/identity_key.py"
-find = "        tails = [n[-_PHONE_SIGNIFICANT_DIGITS:] for n in nationals]"
-replace = "        tails = [_NON_DIGIT.sub(\"\", phone)[-_PHONE_SIGNIFICANT_DIGITS:]]"
+# RETARGETED round 15 second pass: the two paths were merged into the shared
+# `_is_filler_number` helper, so the old parsed-path line no longer exists. The
+# mutation is unchanged in meaning; only its address moved.
+find = "        if any(_is_filler_number(n) for n in nationals):"
+replace = "        if _is_filler_number(_NON_DIGIT.sub(\"\", phone)):"
 must_fail = "tests/test_identity_key.py::TestExtensionDigitsCannotLaunderFiller::test_an_extension_cannot_launder_a_placeholder_number"
 
 [[mutation]]
@@ -1862,8 +1869,11 @@ must_fail = "tests/test_identity_key.py::TestPostcodeIsWeakAnchor::test_an_absen
 # until this entry the parsed tail's repeating-pair rule was unguarded.
 name = "R15 - the parsed-tail filler check refuses a repeating pair"
 file = "src/bullet_api/worker/identity_key.py"
-find = "        if any(_is_repeating_pair(t) or _is_sequential_digits(t) for t in tails):"
-replace = "        if any(_is_sequential_digits(t) for t in tails):"
+# RETARGETED round 15 second pass: the two paths were merged into the shared
+# `_is_filler_number` helper, so the old parsed-path line no longer exists. The
+# mutation is unchanged in meaning; only its address moved.
+find = "    if _is_repeating_pair(tail) or _is_sequential_digits(tail):"
+replace = "    if _is_sequential_digits(tail):"
 must_fail = "tests/test_identity_key.py::TestBothFillerCheckPathsRefuse::test_filler_is_refused_on_both_paths[parsed_repeating]"
 
 [[mutation]]
@@ -1871,8 +1881,11 @@ must_fail = "tests/test_identity_key.py::TestBothFillerCheckPathsRefuse::test_fi
 # either rule can be killed alone rather than one covering for the other.
 name = "R15 - the parsed-tail filler check refuses sequential digits"
 file = "src/bullet_api/worker/identity_key.py"
-find = "        if any(_is_repeating_pair(t) or _is_sequential_digits(t) for t in tails):"
-replace = "        if any(_is_repeating_pair(t) for t in tails):"
+# RETARGETED round 15 second pass: the two paths were merged into the shared
+# `_is_filler_number` helper, so the old parsed-path line no longer exists. The
+# mutation is unchanged in meaning; only its address moved.
+find = "    if _is_repeating_pair(tail) or _is_sequential_digits(tail):"
+replace = "    if _is_repeating_pair(tail):"
 must_fail = "tests/test_identity_key.py::TestBothFillerCheckPathsRefuse::test_filler_is_refused_on_both_paths[parsed_sequential]"
 
 [[mutation]]
@@ -1883,3 +1896,61 @@ file = "src/bullet_api/worker/identity_key.py"
 find = "    if _is_repeating_pair(tail) or _is_sequential_digits(tail):"
 replace = "    if _is_sequential_digits(tail):"
 must_fail = "tests/test_identity_key.py::TestBothFillerCheckPathsRefuse::test_filler_is_refused_on_both_paths[fallback_repeating]"
+
+[[mutation]]
+# Round 15 second pass - the NANP 555-01XX fiction range. Published by the
+# numbering authority as never-assignable, so refusing it is a spec fact and
+# cannot cost a real client a link. Without it, two unrelated clients whose
+# phone field holds a film-and-TV placeholder corroborate bar 2 and link.
+name = "R15b - the NANP fiction range cannot corroborate"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return len(national) == 10 and national[3:6] == \"555\" and national[6:8] == \"01\""
+replace = "    return False"
+must_fail = "tests/test_identity_key.py::TestTenDigitPlaceholdersCannotCorroborate::test_the_placeholder_is_refused_and_cannot_corroborate[fiction_bare]"
+
+[[mutation]]
+# Round 15 second pass - k>=2 exact repetitions of an n-digit block. The
+# general form of the pair rule; at the 9-digit tails this module compares, 9
+# is odd so a 2-cycle is never an exact repetition and neither rule subsumes
+# the other. Catches the keyboard-walk cycle "1231231231".
+name = "R15b - a repeated digit block is filler"
+file = "src/bullet_api/worker/identity_key.py"
+find = "        if length % block == 0 and digits == digits[:block] * (length // block):\n            return True"
+replace = "        if False:\n            return True"
+must_fail = "tests/test_identity_key.py::TestTenDigitPlaceholdersCannotCorroborate::test_the_placeholder_is_refused_and_cannot_corroborate[cycle]"
+
+[[mutation]]
+# Round 15 second pass - a mirrored national number. Applied to the FULL
+# national only: on the truncated 9-digit tail this refuses real landlines
+# ("+44 20 7440 4470" -> tail "074404470" is a palindrome, the national
+# "2074404470" is not), which is an artefact of the window, not the number.
+name = "R15b - a mirrored national number is filler"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return len(digits) >= 6 and digits == digits[::-1]"
+replace = "    return False"
+must_fail = "tests/test_identity_key.py::TestTenDigitPlaceholdersCannotCorroborate::test_the_placeholder_is_refused_and_cannot_corroborate[mirror_even]"
+
+[[mutation]]
+# Round 15 second pass - THE BOUNDARY OF THE MIRROR RULE'S SCOPE CORRECTION.
+# `_is_mirrored` reads the FULL national, never the truncated tail, because
+# truncating manufactures mirrors the number does not have. Measured: reading
+# the tail falsely refuses 2 real GB landlines per 3,000 generated ("+44 20
+# 7440 4470" -> national 2074404470 is not a mirror, tail 074404470 is).
+# This mutation reverts the window; without the pin the correction could
+# silently revert and take real landlines out of bar 2 with it.
+name = "R15b - the mirror rule reads the full national, not the truncated tail"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return _is_mirrored(national)"
+replace = "    return _is_mirrored(national[-_PHONE_SIGNIFICANT_DIGITS:])"
+must_fail = "tests/test_identity_key.py::TestTenDigitPlaceholdersCannotCorroborate::test_a_phantom_mirror_in_the_truncated_tail_does_not_refuse[phantom_mirror_1]"
+
+[[mutation]]
+# Round 15 second pass - the NANP rule must refuse the contaminated control.
+# "+1 312 555 0114" was used across this suite as a real number; it is inside
+# the reserved 555-01XX fiction range and is never assignable. Pinning the
+# refusal keeps the corrected control from drifting back.
+name = "R15b - the contaminated control is refused by the fiction rule"
+file = "src/bullet_api/worker/identity_key.py"
+find = "    return len(national) == 10 and national[3:6] == \"555\" and national[6:8] == \"01\"\n"
+replace = "    return False\n"
+must_fail = "tests/test_identity_key.py::TestTenDigitPlaceholdersCannotCorroborate::test_the_contaminated_control_is_refused_by_the_fiction_rule"

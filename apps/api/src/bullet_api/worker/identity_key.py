@@ -1218,6 +1218,102 @@ def _is_repeating_pair(digits: str) -> bool:
     return all(ch == digits[index % 2] for index, ch in enumerate(digits))
 
 
+# ---------------------------------------------------------------------------
+# Round 15, second pass: three more filler shapes, each gated on a corpus.
+#
+# THE MEASUREMENT THAT PROMPTED THEM. Eight of twenty-four ten-digit
+# placeholder shapes passed the two rules above and CORROBORATED bar 2 - two
+# unrelated clients whose phone field held the same placeholder linked. That
+# is the merge direction, and it was pre-existing (identical at `baf52c7`),
+# not introduced by this round.
+#
+# WHAT IT IS NOT. It is not the 9-vs-10 digit window: measured, ZERO of the
+# eight are caused by the tail dropping a digit - the two rules fire on
+# neither the full national nor its nine-digit tail, so widening the window
+# closes none of them.
+#
+# WHY NOT REUSE `_digits_are_low_entropy`, the postcode side's richer set:
+# measured, it refuses 8 of 12 real numbers and 5.5% of 3,000 generated GB
+# landlines, including "+44 20 7700 0000" - which is round 5's own example of
+# this check wrongly rejecting real UK landlines. It would reintroduce the
+# defect it closes.
+#
+# EACH RULE BELOW SHIPPED ONLY AT ZERO FALSE REFUSALS over that same 3,000
+# landline corpus. A rule that needed tuning to squeak under would be
+# enumerating by another name, and would have been carded instead.
+#
+# THE UNKNOWN CASE STILL CORROBORATES. These enumerate the DENY side, so a
+# filler shape nobody has seen yet remains usable - the merge direction. Three
+# of the eight are still open for exactly that reason and are carded rather
+# than described as closed.
+
+
+def _is_nanp_fiction_number(national: str) -> bool:
+    """True for the NANP 555-01XX range, reserved for fictional use.
+
+    A SPEC FACT rather than a heuristic: the North American Numbering Plan
+    administrator reserves 555-0100 through 555-0199 as never-assignable, for
+    use in film, television and documentation. No real subscriber can hold
+    one, so refusing it cannot cost a real client a link.
+
+    Scoped to ten-digit nationals, which is the NANP's own length, so a GB or
+    IE number cannot reach the exchange/line offsets this indexes.
+    """
+    return len(national) == 10 and national[3:6] == "555" and national[6:8] == "01"
+
+
+def _is_repeated_block(digits: str) -> bool:
+    """True when the run is k >= 2 exact repetitions of an n-digit block.
+
+    The general form of `_is_repeating_pair`, which is this rule at n == 2.
+    Both are kept: for the 9-digit tails this module actually compares, 9 is
+    odd, so a 2-cycle is never an exact repetition and only the pair rule sees
+    it. Neither subsumes the other at the lengths in play.
+
+    Catches "231231231" (the tail of "1231231231") and every other cycle a
+    keyboard walk produces. Zero false refusals over the landline corpus.
+    """
+    length = len(digits)
+    for block in range(1, length // 2 + 1):
+        if length % block == 0 and digits == digits[:block] * (length // block):
+            return True
+    return False
+
+
+def _is_mirrored(digits: str) -> bool:
+    """True when the WHOLE number reads the same in both directions.
+
+    APPLIED TO THE FULL NATIONAL ONLY, never to the truncated tail, and the
+    difference is the whole rule. Measured: on the 9-digit tail this refuses
+    real landlines - "+44 20 7440 4470" has national "2074404470", which is
+    NOT a palindrome, while its tail "074404470" IS. That palindrome is an
+    artefact of where the window was cut, not a property of the number.
+    Restricted to the full national the same corpus yields zero false
+    refusals, and both measured mirror shapes are still caught.
+
+    The six-digit floor keeps short national numbers out of range, where a
+    coincidental mirror is ordinary rather than filler.
+    """
+    return len(digits) >= 6 and digits == digits[::-1]
+
+
+def _is_filler_number(national: str) -> bool:
+    """Every filler rule, applied to the window each one is valid on.
+
+    One place, so the parsed path and the raw fallback cannot drift apart -
+    round 15's first pass split them and left the parsed side unguarded for a
+    whole round.
+    """
+    tail = national[-_PHONE_SIGNIFICANT_DIGITS:]
+    if _is_repeating_pair(tail) or _is_sequential_digits(tail):
+        return True
+    if _is_nanp_fiction_number(national):
+        return True
+    if _is_repeated_block(national) or _is_repeated_block(tail):
+        return True
+    return _is_mirrored(national)
+
+
 def normalize_phone(phone: str | None) -> str:
     """Reduce a phone number to a FILLER-CHECKABLE stem, or "" if unusable.
 
@@ -1282,10 +1378,9 @@ def normalize_phone(phone: str | None) -> str:
         str(national) for _, national, _ in readings if len(str(national)) >= _PHONE_MIN_DIGITS
     ]
     if nationals:
-        tails = [n[-_PHONE_SIGNIFICANT_DIGITS:] for n in nationals]
-        if any(_is_repeating_pair(t) or _is_sequential_digits(t) for t in tails):
+        if any(_is_filler_number(n) for n in nationals):
             return ""
-        return tails[0]
+        return nationals[0][-_PHONE_SIGNIFICANT_DIGITS:]
     # Unparseable by every candidate region: fall back to the raw digits so a
     # malformed field is still filler-checked rather than waved through.
     digits = _NON_DIGIT.sub("", phone)
@@ -1303,7 +1398,7 @@ def normalize_phone(phone: str | None) -> str:
     # `_is_sequential_digits` catches it (and every rotation) by SHAPE; the
     # denylist it obsoleted is deleted (round 7 - every member was sequential,
     # so the membership check was dead code that could not fail a test).
-    if _is_repeating_pair(tail) or _is_sequential_digits(tail):
+    if _is_filler_number(digits):
         return ""
     return tail
 

@@ -16,6 +16,7 @@ from bullet_api.worker.identity_key import (
     LEGAL_ENTITY_PLACEHOLDER,
     PostcodeConfidence,
     _digits_are_low_entropy,
+    _is_mirrored,
     _is_recognised_format,
     _is_repeating_pair,
     _is_sequential_digits,
@@ -362,6 +363,125 @@ class TestSequentialDigitFiller:
         # source comment cites - computed here so the claim cannot go stale.
         assert "1234567890"[-9:] == "234567890"
         assert corroborating_signal_agrees(phone_a="1234567890", phone_b="1234567890") is False
+
+
+class TestTenDigitPlaceholdersCannotCorroborate:
+    """Round 15 second pass: the merge-direction gap the 8-shape probe found.
+
+    Eight of twenty-four ten-digit placeholder shapes passed the two original
+    filler rules and CORROBORATED bar 2 - two unrelated clients holding the
+    same placeholder linked. Pre-existing, identical at `baf52c7`, and NOT
+    caused by the nine-digit window: measured, zero of the eight are caught by
+    either rule at either length, so widening the window closes none of them.
+
+    Reusing the postcode side's `_digits_are_low_entropy` was measured and
+    rejected - it refuses 8 of 12 real numbers and 5.5% of 3,000 generated GB
+    landlines, including "+44 20 7700 0000", which is round 5's own example of
+    this check wrongly rejecting real landlines.
+
+    Five are closed by three rules, each of which shipped only at ZERO false
+    refusals over that corpus. Three remain open and are carded; they are
+    asserted here as OPEN so the residual cannot quietly change size.
+    """
+
+    @pytest.mark.parametrize(
+        ("value", "rule"),
+        [
+            ("5555550100", "nanp_fiction"),
+            ("2125550100", "nanp_fiction"),
+            ("1231231231", "repeated_block"),
+            ("1234554321", "mirrored"),
+            ("9876556789", "mirrored"),
+        ],
+        ids=["fiction_bare", "fiction_area", "cycle", "mirror_even", "mirror_desc"],
+    )
+    def test_the_placeholder_is_refused_and_cannot_corroborate(self, value: str, rule: str) -> None:
+        # Both halves matter: an unusable stem is what makes bar 2 abstain, and
+        # bar 2 abstaining is what stops two clients sharing the placeholder
+        # from linking. Asserting only the stem would leave the merge untested.
+        assert normalize_phone(value) == ""
+        assert corroborating_signal_agrees(phone_a=value, phone_b=value) is False
+
+    @pytest.mark.parametrize("value", ["1122334455", "1002003001", "0000000012"])
+    def test_the_carried_residual_is_still_open(self, value: str) -> None:
+        # DELIBERATELY ASSERTS THE GAP. These three are not closed: the rules
+        # that would catch them are the ones measured to refuse real landlines.
+        # Pinning them means the residual is a fixed, known set rather than a
+        # vague "some shapes" - if a future change closes one, this test fails
+        # and the card gets updated instead of the disclosure going stale.
+        assert normalize_phone(value) != ""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "+44 20 7946 0018",
+            "020 7000 0000",
+            "0800 100 1000",
+            "+44 161 200 2000",
+            "+44 20 7700 0000",
+            "+44 121 496 0000",
+            "+1 312 867 5309",
+        ],
+    )
+    def test_real_numbers_are_untouched(self, value: str) -> None:
+        # The control the five refusals are worthless without, and the reason
+        # `_digits_are_low_entropy` was rejected: "+44 20 7700 0000" is round
+        # 5's example, and it must stay usable.
+        assert normalize_phone(value) != ""
+
+    def test_the_fiction_range_is_bounded_at_its_published_edge(self) -> None:
+        # 555-0100 to 555-0199 is the reserved block. 555-0200 is outside it
+        # and must stay usable, so the rule is the published range rather than
+        # "any 555 number".
+        assert normalize_phone("+1 312 555 0199") == ""
+        assert normalize_phone("+1 312 555 0200") != ""
+
+    @pytest.mark.parametrize(
+        ("number", "national", "tail"),
+        [
+            ("+44 20 7440 4470", "2074404470", "074404470"),
+            ("+44 20 7811 1870", "2078111870", "078111870"),
+        ],
+        ids=["phantom_mirror_1", "phantom_mirror_2"],
+    )
+    def test_a_phantom_mirror_in_the_truncated_tail_does_not_refuse(
+        self, number: str, national: str, tail: str
+    ) -> None:
+        # THE BOUNDARY OF THE SCOPE CORRECTION, pinned so it cannot silently
+        # revert. `_is_mirrored` reads the FULL national, never the truncated
+        # tail, because truncating MANUFACTURES mirrors the number does not
+        # have: both of these are real GB landlines whose 9-digit tail is a
+        # palindrome while the national is not. Reading the tail refused them
+        # (measured: 2 false refusals per 3,000 generated landlines); reading
+        # the national refuses none. A mirror is a property of a number, so
+        # asking whether an arbitrary window of it mirrors is incoherent on
+        # its own terms - the same reasoning as measuring the parsed national
+        # rather than a raw digit window.
+        assert _is_mirrored(tail) is True
+        assert _is_mirrored(national) is False
+        assert normalize_phone(number) != ""
+
+    def test_the_contaminated_control_is_refused_by_the_fiction_rule(self) -> None:
+        # "+1 312 555 0114" was used across this suite and in the round-15
+        # measurements as a REAL number. It is not one: 555-0100 to 555-0199 is
+        # reserved by the NANP administrator for fictional use and is never
+        # assignable. The rule refusing it is the rule working, and the control
+        # set was contaminated - found by the new rule, not before it.
+        assert normalize_phone("+1 312 555 0114") == ""
+        assert (
+            corroborating_signal_agrees(phone_a="+1 312 555 0114", phone_b="+1 312 555 0114")
+            is False
+        )
+
+    def test_the_substitute_control_is_assignable_shaped(self) -> None:
+        # The replacement must be a number the spec CAN assign, or the control
+        # set is contaminated again in the other direction. "+1 312 867 5309"
+        # is area 312 with exchange 867: not 555, not an N11 service code, so
+        # it is an assignable NANP shape and must stay usable.
+        national = "3128675309"
+        assert national[3:6] != "555"
+        assert national[3:6] not in {"211", "311", "411", "511", "611", "711", "811", "911"}
+        assert normalize_phone("+1 312 867 5309") != ""
 
 
 class TestBothFillerCheckPathsRefuse:
