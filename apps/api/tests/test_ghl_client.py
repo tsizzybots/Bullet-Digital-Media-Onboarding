@@ -256,13 +256,16 @@ class TestTwoxxParseGuard:
         # ROUND 15 - the same guard, on the same class of failure, in the same
         # file. Raised twice by the reviewer and deferred twice.
         #
-        # This one is WORSE than the create-path version it mirrors: the lookup
-        # runs BEFORE the POST on every attempt, so a bare `ValueError` here is
-        # classified retriable and burns the entire retry budget on a request
-        # that cannot heal - and the create path is never reached at all.
+        # RETARGETED IN ROUND 16. It asserted `GhlClientError`, mirroring the
+        # create path. That mirror was the error: round 15 copied a
+        # classification that exists to bound a SIDE EFFECT onto a read-only
+        # GET, which has none. The reviewer's P2 reversed it, so the guard now
+        # raises `GhlServerError` and the signing retries through a WAF blip
+        # instead of dead-lettering on it. The typed-error assertion - the
+        # thing the round-15 guard actually bought - is unchanged.
         transport = _transport(200, "<html>WAF interstitial</html>")
         client = HttpGhlClient(api_key="agency-key", transport=transport)
-        with pytest.raises(GhlClientError) as excinfo:
+        with pytest.raises(GhlServerError) as excinfo:
             await client.find_location_by_email("ops@example.com", company_id="comp_1")
         assert "could not be parsed" in str(excinfo.value)
 
@@ -272,6 +275,52 @@ class TestTwoxxParseGuard:
         transport = _transport(200, {"locations": [], "traceId": "t-1"})
         client = HttpGhlClient(api_key="agency-key", transport=transport)
         assert await client.find_location_by_email("ops@example.com", company_id="comp_1") is None
+
+    async def test_the_lookup_2xx_missing_id_is_retriable(self) -> None:
+        # ROUND 16, P1.2 - the mirror of `test_2xx_missing_id_is_non_retriable`
+        # on the lookup, and the reason this class needed a second look. Round
+        # 15's guard stopped one line short: `response.json()` and the
+        # `locations` lookup were inside the try, but `locations[0]` and
+        # `hit["id"]` were not. A hit carrying `locationId` instead of `id`
+        # raised a bare `KeyError` straight past the guard - and a bare
+        # exception is not classified at all, which is the failure mode the
+        # guard exists to remove.
+        transport = _transport(200, {"locations": [{"name": "Sample Gym", "locationId": "loc_1"}]})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlServerError) as excinfo:
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+        assert "could not be parsed" in str(excinfo.value)
+
+    async def test_the_lookup_2xx_with_locations_as_a_mapping_is_retriable(self) -> None:
+        # `body.get("locations") or []` keeps a non-empty MAPPING, because a
+        # mapping is truthy. `locations[0]` then raises `KeyError(0)` - outside
+        # the round-15 try.
+        transport = _transport(200, {"locations": {"id": "loc_1"}})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlServerError):
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+
+    async def test_the_lookup_2xx_with_string_items_is_retriable(self) -> None:
+        # A list of bare id strings indexes as `"loc_1"["id"]` -> `TypeError`,
+        # the third shape that escaped the round-15 try.
+        transport = _transport(200, {"locations": ["loc_1"]})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlServerError):
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+
+    async def test_the_create_and_the_lookup_classify_an_unparseable_2xx_OPPOSITELY(self) -> None:
+        # The asymmetry stated as an assertion rather than only in the two
+        # docstrings, so a later "consistency" tidy-up that unifies them has to
+        # delete a test to do it. Same body, same status, two verdicts:
+        # the lookup is READ-ONLY (retriable), the create is not (one orphan at
+        # most).
+        body = "<html>WAF interstitial</html>"
+        client = HttpGhlClient(api_key="agency-key", transport=_transport(200, body))
+        with pytest.raises(GhlServerError):
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+        client = HttpGhlClient(api_key="agency-key", transport=_transport(200, body))
+        with pytest.raises(GhlClientError):
+            await client.create_location({"name": "Sample Gym", "companyId": "comp_1"})
 
 
 class TestTransportLevelErrors:

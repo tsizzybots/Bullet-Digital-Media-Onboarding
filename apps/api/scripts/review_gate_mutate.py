@@ -17,6 +17,16 @@ Three outcomes per mutation:
     UNPROVEN  the test skipped (needs Postgres) - NOT a pass; a skipped test
               cannot fail, and treating skips as green is exactly what let two
               review rounds ship
+    ERROR     the run did not answer the question - a stale `find`, a `must_fail`
+              naming a test that no longer exists, a red baseline, a timeout, or
+              a mutation that does not compile
+
+ONE FAMILY, TWO ENTRY POINTS. "Prove the probe" (round 15) says a measurement
+claiming no change must first demonstrate it can detect a change. The
+compile-before-mutate check (round 16) says a mutation claiming to break a guard
+must first be capable of running at all. Both exist because an instrument whose
+null result is indistinguishable from its own brokenness reports green either
+way - and both were added after this project shipped exactly that.
 
 The file is always restored, including on interrupt or crash.
 """
@@ -188,8 +198,35 @@ def _apply(path: Path, find: str, replace: str) -> tuple[str, str] | str:
         # land on a different site than the one the entry names while still
         # reporting KILLED.
         return f"pattern is ambiguous ({occurrences} occurrences) - make it unique"
-    path.with_suffix(path.suffix + SIDECAR_SUFFIX).write_text(original)
     mutated = original.replace(find, replace, 1)
+    # THE MUTATION MUST COMPILE (round 16). A `replace` that produces invalid
+    # Python answers nothing: the module cannot be imported, so pytest exits 4
+    # with "found no collectors" and the entry reports ERROR for a reason that
+    # has nothing to do with the guard it names. This runner's own author
+    # shipped one - a replacement that re-indented a block out of its `try` and
+    # left the trailing `except` orphaned - and the only thing that stopped it
+    # being scored as a kill was the exit-code table in
+    # `_classify_pytest_result`. Checking here converts a confusing "no
+    # collectors" into the actual problem, and refuses BEFORE writing anything,
+    # so a broken mutation never reaches the working tree.
+    #
+    # SAME FAMILY AS "PROVE THE PROBE", entered from the other side. That rule
+    # says a measurement claiming no change must first demonstrate it can detect
+    # a change. This one says a mutation claiming to break a guard must first be
+    # capable of running at all. Both are the same failure: an instrument whose
+    # null result is indistinguishable from its own brokenness.
+    #
+    # Scoped to `.py` because manifest entries legitimately target SQL, TOML and
+    # YAML, and a blanket `compile()` would refuse every one of them.
+    if path.suffix == ".py":
+        try:
+            compile(mutated, str(path), "exec")
+        except SyntaxError as exc:
+            return (
+                f"the mutation does not compile ({exc.msg}, line {exc.lineno}) - "
+                "a mutation that cannot be imported proves nothing about the guard"
+            )
+    path.with_suffix(path.suffix + SIDECAR_SUFFIX).write_text(original)
     _atomic_write(path, mutated)
     return original, mutated
 

@@ -95,7 +95,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.config import get_settings
 from bullet_api.db.enums import CURRENT_STEP_SIGNED, DOCUMENT_KIND_TRANSCRIPT_TEXT
-from bullet_api.db.session import AsyncSessionLocal
+from bullet_api.db.session import WorkerSessionLocal
 from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, api_key_for
 from bullet_api.pandadoc.client import HttpPandaDocClient, PandaDocClient, PandaDocNotFound
 from bullet_api.transcripts.linking import (
@@ -573,7 +573,7 @@ async def create_client_record(ctx: inngest.Context) -> dict:
     # during PandaDoc HTTP latency.
     document = await fetch_document_for_orchestrator(pandadoc_client, document_id)
 
-    async with AsyncSessionLocal() as session:
+    async with WorkerSessionLocal() as session:
         try:
             result = await create_client_record_core(
                 session,

@@ -427,6 +427,50 @@ class TestMutateRunnerFlowGuards:
         outcome = review_gate_mutate._apply(target, "guard()", "pass")
         assert isinstance(outcome, str) and "stale" in outcome
 
+    def test_apply_refuses_a_mutation_that_does_not_compile(self, tmp_path) -> None:
+        # ROUND 16. A mutation whose result is not valid Python answers NOTHING:
+        # the module cannot be imported, pytest exits 4 with "found no
+        # collectors", and the entry reports ERROR for a reason that has nothing
+        # to do with the guard. This runner's own author shipped one - a
+        # `replace` that re-indented a block out of its `try` and left the
+        # trailing `except` orphaned - and only the exit-4 handling stopped it
+        # being read as a kill.
+        #
+        # Same family as "prove the probe", entered from the other side. There,
+        # a measurement claiming no change had to first demonstrate it could
+        # detect a change. Here, a mutation claiming to break a guard has to
+        # first be capable of running at all.
+        target = tmp_path / "mod.py"
+        target.write_text(
+            "def f():\n    try:\n        return 1\n    except Exception:\n        raise\n"
+        )
+        outcome = review_gate_mutate._apply(target, "        return 1\n", "    return 1\n")
+        assert isinstance(outcome, str) and "does not compile" in outcome
+        # And the source is left ALONE. A refusal that had already written the
+        # broken file would leave the working tree mutated on an entry the
+        # runner never ran.
+        assert target.read_text() == (
+            "def f():\n    try:\n        return 1\n    except Exception:\n        raise\n"
+        )
+
+    def test_apply_allows_a_mutation_that_compiles(self, tmp_path) -> None:
+        # The mirror worth pinning: the syntax check must not refuse a perfectly
+        # good mutation, or every guard in the manifest reports ERROR.
+        target = tmp_path / "mod.py"
+        target.write_text("def f():\n    return guard()\n")
+        outcome = review_gate_mutate._apply(target, "guard()", "None")
+        assert not isinstance(outcome, str)
+        assert target.read_text() == "def f():\n    return None\n"
+
+    def test_apply_does_not_syntax_check_a_non_python_target(self, tmp_path) -> None:
+        # Manifest entries may point at non-Python files (SQL, TOML, YAML). A
+        # blanket `compile()` would refuse every one of them.
+        target = tmp_path / "schema.sql"
+        target.write_text("SELECT 1;\n")
+        outcome = review_gate_mutate._apply(target, "SELECT 1;", "SELECT 2;")
+        assert not isinstance(outcome, str)
+        assert target.read_text() == "SELECT 2;\n"
+
     def test_restore_refuses_to_clobber_a_concurrent_edit(self, tmp_path) -> None:
         target = tmp_path / "mod.py"
         target.write_text("the operator edited this mid-run\n")

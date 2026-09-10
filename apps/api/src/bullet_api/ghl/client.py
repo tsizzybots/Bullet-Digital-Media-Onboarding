@@ -13,8 +13,12 @@ retriable vs not):
 - `GhlClientError` (4xx) - bad payload, bad/expired auth, validation
   failure. Retrying the same request will not fix it, so the worker
   wraps this in `inngest.NonRetriableError`.
-- `GhlServerError` (5xx / 429) - GHL is down, rate-limiting, or timing
-  out. Transient; the worker lets it propagate so Inngest retries.
+- `GhlServerError` (5xx / 429, plus an unparseable 2xx on the read-only
+  location lookup) - GHL is down, rate-limiting, timing out, or a CDN sat an
+  interstitial in front of a GET. Transient; the worker lets it propagate so
+  Inngest retries. The create path classifies the SAME unparseable 2xx as
+  `GhlClientError`, because retrying a POST that may already have created a
+  location mints one orphan per attempt.
 - `GhlNotConfiguredError` - the agency API key is empty, so no call is
   possible. Non-retriable. It has its own type rather than a bare
   `RuntimeError` because `httpx.StreamError` IS a `RuntimeError`, so a
@@ -51,6 +55,18 @@ GHL_API_VERSION = "2021-07-28"
 # Everything else in the 4xx range means the request itself is wrong and will
 # keep failing, so it stays non-retriable.
 _RETRIABLE_STATUS = frozenset({401, 403, 408, 429})
+
+# Every way a 2xx body can fail to yield the fields we need, spelled ONCE so the
+# two parse guards cannot drift (round 16, P1.2 - they had already drifted:
+# create caught KeyError, the lookup caught AttributeError, and neither caught
+# the other's). `ValueError` covers `json.JSONDecodeError`; `KeyError` a missing
+# field or an integer index into a mapping; `IndexError` an empty sequence that
+# passed the truthiness check; `TypeError` and `AttributeError` a value of the
+# wrong shape entirely (a string where an object was expected, a list where a
+# mapping was). The tuple is deliberately broad: an unclassified bare exception
+# reaching the Inngest wrapper is the failure both guards exist to prevent, and
+# a body we cannot parse is by definition one whose shape we do not know.
+_PARSE_FAILURES = (ValueError, KeyError, IndexError, AttributeError, TypeError)
 
 
 @dataclass(frozen=True)
@@ -120,6 +136,12 @@ class GhlServerError(GhlError):
 
     Retriable: the worker lets this propagate so Inngest retries with
     backoff.
+
+    Also raised for an unparseable 2xx on the READ-ONLY location lookup (round
+    16): no side effect to protect, and a CDN or WAF interstitial is transient.
+    The create path raises `GhlClientError` for the same body, because a retry
+    there mints an orphan. `status_code` therefore carries the 2xx on that one
+    path rather than a 5xx.
     """
 
     def __init__(self, status_code: int, body: str) -> None:
@@ -136,6 +158,12 @@ class GhlClient(Protocol):
         optional `phone` / `prospectInfo` / `snapshotId`). Returns the new
         location projected to id / name / company_id. Raises GhlClientError
         on 4xx and GhlServerError on 5xx/429.
+
+        A 2xx whose body cannot be parsed raises GhlClientError, i.e. NON-
+        retriable, which is the opposite of `find_location_by_email`'s verdict
+        on the identical body. The asymmetry is the side effect: by the time a
+        2xx arrives here the location probably exists, so each retry mints
+        another orphan.
         """
         ...
 
@@ -154,6 +182,12 @@ class GhlClient(Protocol):
         exists for the email. "No match" is a normal answer, NOT an error.
         Raises GhlClientError on 4xx and GhlServerError on 5xx/429, same
         split as `create_location`.
+
+        A 2xx whose body cannot be parsed raises GhlServerError, i.e.
+        RETRIABLE, which is the opposite of `create_location`'s verdict on the
+        identical body. The asymmetry is the side effect: this call is
+        read-only, so a retry costs nothing and the likeliest cause of an
+        unparseable 2xx on a GET is a transient CDN or WAF interstitial.
         """
         ...
 
@@ -207,7 +241,14 @@ class HttpGhlClient:
             try:
                 body = response.json()
                 location_id = str(body["id"])
-            except (ValueError, KeyError, TypeError) as exc:
+            except _PARSE_FAILURES as exc:
+                # NON-RETRIABLE, and deliberately the OPPOSITE of the lookup's
+                # verdict on the identical body (round 16, P1.2). This method
+                # has already had its side effect by the time the 2xx arrives:
+                # the location probably exists. Retrying mints one orphan per
+                # attempt, so a shape mismatch dead-letters at one orphan and a
+                # human reconciles. `find_location_by_email` is read-only, so
+                # the same body there costs nothing to retry - see its docstring.
                 raise GhlClientError(
                     response.status_code,
                     "2xx create-location response could not be parsed "
@@ -268,32 +309,55 @@ class HttpGhlClient:
             # twice by the reviewer and deferred twice.
             #
             # A 2xx carrying a CDN or WAF interstitial is not JSON, so
-            # `response.json()` raised a bare `ValueError`. The wrapper reads
-            # that as RETRIABLE, and a shape mismatch cannot heal on retry, so
-            # the signing burned its whole retry budget on a deterministically
-            # failing request. Worse than the create-path version of this bug:
-            # this lookup runs BEFORE the POST on every attempt, so the create
-            # path was never reached at all.
+            # `response.json()` raised a bare `ValueError` - unclassified, which
+            # is what made it dangerous: this lookup runs BEFORE the POST on
+            # every attempt, so an uncontrolled failure here means the create
+            # path is never reached at all.
+            #
+            # ROUND 15 ALSO CHOSE THE WRONG CLASSIFICATION, and round 16 reversed
+            # it. Round 15 raised `GhlClientError` here to mirror the create
+            # path, reasoning that "a shape mismatch cannot heal on retry". That
+            # reasoning was borrowed from a method with a side effect and does
+            # not survive the move: see the except clause below.
+            #
+            # THE WHOLE PARSE IS INSIDE THE TRY (round 16, P1.2). Round 15 wrapped
+            # `response.json()` and the `locations` lookup and stopped one line
+            # short: `locations[0]` and `hit["id"]` sat outside it, so the three
+            # shapes that actually differ between a real hit and a malformed one
+            # - a hit keyed `locationId` instead of `id` (KeyError), `locations`
+            # arriving as a mapping (KeyError(0)), a list of bare id strings
+            # (TypeError) - each raised BARE, past a guard whose entire purpose
+            # was to stop bare exceptions from reaching the wrapper unclassified.
             try:
                 body = response.json()
                 locations = body.get("locations") or []
-            except (ValueError, AttributeError, TypeError) as exc:
-                raise GhlClientError(
+                if not locations:
+                    return None
+                hit = locations[0]
+                location = GhlLocation(
+                    id=str(hit["id"]),
+                    name=hit.get("name", ""),
+                    company_id=str(hit.get("companyId", "")),
+                    raw=hit,
+                )
+            except _PARSE_FAILURES as exc:
+                # RETRIABLE, and deliberately the OPPOSITE of `create_location`'s
+                # verdict on the identical body (round 16, P1.2). This method is
+                # READ-ONLY: it has no side effect to protect, so nothing is lost
+                # by trying again, and the likeliest cause of an unparseable 2xx
+                # on a GET is a CDN or WAF interstitial, which is transient. The
+                # create path stays non-retriable because a retry there mints an
+                # orphan. A genuinely permanent shape change still dead-letters,
+                # just via Inngest's retry budget instead of instantly - the same
+                # trade `_RETRIABLE_STATUS` already makes for 401/403.
+                raise GhlServerError(
                     response.status_code,
                     "2xx location-search response could not be parsed "
-                    f"({type(exc).__name__}); the lookup runs before every create, so "
-                    f"a retriable classification here burns the whole budget: "
+                    f"({type(exc).__name__}); the lookup is read-only, so this is "
+                    f"retriable - a WAF or CDN interstitial is transient: "
                     f"{response.text[:500]}",
                 ) from exc
-            if not locations:
-                return None
-            hit = locations[0]
-            return GhlLocation(
-                id=str(hit["id"]),
-                name=hit.get("name", ""),
-                company_id=str(hit.get("companyId", "")),
-                raw=hit,
-            )
+            return location
         # A 404 on the search endpoint means "no such resource", which we
         # treat as "no existing location" rather than a hard error.
         if response.status_code == 404:

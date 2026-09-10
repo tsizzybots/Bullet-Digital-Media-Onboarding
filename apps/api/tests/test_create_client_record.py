@@ -828,7 +828,7 @@ async def test_schema_drift_stays_retriable_and_logs_no_bind_params(
         raise drift
 
     monkeypatch.setattr(module, "fetch_document_for_orchestrator", _fake_fetch)
-    monkeypatch.setattr(module, "AsyncSessionLocal", _fake_session_cm)
+    monkeypatch.setattr(module, "WorkerSessionLocal", _fake_session_cm)
     monkeypatch.setattr(module, "create_client_record_core", _raising_core)
 
     ctx = Mock()

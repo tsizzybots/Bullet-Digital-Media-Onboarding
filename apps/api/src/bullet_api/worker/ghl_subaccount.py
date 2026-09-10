@@ -161,7 +161,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.config import get_settings
-from bullet_api.db.session import AsyncSessionLocal
+from bullet_api.db.session import WorkerSessionLocal
 from bullet_api.ghl.client import (
     GhlClient,
     GhlClientError,
@@ -1158,6 +1158,18 @@ async def create_ghl_subaccount_core(
     )
     await session.commit()
 
+    # WHY A LOCAL AND NOT `begun.already_succeeded` (round 16, P1.1). The flag on
+    # `begun` is a snapshot of the row as it was claimed, and reaching this
+    # function with it True means exactly ONE thing: the torn state (the
+    # already-provisioned short-circuit above returns before `begun` is bound
+    # whenever the client row holds an id). The torn branch below decides
+    # whether that recorded success is a durable fact - it is when the action
+    # row still carries the id, and it is NOT when the id is gone from both
+    # places and the run falls through to re-POST. Only that branch knows, so
+    # the decision it makes is written HERE, and `_record_failure` reads the
+    # decision rather than re-deriving it from a flag that cannot express it.
+    treat_as_succeeded = begun.already_succeeded
+
     async def _record_failure(exc: Exception) -> None:
         # Record ANY failure after the committed `in_progress` row - the dedup
         # lock, the sibling scan, the GHL lookup or the create call - as
@@ -1224,7 +1236,14 @@ async def create_ghl_subaccount_core(
         # ambiguous one at every caller to re-state a claim only the caller has
         # the information to make. `fail_action`'s docstring carries the
         # contract that replaced it; this is this caller discharging it.
-        if begun.already_succeeded:
+        #
+        # READS `treat_as_succeeded`, NOT `begun.already_succeeded` (round 16,
+        # P1.1). The two differ on exactly one path - the torn action whose id
+        # is gone from the action row as well as the client row - and on that
+        # path this check was declining to record the RE-RUN's failures, so a
+        # GHL outage after the fall-through left a permanently green action for
+        # a client with no sub-account. See the rebind in the torn branch.
+        if treat_as_succeeded:
             log.warning(
                 "S1-25 GHL sub-account failure after a completed action - not overwriting",
                 extra={
@@ -1544,11 +1563,34 @@ async def create_ghl_subaccount_core(
         # this path only runs with a NULL id on the loaded row.
         # The action row recorded the id even though the write-back to `clients`
         # did not land. Recover it and repair the row rather than re-POSTing.
-        # GUARDED (round 15). The torn-action repair writes to `clients` and
-        # commits after the committed `in_progress` row; unguarded, a failure
-        # here strands the action with no `last_error`. Same class as the reuse
-        # branch, and the reviewer named it as pre-existing. Idiom copied
-        # VERBATIM - improvements go on the extraction card (S1-26l).
+        #
+        # THE RECORDED SUCCESS STOPS BEING TREATED AS DURABLE FROM HERE (round
+        # 16, P1.1). Reaching this branch means the client row has no id, so
+        # the only thing that could still make the success a durable fact is an
+        # id on the action row - and whether it is there is decided below, not
+        # here. Everything from this point either repairs that id and returns,
+        # or falls through to re-POST; a failure of EITHER must be recorded, or
+        # the run reports a green action for a client with no sub-account.
+        #
+        # This does not disarm the terminal-success check generally. The
+        # `_record_failure` call sites ABOVE this branch - the phase-1 lock and
+        # sibling scan, the collision flag, the reuse-branch repairs, the
+        # payload commit - still decline to overwrite, and must: they fail
+        # without having touched the recorded id, so the next redelivery still
+        # reaches this repair and heals cleanly with no GHL call at all.
+        treat_as_succeeded = False
+        # GUARDED (round 15), AND THE GUARD ONLY BEGAN RECORDING IN ROUND 16.
+        # The torn-action repair writes to `clients` and commits after the
+        # committed `in_progress` row; unguarded, a failure here strands the
+        # action with no `last_error`. Round 15 added the wrap and stated that
+        # outcome as achieved - but the wrap sits inside `if
+        # begun.already_succeeded:`, and `_record_failure` returned early on
+        # that same flag, so it wrote a log line and nothing else. Ninth
+        # instance of the guard-that-cannot-fire shape, shipped by the round
+        # that was cataloguing them. The rebind above is what makes the
+        # sentence true. Same class as the reuse branch, and the reviewer named
+        # it as pre-existing. Idiom copied VERBATIM - improvements go on the
+        # extraction card (S1-26l).
         try:
             recovered = (
                 await session.execute(
@@ -2097,7 +2139,7 @@ async def create_ghl_subaccount(ctx: inngest.Context) -> dict:
         version=settings.ghl_api_version,
     )
 
-    async with AsyncSessionLocal() as session:
+    async with WorkerSessionLocal() as session:
         try:
             result = await create_ghl_subaccount_core(
                 session,

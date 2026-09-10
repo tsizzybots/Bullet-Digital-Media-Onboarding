@@ -148,9 +148,11 @@ Added 25/08/2026. `apps/api/scripts/review_gate.py` (static) + `apps/api/scripts
 - **G5 no defaults on discriminating fixture params** - a fixture defaulting `phone`/`contact_*`/`address` makes every seeded row agree for free, pinning a matching bar open so mutating it to a constant passes the whole suite.
 - **G6 diff-scoped PII** - live ids / client emails counted against the merge base, net-new only.
 
-**The mutation manifest** (`make review-gate-db` runs it alone; needs Postgres): `apps/api/tests/mutation_manifest.toml`. **Every guard you add must declare the test that kills it.** The runner breaks the guard, runs only that test, and asserts it FAILS. Outcomes: `KILLED` (defended), `SURVIVED` (revert-green - a finding), `UNPROVEN` (the named test skipped, so it cannot prove anything - **not** a pass, and it fails the build), `ERROR` (the `find` pattern went stale, or `must_fail` names a test that no longer exists - both mean the guard is unprotected while looking guarded).
+**The mutation manifest** (`make review-gate-db` runs it alone; needs Postgres): `apps/api/tests/mutation_manifest.toml`. **Every guard you add must declare the test that kills it.** The runner breaks the guard, runs only that test, and asserts it FAILS. Outcomes: `KILLED` (defended), `SURVIVED` (revert-green - a finding), `UNPROVEN` (the named test skipped, so it cannot prove anything - **not** a pass, and it fails the build), `ERROR` (the run did not answer the question - the `find` pattern went stale, `must_fail` names a test that no longer exists, the baseline was already red, the test timed out, or **the mutation does not compile** - every one of them means the guard is unprotected while looking guarded).
 
 **The contract: a new guard without a manifest entry is not finished.** Adding an entry is a two-line diff. Skipping one has cost a review round every time.
+
+**Two rules about instruments, one family (round 15 and round 16).** *Prove the probe*: a measurement claiming "no change" must first demonstrate it can detect a change, or its null result is indistinguishable from its own brokenness. *Compile before mutate*: a mutation claiming to break a guard must first be capable of running at all - `_apply` now refuses a `replace` that produces invalid Python, because the module then cannot be imported, pytest exits 4, and only round 8's exit-code table stops that being scored as a kill. Both were added after this project shipped exactly the failure they now prevent.
 
 **What it cannot check**, and therefore goes in the PR body as answered questions:
 

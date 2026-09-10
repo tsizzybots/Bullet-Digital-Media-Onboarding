@@ -21,7 +21,9 @@ Card spec mandates:
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import pathlib
 import uuid
 from datetime import timedelta
 
@@ -52,12 +54,17 @@ from bullet_api.worker.ghl_subaccount import (
     GHL_SKIP_REASON_DB_SIBLING,
     ClientNotFoundError,
     _classify_ghl_hit,
+    _location_address,
     _location_phone,
     _location_postcode,
     create_ghl_subaccount,
     create_ghl_subaccount_core,
 )
-from bullet_api.worker.identity_key import compute_identity_key, identity_name
+from bullet_api.worker.identity_key import (
+    compute_identity_key,
+    identity_name,
+    normalize_postcode,
+)
 
 COMPANY_ID = "comp_agency_1"
 
@@ -2693,6 +2700,83 @@ async def test_db_error_while_flagging_still_records_the_action_failed(
     assert status.scalar_one() == "failed"
 
 
+class TestTheRealGhlSearchResponseShape:
+    """Round 16, item 4: the reviewer's question, answered with a real response.
+
+    The reviewer, verbatim: "can you grab a real GHL location-search response for
+    an existing location and paste it into the PR? We've never confirmed the
+    results include the postcode. If they don't, the reuse path is inert in
+    production and every client gets flagged."
+
+    Captured 10/09/2026 by `GET /locations/search` against Bullet's live agency,
+    the exact request `find_location_by_email` makes (same path, same two
+    headers, same three query params). The stored file is that response with
+    VALUES redacted and the SHAPE untouched: every key, every nesting level,
+    every type and every empty-vs-present distinction is byte-faithful to what
+    GHL returned, which is the only part the classifier reads. `postalCode`'s
+    value became "E8 1AA" so no client's address ships in the repo; its key,
+    position and type are the live ones.
+
+    The answer is NO, the reuse path is not inert: `postalCode` is present and
+    non-empty at the TOP LEVEL of a search-result item, and also under
+    `business`, so both readers in `_location_postcode` find it.
+
+    The `business` fallback in `_location_phone` is a different story and is
+    recorded in the round-16 disclosure rather than changed here: across the
+    five locations probed, `phone` appeared under `business` on ZERO of them, so
+    on search results that fallback is dead code inherited from the CREATE
+    response shape it was written for. Harmless (it reads top level first) but
+    not load-bearing, and it should not be described as covering search hits.
+    """
+
+    GOLDEN = pathlib.Path(__file__).parent / "golden" / "ghl_location_search_response.json"
+
+    def _hit(self) -> GhlLocation:
+        raw = json.loads(self.GOLDEN.read_text())["locations"][0]
+        return GhlLocation(
+            id=str(raw["id"]),
+            name=raw.get("name", ""),
+            company_id=str(raw.get("companyId", "")),
+            raw=raw,
+        )
+
+    def test_all_four_classifier_signals_are_reachable_on_a_real_hit(self) -> None:
+        hit = self._hit()
+        assert hit.name, "bar 1 reads GhlLocation.name"
+        assert _location_postcode(hit) == normalize_postcode("E8 1AA"), (
+            "THE REVIEWER'S QUESTION. A search result carries postalCode at the "
+            "top level; if this ever fails, the reuse leg has gone inert and "
+            "every name-matching returning client is flagged instead of linked"
+        )
+        assert _location_phone(hit) is not None, "bar 2 reads phone"
+        assert _location_address(hit) is not None, "bar 4 reads address"
+
+    def test_a_real_hit_can_still_reach_SAME_BUSINESS(self) -> None:
+        # The shape test above proves the fields are READABLE. This proves the
+        # verdict they produce is the one the reuse path needs, which is the
+        # part that would actually be inert. A returning client matching the
+        # located business on all four signals must link, not flag.
+        assert (
+            _classify_ghl_hit(
+                self._hit(),
+                client_name="REDACTED GYM",
+                client_postcode="E8 1AA",
+                client_phone="+44 7700 900000",
+                client_address="REDACTED",
+            )
+            == _GHL_HIT_SAME_BUSINESS
+        )
+
+    def test_the_envelope_is_the_shape_the_client_unwraps(self) -> None:
+        # `find_location_by_email` reads `body["locations"][0]`. Pinning the
+        # envelope separately means a GHL change that moves the array (to
+        # `data`, or to a paginated `{"items": ...}`) fails here with a legible
+        # reason rather than as a parse error inside the client.
+        body = json.loads(self.GOLDEN.read_text())
+        assert list(body) == ["locations", "traceId"]
+        assert isinstance(body["locations"], list) and len(body["locations"]) == 1
+
+
 @pytest.mark.db
 async def test_torn_action_with_no_id_anywhere_falls_through_and_self_heals(
     async_session: AsyncSession,
@@ -5294,7 +5378,12 @@ async def test_a_late_failure_cannot_erase_a_committed_success(
     await async_session.commit()
 
     async def _explode(session_arg: object, email: str) -> None:
-        raise GhlServerError("simulated lock failure on a torn redelivery")
+        # `GhlServerError(status_code, body)` - round 16 found this constructed
+        # with ONE argument, so what actually propagated was the `TypeError`
+        # from the constructor, not the error the test names. The path under
+        # test is unchanged (the lock site catches broad `Exception` either
+        # way) but the test was describing an injection it never made.
+        raise GhlServerError(503, "simulated lock failure on a torn redelivery")
 
     monkeypatch.setattr(ghl_subaccount_module, "_acquire_dedup_lock", _explode)
 
@@ -5455,19 +5544,22 @@ async def test_a_failure_in_the_torn_action_repair_lands_failed_not_stranded(
     location - the orphan-creation shape round 14's P1 was about. Two existing
     torn-state tests caught that miscut when it was made.
 
-    THE PRESCRIBED ASSERTION IS IMPOSSIBLE HERE, and the reason is structural
-    rather than a gap in the test. Regions 1, 2 and 4 assert the action lands
-    `failed`. This region sits INSIDE `if begun.already_succeeded:`, so by
-    construction the action is already `success` - and round 15's own
-    terminal-success guard then makes `_record_failure` decline to overwrite it.
-    Asserting `failed` would require the guard it was just given.
+    ROUND 16 RETARGET, AND THE REASON THE ROUND-15 REASONING WAS WRONG. This
+    docstring used to argue that the prescribed assertion - the action lands
+    `failed`, as regions 1, 2 and 4 all assert - was structurally impossible
+    here, because the region sits inside `if begun.already_succeeded:` and
+    round 15's terminal-success check made `_record_failure` decline to
+    overwrite. That was an accurate description of the code and the wrong
+    conclusion to draw from it: the argument concedes, in its own words, that
+    the guard round 15 had just added could not do the thing round 15 said it
+    did. The reviewer read it as the ninth guard-that-cannot-fire, which it was.
 
-    So what the guard actually buys here is the RECORD, not a status change: the
-    failure is logged against the action and the exception is re-raised, instead
-    of propagating with nothing written anywhere. That is what is asserted, and
-    it is a real kill - deleting the guard removes the log line. Asserting only
-    "status stays success" would pass with the guard deleted, which is the
-    harmless-path pin this round has already produced four times.
+    The success being protected here is not a durable fact. Reaching this
+    branch at all means `clients.ghl_subaccount_id` is NULL, so the run that
+    recorded `success` never finished - exactly the distinction `fail_action`'s
+    docstring says only the caller can make. The caller now makes it: the torn
+    branch rebinds `treat_as_succeeded = False`, and the region asserts what
+    its name always claimed.
     """
     client_id = await _seed_client(
         async_session,
@@ -5512,13 +5604,98 @@ async def test_a_failure_in_the_torn_action_repair_lands_failed_not_stranded(
 
     monkeypatch.undo()
     row = await _action_row(async_session, client_id)
-    # The committed success is preserved (round 15's terminal-success guard)...
-    assert row.status == "success"
-    # ...and the failure was RECORDED rather than propagating silently. This is
-    # the assertion that dies when the guard is removed.
-    assert any("failure after a completed action" in r.message for r in caplog.records), (
-        "the guard must route the failure through _record_failure, not let it propagate bare"
+    assert row.status == "failed", (
+        "the repair failed, so the action must say so - the success it is "
+        "overwriting was never durable, the client row has no id"
     )
+    assert row.last_error is not None
+    assert "simulated failure repairing the torn client row" in row.last_error
+    # The round-15 log line must NOT appear: it is the terminal-success check
+    # declining to record, which is precisely what round 16 removed from this
+    # region. Asserting its absence is what makes the rebind sole-killable -
+    # revert the rebind and this test fails on both assertions, not neither.
+    assert not any("failure after a completed action" in r.message for r in caplog.records), (
+        "_record_failure must not decline here - the recorded success carries "
+        "no id on the client row, so it is not a fact worth preserving"
+    )
+
+
+@pytest.mark.db
+async def test_a_torn_action_with_no_id_anywhere_records_the_re_runs_failure(
+    async_session: AsyncSession,
+) -> None:
+    """Round 16, P1.1 - the reviewer's trace, and the NINTH guard-that-cannot-fire.
+
+    The action says `success` and NEITHER the action row nor the client row
+    holds an id, so the recorded success is worthless and the code falls
+    through to re-run the create path. But `begun.already_succeeded` is still
+    True for the rest of the run, and `_record_failure` returns early on that
+    flag - so every failure of the re-run was declined. A GHL outage on the
+    re-run left the row `success`, `external_id` NULL, `last_error` NULL,
+    `retry_count` 0: a permanently green action for a client that has no
+    sub-account, which is the exact silent zombie this module forbids.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@torn-rerun.example.com",
+        business_name="Torn Rerun Gym",
+        legal_entity="Torn Rerun Gym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    first = await create_ghl_subaccount_core(
+        async_session,
+        FakeGhlClient(location=_ghl_location("loc_first_run"), lookup_result=None),
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert first.created is True
+
+    # Tear it BOTH ways - the id is gone from the action row as well as the
+    # client row, which is what distinguishes this from the repairable torn
+    # state the branch above handles.
+    await async_session.execute(
+        text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": client_id}
+    )
+    await async_session.execute(
+        text(
+            "UPDATE platform_actions SET external_id = NULL "
+            "WHERE client_id = :id AND action = :action"
+        ),
+        {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+    )
+    await async_session.commit()
+
+    with pytest.raises(GhlServerError):
+        await create_ghl_subaccount_core(
+            async_session,
+            FakeGhlClient(
+                error=GhlServerError(503, "GHL unavailable on the re-run"),
+                lookup_result=None,
+            ),
+            client_id=client_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    row = (
+        await async_session.execute(
+            text(
+                "SELECT status, last_error, external_id, retry_count "
+                "FROM platform_actions WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+    assert row.status == "failed", (
+        "the re-run's failure must be recorded - the success it fell through "
+        "from carried no id anywhere, so it is not a durable fact to protect"
+    )
+    assert row.last_error is not None
+    assert "GHL unavailable on the re-run" in row.last_error
+    assert row.retry_count == 1
+    assert row.external_id is None
 
 
 @pytest.mark.db

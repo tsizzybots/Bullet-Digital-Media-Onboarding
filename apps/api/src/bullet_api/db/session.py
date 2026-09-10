@@ -70,9 +70,51 @@ from bullet_api.config import get_async_database_url, get_settings
 # the lock against a ceiling production no longer has.
 ENGINE_SERVER_SETTINGS = {"statement_timeout": "5000"}
 
+# ----- POOL SIZES (S1-26b/c round 16) -----
+#
+# TWO POOLS, and the reason is one fan-out. `create_ghl_subaccount`'s phase 2
+# holds a pooled connection across two GHL calls, because the hold IS the
+# transaction-scoped advisory lock doing the serialising: committing to release
+# the connection would release the lock, reopening round 12's P1.4 cross-bucket
+# race. Every other worker either commits before its slow call
+# (`client_record`, `sales_summary`, `signed_pdf`) or holds only across a short
+# Inngest emit. So this is the one place where external latency converts
+# directly into connections held for tens of seconds.
+#
+# The arithmetic, in full in `docs/s1-26bc-round16-pool-starvation-spec.md`:
+# `Throttle(limit=5, period=10s)` admits 0.5 run starts/second sustained; a
+# phase-2 hold is 20s uncontended (two 10s GHL calls) and up to 50s behind the
+# lock's own 30s `SET LOCAL` ceiling. Little's law then puts 10 connections in
+# use at a 20s hold, 15 at 30s and 25 at 50s. The old single pool held 15 - not
+# by decision, but because `create_async_engine` was called with no pool
+# arguments and 15 is what SQLAlchemy defaults to. A sustained 30-second GHL
+# response therefore consumed the whole pool, after which every dashboard
+# request queued for `pool_timeout` and 500ed while `/healthz`, which touches no
+# database, kept Render's health check green.
+#
+# Sizes are NAMED so the Neon ceiling reading adjusts one place, and so a test
+# can assert they were chosen rather than inherited. The worker gets the larger
+# capacity deliberately: exceeding it must degrade the FAN-OUT (a run waits,
+# fails visibly through `_record_failure`, and Inngest retries it) rather than
+# the dashboard, which is the failure being fixed.
+#
+# The api timeout drops from SQLAlchemy's default 30s to 10s. Nothing on the
+# dashboard's read path is worth holding a request for half a minute; failing
+# fast is the better answer for a surface a human is watching.
+API_POOL_SIZE = 5
+API_MAX_OVERFLOW = 10
+API_POOL_TIMEOUT = 10
+
+WORKER_POOL_SIZE = 5
+WORKER_MAX_OVERFLOW = 15
+WORKER_POOL_TIMEOUT = 30
+
 engine = create_async_engine(
     get_async_database_url(),
     pool_pre_ping=True,
+    pool_size=API_POOL_SIZE,
+    max_overflow=API_MAX_OVERFLOW,
+    pool_timeout=API_POOL_TIMEOUT,
     future=True,
     # No bind parameters in error messages (round 12, P2): a StatementError's
     # str() otherwise appends `[parameters: {...}]` - for the client upsert
@@ -88,6 +130,39 @@ engine = create_async_engine(
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+# THE SAME `connect_args`, deliberately and not incidentally (round 16, spec
+# do-not-touch item 2). The dedup lock raises its own ceiling with `SET LOCAL
+# statement_timeout = '30s'` and restores the LITERAL '5s' rather than
+# `= DEFAULT`, because round 15 measured that `= DEFAULT` puts back the startup
+# value - "0" on Neon - handing the rest of that transaction an unbounded
+# budget. If these two engines connected with different `server_settings`, that
+# restore would silently mean one thing on a worker connection and another on an
+# api one, on the endpoint production actually uses. They are built from the
+# same URL and the same args for that reason; only the POOL differs.
+worker_engine = create_async_engine(
+    get_async_database_url(),
+    pool_pre_ping=True,
+    pool_size=WORKER_POOL_SIZE,
+    max_overflow=WORKER_MAX_OVERFLOW,
+    pool_timeout=WORKER_POOL_TIMEOUT,
+    future=True,
+    hide_parameters=True,
+    connect_args={
+        "ssl": get_settings().database_ssl_mode,
+        "server_settings": ENGINE_SERVER_SETTINGS,
+    },
+)
+
+# Every Inngest fan-out uses THIS, never `AsyncSessionLocal`. A new fan-out that
+# copies an older one and keeps the api sessionmaker would silently drop out of
+# the split with nothing failing, so `test_worker_pool_isolation.py` asserts at
+# the source level that no module under `worker/` mentions `AsyncSessionLocal`.
+WorkerSessionLocal = async_sessionmaker(
+    worker_engine,
     class_=AsyncSession,
     expire_on_commit=False,
 )

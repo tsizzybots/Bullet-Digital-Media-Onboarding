@@ -382,7 +382,7 @@ async def _wrapper_pandadoc_client(monkeypatch: pytest.MonkeyPatch, event_data: 
         async def __aexit__(self, *exc):
             return False
 
-    monkeypatch.setattr(signed_pdf_module, "AsyncSessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(signed_pdf_module, "WorkerSessionLocal", lambda: _FakeSession())
 
     captured: dict = {}
 
