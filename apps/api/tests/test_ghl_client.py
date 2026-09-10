@@ -18,6 +18,7 @@ from bullet_api.ghl.client import (
     GHL_API_VERSION,
     GhlClientError,
     GhlLocation,
+    GhlNotConfiguredError,
     GhlServerError,
     HttpGhlClient,
 )
@@ -68,14 +69,26 @@ async def test_create_location_sends_expected_url_headers_and_body() -> None:
     assert json.loads(request.content) == payload
 
 
-async def test_empty_api_key_raises_runtime_error() -> None:
+async def test_empty_api_key_raises_not_configured() -> None:
+    """The NARROW type, not bare RuntimeError (review round 5).
+
+    The worker catches `GhlNotConfiguredError` specifically, because
+    `httpx.StreamError` is itself a `RuntimeError` and the old broad catch
+    dead-lettered recoverable transport failures. Asserting the base class
+    here is satisfied by EITHER type, so it could not tell a revert apart -
+    and a reverted raise site would sail past the narrowed catch entirely,
+    burning the full retry budget on an unset env var.
+    """
     client = HttpGhlClient(api_key="")
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(GhlNotConfiguredError) as exc:
         await client.create_location({"name": "Gym", "companyId": "c"})
     assert "GHL_AGENCY_API_KEY" in str(exc.value)
 
 
-@pytest.mark.parametrize("status_code", [400, 401, 403, 422])
+# 401/403 deliberately absent: an agency-key blip is transient, so they are
+# retriable now (see `_RETRIABLE_STATUS`) and are covered by the 5xx-style
+# tests below. Dead-lettering them terminally failed every in-flight signing.
+@pytest.mark.parametrize("status_code", [400, 422])
 async def test_4xx_raises_client_error(status_code: int) -> None:
     transport = _transport(status_code, "bad request")
     client = HttpGhlClient(api_key="agency-key", transport=transport)
@@ -147,14 +160,24 @@ async def test_find_location_by_email_404_returns_none() -> None:
     assert await client.find_location_by_email("nobody@example.com", company_id="c") is None
 
 
-async def test_find_location_by_email_empty_api_key_raises_runtime_error() -> None:
+async def test_find_location_by_email_empty_api_key_raises_not_configured() -> None:
+    """Same narrow-type assertion as the create path - the lookup runs
+    first on every attempt, so a reverted raise site here is reached
+    sooner."""
     client = HttpGhlClient(api_key="")
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(GhlNotConfiguredError) as exc:
         await client.find_location_by_email("a@b.com", company_id="c")
     assert "GHL_AGENCY_API_KEY" in str(exc.value)
 
 
-@pytest.mark.parametrize("status_code", [400, 401, 403, 422])
+# 401/403/408 deliberately absent: they are retriable now (see
+# `_RETRIABLE_STATUS`), covered below by
+# `test_transient_4xx_is_retriable_not_dead_lettered`, which is parametrized
+# over BOTH `create_location` and `find_location_by_email` (review round 4,
+# finding 1: an earlier version of this comment claimed that coverage while
+# the parametrized test underneath it only ever called `create_location` -
+# the lookup's own retriable branch was unverified).
+@pytest.mark.parametrize("status_code", [400, 422])
 async def test_find_location_by_email_4xx_raises_client_error(status_code: int) -> None:
     transport = _transport(status_code, "bad request")
     client = HttpGhlClient(api_key="agency-key", transport=transport)
@@ -170,3 +193,161 @@ async def test_find_location_by_email_429_and_5xx_raise_server_error(status_code
     with pytest.raises(GhlServerError) as exc:
         await client.find_location_by_email("a@b.com", company_id="c")
     assert exc.value.status_code == status_code
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 408])
+@pytest.mark.parametrize("method_name", ["create_location", "find_location_by_email"])
+async def test_transient_4xx_is_retriable_not_dead_lettered(
+    method_name: str, status_code: int
+) -> None:
+    """An auth blip or a request timeout must NOT terminally fail a signing.
+
+    These arrive wearing 4xx codes but are transient: a rotated or momentarily
+    unavailable agency key, or the server saying "you took too long". Raising
+    `GhlClientError` here would dead-letter EVERY signing in flight during the
+    blip, each then needing a human to re-drive. A genuinely bad key still
+    dead-letters, just via Inngest's retry budget rather than instantly.
+
+    Parametrized over BOTH `create_location` and `find_location_by_email`
+    (review round 4, finding 1): the lookup runs before the create on every
+    attempt, so a key blip has to be retriable there too, or the create-path
+    fix is unreachable - every in-flight signing dead-letters at the lookup
+    before it ever reaches the POST that would have survived the blip. An
+    earlier version of this test only covered `create_location`, while a
+    comment elsewhere in this file claimed the lookup was covered too.
+    """
+    transport = _transport(status_code, "transient")
+    client = HttpGhlClient(api_key="agency-key", transport=transport)
+    calls = {
+        "create_location": lambda: client.create_location({"name": "Gym", "companyId": "c"}),
+        "find_location_by_email": lambda: client.find_location_by_email("a@b.com", company_id="c"),
+    }
+    with pytest.raises(GhlServerError) as exc:
+        await calls[method_name]()
+    assert exc.value.status_code == status_code
+
+
+class TestTwoxxParseGuard:
+    """Round 12, P2: a 2xx whose body cannot be parsed maps to the
+    NON-retriable error.
+
+    The location likely exists in GHL the moment the 2xx arrives; a shape
+    mismatch is deterministic, so a retriable error would re-POST and re-fail
+    on every attempt - one new orphan per retry. Non-retriable means one
+    orphan at most, a visible dead-letter carrying the body, and a human
+    reconciles.
+    """
+
+    async def test_2xx_with_unparseable_body_is_non_retriable(self) -> None:
+        transport = _transport(200, "<html>upstream proxy error page</html>")
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlClientError) as excinfo:
+            await client.create_location({"name": "Sample Gym", "companyId": "comp_1"})
+        assert "LIKELY EXISTS" in str(excinfo.value)
+
+    async def test_2xx_missing_id_is_non_retriable(self) -> None:
+        transport = _transport(201, {"location": {"id": "loc_nested"}})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlClientError) as excinfo:
+            await client.create_location({"name": "Sample Gym", "companyId": "comp_1"})
+        assert "LIKELY EXISTS" in str(excinfo.value)
+
+    async def test_the_lookup_also_guards_its_2xx_body(self) -> None:
+        # ROUND 15 - the same guard, on the same class of failure, in the same
+        # file. Raised twice by the reviewer and deferred twice.
+        #
+        # RETARGETED IN ROUND 16. It asserted `GhlClientError`, mirroring the
+        # create path. That mirror was the error: round 15 copied a
+        # classification that exists to bound a SIDE EFFECT onto a read-only
+        # GET, which has none. The reviewer's P2 reversed it, so the guard now
+        # raises `GhlServerError` and the signing retries through a WAF blip
+        # instead of dead-lettering on it. The typed-error assertion - the
+        # thing the round-15 guard actually bought - is unchanged.
+        transport = _transport(200, "<html>WAF interstitial</html>")
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlServerError) as excinfo:
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+        assert "could not be parsed" in str(excinfo.value)
+
+    async def test_the_lookup_guard_does_not_swallow_a_valid_empty_result(self) -> None:
+        # The mirror worth pinning: an empty `locations` array is a legitimate
+        # "no match", not a parse failure, and must still return None.
+        transport = _transport(200, {"locations": [], "traceId": "t-1"})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        assert await client.find_location_by_email("ops@example.com", company_id="comp_1") is None
+
+    async def test_the_lookup_2xx_missing_id_is_retriable(self) -> None:
+        # ROUND 16, P1.2 - the mirror of `test_2xx_missing_id_is_non_retriable`
+        # on the lookup, and the reason this class needed a second look. Round
+        # 15's guard stopped one line short: `response.json()` and the
+        # `locations` lookup were inside the try, but `locations[0]` and
+        # `hit["id"]` were not. A hit carrying `locationId` instead of `id`
+        # raised a bare `KeyError` straight past the guard - and a bare
+        # exception is not classified at all, which is the failure mode the
+        # guard exists to remove.
+        transport = _transport(200, {"locations": [{"name": "Sample Gym", "locationId": "loc_1"}]})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlServerError) as excinfo:
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+        assert "could not be parsed" in str(excinfo.value)
+
+    async def test_the_lookup_2xx_with_locations_as_a_mapping_is_retriable(self) -> None:
+        # `body.get("locations") or []` keeps a non-empty MAPPING, because a
+        # mapping is truthy. `locations[0]` then raises `KeyError(0)` - outside
+        # the round-15 try.
+        transport = _transport(200, {"locations": {"id": "loc_1"}})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlServerError):
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+
+    async def test_the_lookup_2xx_with_string_items_is_retriable(self) -> None:
+        # A list of bare id strings indexes as `"loc_1"["id"]` -> `TypeError`,
+        # the third shape that escaped the round-15 try.
+        transport = _transport(200, {"locations": ["loc_1"]})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlServerError):
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+
+    async def test_the_create_and_the_lookup_classify_an_unparseable_2xx_OPPOSITELY(self) -> None:
+        # The asymmetry stated as an assertion rather than only in the two
+        # docstrings, so a later "consistency" tidy-up that unifies them has to
+        # delete a test to do it. Same body, same status, two verdicts:
+        # the lookup is READ-ONLY (retriable), the create is not (one orphan at
+        # most).
+        body = "<html>WAF interstitial</html>"
+        client = HttpGhlClient(api_key="agency-key", transport=_transport(200, body))
+        with pytest.raises(GhlServerError):
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+        client = HttpGhlClient(api_key="agency-key", transport=_transport(200, body))
+        with pytest.raises(GhlClientError):
+            await client.create_location({"name": "Sample Gym", "companyId": "comp_1"})
+
+
+class TestTransportLevelErrors:
+    """Round 12, test gap 6: the status-code mapping was well covered but a
+    raised transport error was not - and the worker's `_record_failure`
+    contract depends on transport errors PROPAGATING (it catches broad
+    `Exception`, and the wrapper classifies retriable-vs-not on the type).
+    """
+
+    @pytest.mark.parametrize("exc_type", [httpx.ConnectError, httpx.ReadTimeout])
+    async def test_create_location_propagates_transport_errors(
+        self, exc_type: type[Exception]
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise exc_type("boom", request=request)
+
+        client = HttpGhlClient(api_key="agency-key", transport=httpx.MockTransport(handler))
+        with pytest.raises(exc_type):
+            await client.create_location({"name": "Sample Gym", "companyId": "comp_1"})
+
+    @pytest.mark.parametrize("exc_type", [httpx.ConnectError, httpx.ReadTimeout])
+    async def test_find_location_propagates_transport_errors(
+        self, exc_type: type[Exception]
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise exc_type("boom", request=request)
+
+        client = HttpGhlClient(api_key="agency-key", transport=httpx.MockTransport(handler))
+        with pytest.raises(exc_type):
+            await client.find_location_by_email("gym@example.com", company_id="comp_1")

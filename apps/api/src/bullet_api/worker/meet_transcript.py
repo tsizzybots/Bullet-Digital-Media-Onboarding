@@ -49,7 +49,7 @@ from bullet_api.db.enums import (
     DOCUMENT_KIND_TRANSCRIPT_TEXT,
     SALES_CALL_TRANSCRIPT_SOURCE_GOOGLE_MEET,
 )
-from bullet_api.db.session import AsyncSessionLocal
+from bullet_api.db.session import WorkerSessionLocal
 from bullet_api.google.calendar_client import (
     CalendarClient,
     HttpCalendarClient,
@@ -371,7 +371,7 @@ async def capture_meet_transcript(ctx: inngest.Context) -> dict:
     # connection is held across that external latency (the S1-25a connection-
     # hygiene rule, reached here via no-statement-before-external rather than
     # commit-before-external).
-    async with AsyncSessionLocal() as session:
+    async with WorkerSessionLocal() as session:
         try:
             result = await capture_meet_transcript_core(
                 session,

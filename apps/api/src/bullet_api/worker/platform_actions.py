@@ -198,14 +198,45 @@ async def fail_action(
     *,
     action_id: uuid.UUID,
     last_error: str,
-) -> None:
+) -> int:
     """Mark an action `failed`, record `last_error`, bump `retry_count`.
 
     `retry_count` is incremented in-place so the dashboard shows how many
     attempts a flapping action has burned. `completed_at` is deliberately
     left NULL on failure - the action is not done, it will be retried.
+
+    THIS FUNCTION DOES NOT GUARD `status`, and that is deliberate (round 15).
+
+    The terminal-success invariant - a COMMITTED success must not be erased by
+    a later run - is enforced at the call site via `begun.already_succeeded`,
+    not here. A `WHERE ... AND status <> 'success'` guard was written, measured
+    and removed, because SQL cannot see the distinction the invariant depends
+    on: inside its own transaction, a caller's OWN uncommitted, abandoned
+    success reads exactly like a committed prior one. Adding the guard makes
+    this UPDATE silently match zero rows on that second case, so a run whose
+    terminal commit failed is left reporting `success` - which breaks the
+    round-8 guarantee that such a run lands `failed` with its error recorded,
+    added deliberately because the location id was being lost on that path.
+
+    An uncommitted success is not a durable fact; the run that wrote it did not
+    finish. Only `begin_action`'s `already_succeeded` knows which kind of
+    success it is looking at. Do not "harden" this back into a WHERE clause.
+
+    Returns the number of rows updated so a caller can notice a no-op: a
+    zero-row UPDATE raises nothing, which is exactly how the guard above hid
+    its own breakage until a round-8 test caught it.
+
+    THE CONTRACT EVERY CALLER OWES, since it cannot be enforced here: short-
+    circuit on `begun.already_succeeded` before any failure write. As of round
+    15 all five callers do, verified by line order - `ghl_subaccount`'s
+    `_record_failure` (which returns early), and `sales_knowledge` (two sites),
+    `signed_pdf` and `sales_summary`, each of which returns from its
+    `already_succeeded` branch before its `fail_action` call is reachable at
+    all. A sixth caller that skips the check would reintroduce the exact defect
+    round 15 removed the WHERE guard for, and nothing in this function can stop
+    it - which is why the contract is written at the function you are calling.
     """
-    await session.execute(
+    result = await session.execute(
         text(
             "UPDATE platform_actions "
             "SET status = :status, last_error = :last_error, "
@@ -218,6 +249,7 @@ async def fail_action(
             "action_id": action_id,
         },
     )
+    return result.rowcount
 
 
 async def reclaim_stale_action(

@@ -254,7 +254,7 @@ class Settings(BaseSettings):
             "GoHighLevel agency API token, sent as `Authorization: Bearer <key>` on "
             "POST /locations/. Empty in local dev / tests (the FakeGhlClient is used); "
             "set in the Render staging / prod env groups. HttpGhlClient fails loudly "
-            "(RuntimeError) if this is empty on a real call, so an unconfigured "
+            "(GhlNotConfiguredError) if this is empty on a real call, so an unconfigured "
             "deployment is loud rather than silently creating nothing."
         ),
     )
