@@ -1825,9 +1825,13 @@ must_fail = "tests/test_identity_key_properties.py::TestGoldenFile::test_every_i
 # RETARGETED IN ROUND 16: the tuple this named was replaced by the shared
 # `_PARSE_FAILURES` and now appears twice in the file, so the old `find` matched
 # nothing. The guard it pins is unchanged in intent.
+# RETARGETED AGAIN IN ROUND 17: the lookup's guard split in two, and the half
+# this entry pins - the non-JSON body - now catches `ValueError` on its own. The
+# old `find` named `_PARSE_FAILURES`, which after the split appears only on the
+# CREATE path, so it would have pinned the wrong method entirely.
 name = "R15 - find_location_by_email guards its 2xx body"
 file = "src/bullet_api/ghl/client.py"
-find = "            except _PARSE_FAILURES as exc:\n                # RETRIABLE"
+find = "            except ValueError as exc:\n                # RETRIABLE"
 replace = "            except (KeyboardInterrupt,) as exc:\n                # RETRIABLE"
 must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_the_lookup_also_guards_its_2xx_body"
 
@@ -2008,36 +2012,124 @@ replace = "    treat_as_succeeded = False\n"
 must_fail = "tests/test_ghl_subaccount.py::test_a_late_failure_cannot_erase_a_committed_success"
 
 [[mutation]]
-# Round 16, P1.2 - the lookup's parse guard must WRAP the hit construction, not
-# stop at the `locations` lookup. Moving the construction back out restores the
-# round-15 shape, where a hit keyed `locationId` raised a bare `KeyError` past
-# the guard and reached the Inngest wrapper unclassified.
-name = "R16 - the lookup's 2xx guard wraps the hit construction"
-file = "src/bullet_api/ghl/client.py"
-find = "            try:\n                body = response.json()\n                locations = body.get(\"locations\") or []\n                if not locations:\n                    return None\n                hit = locations[0]\n                location = GhlLocation(\n                    id=str(hit[\"id\"]),\n                    name=hit.get(\"name\", \"\"),\n                    company_id=str(hit.get(\"companyId\", \"\")),\n                    raw=hit,\n                )\n            except _PARSE_FAILURES as exc:\n                # RETRIABLE, and deliberately the OPPOSITE of `create_location`'s\n                # verdict on the identical body (round 16, P1.2). This method is\n                # READ-ONLY: it has no side effect to protect, so nothing is lost\n                # by trying again, and the likeliest cause of an unparseable 2xx\n                # on a GET is a CDN or WAF interstitial, which is transient. The\n                # create path stays non-retriable because a retry there mints an\n                # orphan. A genuinely permanent shape change still dead-letters,\n                # just via Inngest's retry budget instead of instantly - the same\n                # trade `_RETRIABLE_STATUS` already makes for 401/403.\n                raise GhlServerError(\n                    response.status_code,\n                    \"2xx location-search response could not be parsed \"\n                    f\"({type(exc).__name__}); the lookup is read-only, so this is \"\n                    f\"retriable - a WAF or CDN interstitial is transient: \"\n                    f\"{response.text[:500]}\",\n                ) from exc\n            return location\n"
-replace = "            try:\n                body = response.json()\n                locations = body.get(\"locations\") or []\n            except _PARSE_FAILURES as exc:\n                raise GhlServerError(\n                    response.status_code,\n                    \"2xx location-search response could not be parsed \"\n                    f\"({type(exc).__name__}); the lookup is read-only, so this is \"\n                    f\"retriable - a WAF or CDN interstitial is transient: \"\n                    f\"{response.text[:500]}\",\n                ) from exc\n            if not locations:\n                return None\n            hit = locations[0]\n            return GhlLocation(\n                id=str(hit[\"id\"]),\n                name=hit.get(\"name\", \"\"),\n                company_id=str(hit.get(\"companyId\", \"\")),\n                raw=hit,\n            )\n"
-must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_the_lookup_2xx_missing_id_is_retriable"
+# Round 17, B1 - the PLACEMENT, which is a different guard from the VALUE that
+# the first R16 entry above pins. Round 16 put this rebind at the TOP of the torn
+# branch, arming failure-recording for BOTH halves. This mutation puts it back
+# there, and it is the whole of the B1 defect in one line.
+#
+# What it breaks: the RECOVERY half, where the action row still holds the id, so
+# the recorded success is a durable fact one UPDATE away from being whole. Armed,
+# a transient failure repairing the client row flips the action to `failed`; the
+# next redelivery then no longer sees `already_succeeded`, takes the
+# lookup-then-create path, and mints a SECOND location.
+#
+# Note both entries must stay: reverting the value (R16's entry) and reverting
+# the placement (this one) are different mistakes with different blast radii, and
+# each has its own mirror.
+name = "R17 - the torn branch arms failure-recording on the fall-through ONLY"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        try:\n            recovered = (\n"
+replace = "        treat_as_succeeded = False\n        try:\n            recovered = (\n"
+must_fail = "tests/test_ghl_subaccount.py::test_a_transient_failure_repairing_a_recoverable_torn_action_keeps_the_success"
 
 [[mutation]]
-# Round 16, P1.2 - the shared exception tuple. Dropping `KeyError`/`IndexError`
-# restores the round-15 lookup tuple, which is what let a mapping under
-# `locations` raise `KeyError(0)` uncaught.
-name = "R16 - the 2xx parse guards share one exception tuple"
-file = "src/bullet_api/ghl/client.py"
-find = "_PARSE_FAILURES = (ValueError, KeyError, IndexError, AttributeError, TypeError)"
-replace = "_PARSE_FAILURES = (ValueError, AttributeError, TypeError)"
-must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_the_lookup_2xx_with_locations_as_a_mapping_is_retriable"
+# Round 17, B2 belt. Dead-lettering pool exhaustion on FIRST CONTACT is the
+# round-5 mistake in a new place: a transient made permanent. The connections
+# free when the long phase-2 holds complete, so `NonRetriableError` here
+# terminally fails a signing the next attempt would have completed.
+name = "R17 - a pool timeout stays RETRIABLE and is never dead-lettered on contact"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            raise PoolExhaustedError(\"worker\", str(exc)) from exc"
+replace = "            raise inngest.NonRetriableError(str(exc)) from exc"
+must_fail = "tests/test_ghl_subaccount.py::test_a_pool_timeout_is_retriable_and_names_the_pool"
 
 [[mutation]]
-# Round 16, P1.2 - the asymmetry. Unifying the lookup onto the create path's
-# NON-retriable verdict is the tidy-up that looks like consistency and is not:
-# the create path is bounding a side effect this read-only GET does not have,
-# so the signing would dead-letter on a transient WAF interstitial.
-name = "R16 - an unparseable 2xx is retriable on the lookup and not on the create"
+# Round 17, B2 recorder. A handler nothing calls is worth nothing, and this is
+# the first `on_failure` in the codebase - genuinely new surface, so the WIRING
+# gets its own pin rather than riding on the handler body's. Unwired, a
+# pool-exhaustion dead-letter goes back to leaving no `platform_actions` row at
+# all: silent in our dashboard, visible only in Inngest's.
+name = "R17 - the dead-letter recorder is wired as the function's on_failure"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    on_failure=record_ghl_subaccount_dead_letter,\n"
+replace = ""
+must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_is_wired_as_the_functions_on_failure"
+
+[[mutation]]
+# Round 17, B2 recorder. The handler body must actually RECORD. Removing the
+# `fail_action` call leaves a handler that opens a session, claims the row and
+# commits nothing useful - which reads as working and shows the operator
+# nothing, the exact failure mode option C-plus exists to close.
+name = "R17 - the dead-letter recorder writes the failure, not just an action row"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        await fail_action(\n            session,\n            action_id=begun.action_id,\n            last_error=f\"dead-lettered after Inngest exhausted its retries: {detail}\",\n        )\n"
+replace = ""
+must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_writes_a_visible_failed_action"
+
+[[mutation]]
+# Round 17, B2 recorder. It must draw from the API engine. Pointing it back at
+# the worker pool makes the recorder queue behind the very holds that caused
+# the failure it is recording - a dead-letter handler that cannot run during
+# the incident it exists for.
+name = "R17 - the dead-letter recorder draws from the API engine, not the worker pool"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    async with AsyncSessionLocal() as session:"
+replace = "    async with WorkerSessionLocal() as session:"
+must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_writes_a_visible_failed_action"
+
+[[mutation]]
+# Round 17, P3 (replacing round 16's entry of the same intent, whose `find` went
+# stale when the guard split in two). The shape guard must WRAP THE FIELD READS.
+# This mutation moves the three reads back out to the construction site, which is
+# the round-15/16 shape: a hit keyed `locationId` then raises a bare `KeyError`
+# past the guard and reaches the Inngest wrapper unclassified.
+#
+# It also demonstrates the P3 point directly. With the reads at the construction
+# site, our OWN constructor sits inside the blast radius, so a fault of ours
+# would be reported as "GHL sent a bad shape".
+name = "R17 - the lookup's shape guard wraps the field reads, not the construction"
 file = "src/bullet_api/ghl/client.py"
-find = "                raise GhlServerError(\n                    response.status_code,\n                    \"2xx location-search response could not be parsed \""
-replace = "                raise GhlClientError(\n                    response.status_code,\n                    \"2xx location-search response could not be parsed \""
-must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_the_create_and_the_lookup_classify_an_unparseable_2xx_OPPOSITELY"
+find = "                location_id = str(hit[\"id\"])\n                location_name = hit.get(\"name\", \"\")\n                location_company_id = str(hit.get(\"companyId\", \"\"))\n            except _SHAPE_FAILURES as exc:"
+replace = "                pass\n            except _SHAPE_FAILURES as exc:"
+must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_the_lookup_2xx_missing_id_is_NON_retriable"
+
+[[mutation]]
+# Round 17 (round 16's entry, retargeted onto the split tuple). Dropping
+# `KeyError`/`IndexError` from the SHAPE half restores the round-15 breadth,
+# which is what let a mapping under `locations` raise `KeyError(0)` uncaught.
+# `_PARSE_FAILURES` is now derived from this tuple, so the create path's guard
+# narrows with it and the two cannot drift apart again.
+name = "R17 - the shape half of the parse tuple keeps its full breadth"
+file = "src/bullet_api/ghl/client.py"
+find = "_SHAPE_FAILURES = (KeyError, IndexError, AttributeError, TypeError)"
+replace = "_SHAPE_FAILURES = (AttributeError, TypeError)"
+must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_the_lookup_2xx_with_locations_as_a_mapping_is_NON_retriable"
+
+[[mutation]]
+# Round 17, P2 - half one of the split. A body that is NOT JSON stays RETRIABLE
+# on the read-only lookup. Unifying it onto the create path's non-retriable
+# verdict is the tidy-up that looks like consistency and is not: the create path
+# is bounding a side effect this GET does not have, so the signing would
+# dead-letter on a transient WAF interstitial. This is round 16's entry, whose
+# `find` went stale when the message changed with the split.
+name = "R17 - a non-JSON 2xx is retriable on the lookup and not on the create"
+file = "src/bullet_api/ghl/client.py"
+find = "                raise GhlServerError(\n                    response.status_code,\n                    \"2xx location-search response is not JSON \""
+replace = "                raise GhlClientError(\n                    response.status_code,\n                    \"2xx location-search response is not JSON \""
+must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_the_lookup_2xx_that_is_not_json_at_all_STAYS_retriable"
+
+[[mutation]]
+# Round 17, P2 - half two, and the direction round 16 had backwards. A body that
+# PARSED and carried the wrong keys is a GHL contract change, so it is
+# NON-retriable even though the method is read-only. Flipping it back to
+# `GhlServerError` restores round 16: the signing burns its whole Inngest retry
+# budget re-requesting a body that cannot re-key itself, then dead-letters
+# anyway, under a `last_error` blaming a WAF that was never involved.
+name = "R17 - a parsed-but-wrong-shape 2xx is NOT retriable on the lookup"
+file = "src/bullet_api/ghl/client.py"
+find = "                raise GhlClientError(\n                    response.status_code,\n                    \"2xx location-search response has an unexpected SHAPE \""
+replace = "                raise GhlServerError(\n                    response.status_code,\n                    \"2xx location-search response has an unexpected SHAPE \""
+must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_the_lookup_2xx_missing_id_is_NON_retriable"
 
 [[mutation]]
 # Round 16, item 4. The golden fixture is only worth committing if a change to
@@ -2076,17 +2168,62 @@ find = "WorkerSessionLocal = async_sessionmaker(\n    worker_engine,"
 replace = "WorkerSessionLocal = async_sessionmaker(\n    engine,"
 must_fail = "tests/test_worker_pool_isolation.py::test_the_worker_and_the_api_do_not_share_a_pool"
 
+# ROUND 17: ONE ENTRY PER KWARG PER ENGINE, replacing round 16's single entry.
+#
+# Round 16 had one entry that deleted all three api kwargs at once, and it
+# KILLED - but only because `pool_timeout` happens to differ from SQLAlchemy's
+# default. Measured at round-17 head against the round-16 test, deleting each
+# kwarg INDIVIDUALLY: api pool_size SURVIVED, api max_overflow SURVIVED, api
+# pool_timeout killed, worker pool_size SURVIVED, worker max_overflow killed,
+# worker pool_timeout SURVIVED. Four of the six shipped kwargs were unpinned,
+# because `QueuePool`'s own defaults are pool_size=5, max_overflow=10,
+# timeout=30 and four of ours equal them exactly.
+#
+# That is why the killing test is the AST one: a value comparison cannot tell
+# "we passed 5" from "we passed nothing and got 5". Each of the six below is
+# sole-kill verified individually.
+
 [[mutation]]
-# Round 16, item 3. Removing the explicit sizes restores the pre-round-16 state
-# EXACTLY: an engine built with no pool arguments, whose capacity is 15 because
-# that is SQLAlchemy's default and not because anyone chose it. The mutation is
-# a deletion rather than a different number on purpose - the defect was the
-# omission, and a test that only caught a wrong number would not have caught it.
-name = "R16 - both pools are sized explicitly, not inherited from SQLAlchemy"
+name = "R17 - the api engine passes pool_size explicitly"
 file = "src/bullet_api/db/session.py"
-find = "    pool_size=API_POOL_SIZE,\n    max_overflow=API_MAX_OVERFLOW,\n    pool_timeout=API_POOL_TIMEOUT,\n"
+find = "    pool_size=API_POOL_SIZE,\n"
 replace = ""
-must_fail = "tests/test_worker_pool_isolation.py::test_both_pools_are_sized_deliberately_rather_than_by_omission"
+must_fail = "tests/test_worker_pool_isolation.py::test_every_pool_kwarg_is_passed_explicitly"
+
+[[mutation]]
+name = "R17 - the api engine passes max_overflow explicitly"
+file = "src/bullet_api/db/session.py"
+find = "    max_overflow=API_MAX_OVERFLOW,\n"
+replace = ""
+must_fail = "tests/test_worker_pool_isolation.py::test_every_pool_kwarg_is_passed_explicitly"
+
+[[mutation]]
+name = "R17 - the api engine passes pool_timeout explicitly"
+file = "src/bullet_api/db/session.py"
+find = "    pool_timeout=API_POOL_TIMEOUT,\n"
+replace = ""
+must_fail = "tests/test_worker_pool_isolation.py::test_every_pool_kwarg_is_passed_explicitly"
+
+[[mutation]]
+name = "R17 - the worker engine passes pool_size explicitly"
+file = "src/bullet_api/db/session.py"
+find = "    pool_size=WORKER_POOL_SIZE,\n"
+replace = ""
+must_fail = "tests/test_worker_pool_isolation.py::test_every_pool_kwarg_is_passed_explicitly"
+
+[[mutation]]
+name = "R17 - the worker engine passes max_overflow explicitly"
+file = "src/bullet_api/db/session.py"
+find = "    max_overflow=WORKER_MAX_OVERFLOW,\n"
+replace = ""
+must_fail = "tests/test_worker_pool_isolation.py::test_every_pool_kwarg_is_passed_explicitly"
+
+[[mutation]]
+name = "R17 - the worker engine passes pool_timeout explicitly"
+file = "src/bullet_api/db/session.py"
+find = "    pool_timeout=WORKER_POOL_TIMEOUT,\n"
+replace = ""
+must_fail = "tests/test_worker_pool_isolation.py::test_every_pool_kwarg_is_passed_explicitly"
 
 [[mutation]]
 # Round 16, item 3. The guard that has to survive the NEXT fan-out. Asana,
@@ -2094,8 +2231,16 @@ must_fail = "tests/test_worker_pool_isolation.py::test_both_pools_are_sized_deli
 # worker module; one that copies the api sessionmaker drops out of the split
 # with nothing failing at runtime. The mutation is exactly that mistake, made in
 # the module most likely to be copied.
-name = "R16 - no worker module reaches for the API sessionmaker"
+#
+# RETARGETED IN ROUND 17, and the new mutation is a stronger pin than the one it
+# replaces. The old `find` was the import line, which B2 had to extend (the
+# dead-letter recorder legitimately imports `AsyncSessionLocal`), so it matched
+# nothing. More importantly, aliasing an import was only ever a proxy for the
+# real mistake. This mutates the BEHAVIOUR instead: the fan-out's own session,
+# drawn from the dashboard's pool. Under round 17's AST-counting guard that is a
+# second executable use in a module allowed exactly one, so it reddens.
+name = "R17 - no worker module reaches for the API sessionmaker"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "from bullet_api.db.session import WorkerSessionLocal"
-replace = "from bullet_api.db.session import AsyncSessionLocal as WorkerSessionLocal"
+find = "    async with WorkerSessionLocal() as session:\n        try:\n            result = await create_ghl_subaccount_core("
+replace = "    async with AsyncSessionLocal() as session:\n        try:\n            result = await create_ghl_subaccount_core("
 must_fail = "tests/test_worker_pool_isolation.py::test_no_worker_module_reaches_for_the_api_sessionmaker"

@@ -13,12 +13,18 @@ retriable vs not):
 - `GhlClientError` (4xx) - bad payload, bad/expired auth, validation
   failure. Retrying the same request will not fix it, so the worker
   wraps this in `inngest.NonRetriableError`.
-- `GhlServerError` (5xx / 429, plus an unparseable 2xx on the read-only
+- `GhlServerError` (5xx / 429, plus a 2xx that is NOT JSON on the read-only
   location lookup) - GHL is down, rate-limiting, timing out, or a CDN sat an
   interstitial in front of a GET. Transient; the worker lets it propagate so
-  Inngest retries. The create path classifies the SAME unparseable 2xx as
+  Inngest retries. The create path classifies the SAME non-JSON 2xx as
   `GhlClientError`, because retrying a POST that may already have created a
   location mints one orphan per attempt.
+
+  A 2xx on the lookup whose body PARSED but carried the wrong keys is
+  `GhlClientError`, NOT `GhlServerError` (round 17). The split is on the BODY,
+  not only on the method: a body that did not parse is a transient
+  interstitial, a body that parsed with the wrong keys is GHL's contract
+  having changed, and retrying cannot re-key it.
 - `GhlNotConfiguredError` - the agency API key is empty, so no call is
   possible. Non-retriable. It has its own type rather than a bare
   `RuntimeError` because `httpx.StreamError` IS a `RuntimeError`, so a
@@ -56,17 +62,30 @@ GHL_API_VERSION = "2021-07-28"
 # keep failing, so it stays non-retriable.
 _RETRIABLE_STATUS = frozenset({401, 403, 408, 429})
 
-# Every way a 2xx body can fail to yield the fields we need, spelled ONCE so the
-# two parse guards cannot drift (round 16, P1.2 - they had already drifted:
-# create caught KeyError, the lookup caught AttributeError, and neither caught
-# the other's). `ValueError` covers `json.JSONDecodeError`; `KeyError` a missing
-# field or an integer index into a mapping; `IndexError` an empty sequence that
-# passed the truthiness check; `TypeError` and `AttributeError` a value of the
-# wrong shape entirely (a string where an object was expected, a list where a
-# mapping was). The tuple is deliberately broad: an unclassified bare exception
-# reaching the Inngest wrapper is the failure both guards exist to prevent, and
-# a body we cannot parse is by definition one whose shape we do not know.
-_PARSE_FAILURES = (ValueError, KeyError, IndexError, AttributeError, TypeError)
+# Every way a 2xx body can fail to yield the fields we need. Round 16 spelled
+# these ONCE so the two parse guards could not drift (they already had: create
+# caught KeyError, the lookup caught AttributeError, neither caught the other's).
+# ROUND 17 SPLITS THE TUPLE IN TWO, because the two halves earn opposite
+# classifications on the read-only lookup, and spelling them as one tuple is
+# precisely why they got the same one.
+#
+# A body that PARSED and did not carry what we need: `KeyError` a missing field
+# or an integer index into a mapping; `IndexError` an empty sequence that passed
+# the truthiness check; `TypeError` and `AttributeError` a value of the wrong
+# shape entirely (a string where an object was expected, a list where a mapping
+# was). Every one of them means GHL's contract changed, which no retry undoes.
+_SHAPE_FAILURES = (KeyError, IndexError, AttributeError, TypeError)
+
+# `ValueError` covers `json.JSONDecodeError`: the body is not JSON AT ALL, which
+# on a GET is most often a CDN or WAF interstitial, and is transient.
+#
+# The UNION is what `create_location` catches, and collapsing the halves is
+# correct THERE: by the time a 2xx arrives its POST may already have minted a
+# location, so both halves are non-retriable for the same reason. It is wrong on
+# the lookup, which has no side effect to bound. Still deliberately broad - an
+# unclassified bare exception reaching the Inngest wrapper is the failure both
+# guards exist to prevent.
+_PARSE_FAILURES = (ValueError, *_SHAPE_FAILURES)
 
 
 @dataclass(frozen=True)
@@ -160,10 +179,13 @@ class GhlClient(Protocol):
         on 4xx and GhlServerError on 5xx/429.
 
         A 2xx whose body cannot be parsed raises GhlClientError, i.e. NON-
-        retriable, which is the opposite of `find_location_by_email`'s verdict
-        on the identical body. The asymmetry is the side effect: by the time a
-        2xx arrives here the location probably exists, so each retry mints
-        another orphan.
+        retriable, for EITHER reason it cannot be parsed - not JSON at all, or
+        JSON without the fields we need. The asymmetry is the side effect: by
+        the time a 2xx arrives here the location probably exists, so each retry
+        mints another orphan, and that is true whichever way the body is wrong.
+
+        `find_location_by_email` splits those two cases and only agrees with
+        this method on the second (see its docstring).
         """
         ...
 
@@ -183,11 +205,19 @@ class GhlClient(Protocol):
         Raises GhlClientError on 4xx and GhlServerError on 5xx/429, same
         split as `create_location`.
 
-        A 2xx whose body cannot be parsed raises GhlServerError, i.e.
-        RETRIABLE, which is the opposite of `create_location`'s verdict on the
-        identical body. The asymmetry is the side effect: this call is
-        read-only, so a retry costs nothing and the likeliest cause of an
-        unparseable 2xx on a GET is a transient CDN or WAF interstitial.
+        A 2xx whose body cannot be parsed splits in two (round 17), because the
+        two ways it can be wrong are different failures:
+
+        - NOT JSON at all raises GhlServerError, i.e. RETRIABLE, which is the
+          opposite of `create_location`'s verdict on the identical body. The
+          asymmetry is the side effect: this call is read-only, so a retry
+          costs nothing, and the likeliest cause on a GET is a transient CDN or
+          WAF interstitial.
+        - PARSED but missing the fields we need raises GhlClientError, i.e.
+          NON-retriable, which AGREES with `create_location`. The body parsed,
+          so GHL's contract changed; retrying cannot re-key it, and spending
+          the retry budget only delays the same dead-letter under an error
+          string blaming a WAF that was never involved.
         """
         ...
 
@@ -328,36 +358,70 @@ class HttpGhlClient:
             # arriving as a mapping (KeyError(0)), a list of bare id strings
             # (TypeError) - each raised BARE, past a guard whose entire purpose
             # was to stop bare exceptions from reaching the wrapper unclassified.
+            #
+            # AND ROUND 17 SPLIT THE VERDICT IN TWO (P2). Round 15 classified
+            # using the create path's reasoning and round 16 using this method's
+            # read-only-ness, and both were classifying on the METHOD. The BODY
+            # is what decides, so there are now two guards: a body that did not
+            # parse is a transient interstitial (retriable), a body that parsed
+            # with the wrong keys is a contract change (non-retriable). Two try
+            # blocks, two verdicts, and both still classified rather than bare.
             try:
                 body = response.json()
-                locations = body.get("locations") or []
-                if not locations:
-                    return None
-                hit = locations[0]
-                location = GhlLocation(
-                    id=str(hit["id"]),
-                    name=hit.get("name", ""),
-                    company_id=str(hit.get("companyId", "")),
-                    raw=hit,
-                )
-            except _PARSE_FAILURES as exc:
-                # RETRIABLE, and deliberately the OPPOSITE of `create_location`'s
-                # verdict on the identical body (round 16, P1.2). This method is
-                # READ-ONLY: it has no side effect to protect, so nothing is lost
-                # by trying again, and the likeliest cause of an unparseable 2xx
-                # on a GET is a CDN or WAF interstitial, which is transient. The
-                # create path stays non-retriable because a retry there mints an
-                # orphan. A genuinely permanent shape change still dead-letters,
-                # just via Inngest's retry budget instead of instantly - the same
-                # trade `_RETRIABLE_STATUS` already makes for 401/403.
+            except ValueError as exc:
+                # RETRIABLE, and the only half of this guard that is. Nothing
+                # parsed, so the likeliest cause is a CDN or WAF interstitial in
+                # front of a read-only GET: transient, and free to retry because
+                # this method has no side effect to protect. `create_location`
+                # classifies the identical body NON-retriable, because its POST
+                # may already have minted a location.
                 raise GhlServerError(
                     response.status_code,
-                    "2xx location-search response could not be parsed "
+                    "2xx location-search response is not JSON "
                     f"({type(exc).__name__}); the lookup is read-only, so this is "
                     f"retriable - a WAF or CDN interstitial is transient: "
                     f"{response.text[:500]}",
                 ) from exc
-            return location
+            try:
+                locations = body.get("locations") or []
+                if not locations:
+                    return None
+                hit = locations[0]
+                # READ THE FIELDS HERE, CONSTRUCT AFTER THE TRY (round 17, P3).
+                # The three reads are what can raise against a changed body;
+                # `GhlLocation` is our own frozen dataclass and its construction
+                # is not. With the constructor inside the guard, a fault of OURS
+                # - a renamed field, a changed type - would surface as "GHL sent
+                # a bad shape" and dead-letter a signing under a message blaming
+                # GHL. `create_location`'s guard already ends before ITS
+                # construction (`location_id = str(body["id"])` inside the try,
+                # the `GhlLocation(...)` after it), so this makes the two guards
+                # the same SHAPE as well as the same tuple.
+                location_id = str(hit["id"])
+                location_name = hit.get("name", "")
+                location_company_id = str(hit.get("companyId", ""))
+            except _SHAPE_FAILURES as exc:
+                # NON-RETRIABLE, and this is the round-17 correction. The body
+                # PARSED and did not carry the fields we need, which is GHL's
+                # contract having changed rather than a transient. Round 16 made
+                # this retriable by reasoning that a read-only retry is free -
+                # true, but the cost was never the call. It is spending the whole
+                # Inngest budget to arrive at the same dead-letter minutes later,
+                # under a `last_error` naming a WAF that was never involved, so
+                # the operator reading it goes and looks at the wrong system.
+                raise GhlClientError(
+                    response.status_code,
+                    "2xx location-search response has an unexpected SHAPE "
+                    f"({type(exc).__name__}); the body parsed, so this is a GHL "
+                    "contract change rather than a transient and retrying cannot "
+                    f"re-key it: {response.text[:500]}",
+                ) from exc
+            return GhlLocation(
+                id=location_id,
+                name=location_name,
+                company_id=location_company_id,
+                raw=hit,
+            )
         # A 404 on the search endpoint means "no such resource", which we
         # treat as "no existing location" rather than a hard error.
         if response.status_code == 404:

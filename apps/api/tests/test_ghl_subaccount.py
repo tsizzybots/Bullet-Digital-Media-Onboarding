@@ -223,6 +223,7 @@ async def _platform_action(session: AsyncSession, client_id: uuid.UUID) -> objec
 @pytest.mark.db
 async def test_success_records_action_and_writes_subaccount_id(
     async_session: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     client_id = await _seed_client(
         async_session,
@@ -240,17 +241,30 @@ async def test_success_records_action_and_writes_subaccount_id(
         lookup_result=None,
     )
 
-    result = await create_ghl_subaccount_core(
-        async_session,
-        ghl,
-        client_id=client_id,
-        onboarding_event_id=event_id,
-        company_id=COMPANY_ID,
-    )
+    with caplog.at_level(logging.INFO):
+        result = await create_ghl_subaccount_core(
+            async_session,
+            ghl,
+            client_id=client_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
 
     assert result.created is True
     assert result.skipped is False
     assert result.ghl_subaccount_id == "loc_new_1"
+
+    # THE SUCCESS PATH'S AUDIT LOG LINE, PINNED (round 17). G1 flags a named
+    # literal that no test contains, and it was right to: this is the create
+    # path's only success signal in the logs, the line an operator greps when
+    # asking "did this client's sub-account actually get made?". Nothing
+    # asserted it, so renaming or deleting it was free. It is not mine - it
+    # predates this round - but the gate scopes against the merge base, and
+    # inserting the dead-letter recorder re-anchored git's hunks so the block
+    # moved from context into the diff. The finding is real either way.
+    assert any(record.message == "S1-25 GHL sub-account created" for record in caplog.records), (
+        "the create path must log its success with a stable, greppable message"
+    )
 
     # clients.ghl_subaccount_id written back
     written = await async_session.execute(
@@ -5560,6 +5574,23 @@ async def test_a_failure_in_the_torn_action_repair_lands_failed_not_stranded(
     docstring says only the caller can make. The caller now makes it: the torn
     branch rebinds `treat_as_succeeded = False`, and the region asserts what
     its name always claimed.
+
+    ROUND 17 RETARGET (B1), AND WHAT THIS TEST USED TO PIN. The round-16 brief
+    specified this test as the acceptance mirror for the rebind, and it was
+    written against the RECOVERY half: it nulled only the client row, so the id
+    stayed on the action, `recovered` was truthy, and the exploding statement
+    was the repair UPDATE. That made it pin the half B1 REMOVES - it asserted
+    that a transient failure while repairing a still-recoverable action should
+    flip it to `failed`, which mints a second location on the next redelivery.
+    A test written from a brief rather than from the branch it names, and it
+    would have defended the defect against its own fix.
+
+    It now tears the action row as well, so the run falls THROUGH and the
+    exploding statement is the create path's own write-back. That is the half
+    where recording is right, and the assertions below are unchanged because
+    they were always the correct assertions - only the fixture reached the
+    wrong half. `test_a_transient_failure_repairing_a_recoverable_torn_action_
+    keeps_the_success` is the mirror that now owns the recovery half.
     """
     client_id = await _seed_client(
         async_session,
@@ -5578,9 +5609,20 @@ async def test_a_failure_in_the_torn_action_repair_lands_failed_not_stranded(
     )
     assert first.created is True
 
-    # Tear it: action still says success and holds the id, client row loses it.
+    # Tear it BOTH ways (round 17, B1 retarget): the ACTION row loses the id
+    # too, so `recovered` is None and the run falls through to the create path.
+    # Nulling only the client row - what this test used to do - left the id on
+    # the action and sent the run down the recovery half instead, where the
+    # success is still durable and must NOT be overwritten.
     await async_session.execute(
         text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": client_id}
+    )
+    await async_session.execute(
+        text(
+            "UPDATE platform_actions SET external_id = NULL "
+            "WHERE client_id = :id AND action = :action"
+        ),
+        {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
     )
     await async_session.commit()
 
@@ -5588,7 +5630,7 @@ async def test_a_failure_in_the_torn_action_repair_lands_failed_not_stranded(
 
     async def _explode_on_repair(statement: object, *args: object, **kwargs: object) -> object:
         if "SET ghl_subaccount_id = :ghl_id" in str(statement):
-            raise SQLAlchemyError("simulated failure repairing the torn client row")
+            raise SQLAlchemyError("simulated failure writing the id back after fall-through")
         return await real_execute(statement, *args, **kwargs)
 
     monkeypatch.setattr(async_session, "execute", _explode_on_repair)
@@ -5609,7 +5651,7 @@ async def test_a_failure_in_the_torn_action_repair_lands_failed_not_stranded(
         "overwriting was never durable, the client row has no id"
     )
     assert row.last_error is not None
-    assert "simulated failure repairing the torn client row" in row.last_error
+    assert "simulated failure writing the id back after fall-through" in row.last_error
     # The round-15 log line must NOT appear: it is the terminal-success check
     # declining to record, which is precisely what round 16 removed from this
     # region. Asserting its absence is what makes the rebind sole-killable -
@@ -5696,6 +5738,299 @@ async def test_a_torn_action_with_no_id_anywhere_records_the_re_runs_failure(
     assert "GHL unavailable on the re-run" in row.last_error
     assert row.retry_count == 1
     assert row.external_id is None
+
+
+@pytest.mark.db
+async def test_a_transient_failure_repairing_a_recoverable_torn_action_keeps_the_success(
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 17, B1 - the reviewer's chain, and the half round 16 over-armed.
+
+    Round 16 rebound `treat_as_succeeded = False` at the TOP of the torn
+    branch, which armed failure-recording for BOTH of its halves. Only the
+    fall-through half earns it. In the RECOVERABLE half the action row still
+    HOLDS the id, so the recorded success is a durable fact sitting one UPDATE
+    away from being whole: flipping it to `failed` on a transient error throws
+    that away, and the next redelivery no longer sees `already_succeeded`, so
+    it takes the normal lookup-then-create path and mints a SECOND location -
+    the orphan shape round 14's P1 was about.
+
+    The chain, executed: torn state (action `success` + loc_AAA, client NULL),
+    the redelivery recovers loc_AAA, the write-back fails transiently. The
+    action must REMAIN `success`, and the next redelivery must self-heal from
+    the action row with no GHL call of any kind.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@torn-transient.example.com",
+        business_name="Torn Transient Gym",
+        legal_entity="Torn Transient Gym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    first = await create_ghl_subaccount_core(
+        async_session,
+        FakeGhlClient(location=_ghl_location("loc_AAA"), lookup_result=None),
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert first.created is True
+
+    # Tear it the RECOVERABLE way: the action keeps loc_AAA, the client row
+    # loses it. This is the half that heals without touching GHL at all, which
+    # is what distinguishes it from the fall-through half above.
+    await async_session.execute(
+        text("UPDATE clients SET ghl_subaccount_id = NULL WHERE id = :id"), {"id": client_id}
+    )
+    await async_session.commit()
+
+    real_execute = async_session.execute
+    already_failed: list[str] = []
+
+    async def _explode_once_on_repair(statement: object, *args: object, **kwargs: object) -> object:
+        # ONCE, not always: the point of the test is that the failure is
+        # TRANSIENT, so the redelivery after it must find a working database.
+        if "SET ghl_subaccount_id = :ghl_id" in str(statement) and not already_failed:
+            already_failed.append("boom")
+            raise SQLAlchemyError("transient reset repairing the torn client row")
+        return await real_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(async_session, "execute", _explode_once_on_repair)
+    with contextlib.suppress(Exception):
+        await create_ghl_subaccount_core(
+            async_session,
+            FakeGhlClient(location=_ghl_location("loc_UNUSED"), lookup_result=None),
+            client_id=client_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+    monkeypatch.undo()
+    await async_session.rollback()
+
+    # Explicit SELECT rather than `_action_row`, which does not project
+    # `external_id` - and the id is half of what this test is asserting.
+    row = (
+        await async_session.execute(
+            text(
+                "SELECT status, external_id FROM platform_actions "
+                "WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+    assert row.status == "success", (
+        "the id is still on the action row, so the success is a durable fact one "
+        "UPDATE away - a transient repair failure must not discard it"
+    )
+    assert row.external_id == "loc_AAA", (
+        "and the id must still be on the row, because that is precisely what "
+        "lets the next redelivery heal without a GHL call"
+    )
+
+    # The next redelivery self-heals from the action row, with NO GHL call.
+    replay = FakeGhlClient(location=_ghl_location("loc_SECOND"), lookup_result=None)
+    result = await create_ghl_subaccount_core(
+        async_session,
+        replay,
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert result.ghl_subaccount_id == "loc_AAA"
+    assert replay.calls == [], "the recoverable torn state must not mint a second location"
+    assert replay.lookup_calls == [], "and it must not even need the GHL lookup to heal"
+    healed = (
+        await async_session.execute(
+            text("SELECT ghl_subaccount_id FROM clients WHERE id = :id"), {"id": client_id}
+        )
+    ).scalar_one()
+    assert healed == "loc_AAA"
+
+
+# ---------------------------------------------------------------------------
+class _NonClosingSession:
+    """Hand the handler the test's transactional session, and do not close it.
+
+    The dead-letter recorder opens its own session via `AsyncSessionLocal()`
+    (the API engine, deliberately - see its docstring). In a test we want its
+    writes to land in the `async_session` fixture's transaction so the
+    assertions can see them, and we must NOT let the handler's `__aexit__`
+    close or roll back a session the fixture still owns.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> AsyncSession:
+        return self._session
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Round 17, B2 (option C-plus): the belt and the dead-letter recorder.
+#
+# The hole: the client SELECT checks out a pooled connection BEFORE
+# `begin_action`, so pool exhaustion raises `sqlalchemy.exc.TimeoutError` with
+# no `platform_actions` row at all - unmapped by the wrapper, and unhealable by
+# reconcile, whose `ON CONFLICT DO NOTHING` sees the `onboarding_events` row.
+#
+# C-plus is two pieces. The BELT maps that timeout to a typed error that names
+# the pool and stays RETRIABLE (pool exhaustion is transient: the connections
+# free when the long holds complete, so dead-lettering on first contact would
+# terminally fail a signing the next attempt would complete). The RECORDER is an
+# `on_failure` handler that fires only after the retry budget is spent and
+# writes the dead-letter into `platform_actions`, so the failure is visible in
+# OUR dashboard rather than only in Inngest's.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_pool_timeout_is_retriable_and_names_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 17, B2 belt. A pool timeout must NOT dead-letter on first contact.
+
+    Measured at round-17 head before this existed: `sqlalchemy.exc.TimeoutError`
+    subclasses `SQLAlchemyError` and none of the wrapper's three mapped types,
+    so it propagated as a raw, unclassified stack. The belt gives it a type and
+    an operator-readable message naming the pool that ran out.
+
+    It stays retriable deliberately. `inngest.NonRetriableError` here would be
+    the round-5 mistake again (the broad `except RuntimeError` that dead-lettered
+    `httpx.StreamError` transport failures): a transient made permanent.
+    """
+    from types import SimpleNamespace
+
+    import inngest
+    from sqlalchemy.exc import TimeoutError as SqlaTimeoutError
+
+    # Only the attributes the wrapper actually reads, so the stub states this
+    # test's real dependency surface rather than dragging in every Settings
+    # field. `ghl_company_id` must be non-empty or the wrapper raises
+    # NonRetriableError before the core is ever called.
+    settings = SimpleNamespace(
+        ghl_company_id="comp_1",
+        ghl_agency_api_key="agency-key",
+        ghl_api_base_url="https://services.leadconnectorhq.com",
+        ghl_api_version="2021-07-28",
+        ghl_snapshot_id="",
+    )
+    monkeypatch.setattr(ghl_subaccount_module, "get_settings", lambda: settings)
+
+    async def _exhausted(*args: object, **kwargs: object) -> object:
+        raise SqlaTimeoutError("QueuePool limit of size 5 overflow 15 reached, timeout 30.00")
+
+    monkeypatch.setattr(ghl_subaccount_module, "create_ghl_subaccount_core", _exhausted)
+
+    ctx = SimpleNamespace(
+        event=SimpleNamespace(
+            data={"client_id": str(uuid.uuid4()), "onboarding_event_id": str(uuid.uuid4())}
+        ),
+        run_id="run_pool_exhausted",
+    )
+
+    with pytest.raises(ghl_subaccount_module.PoolExhaustedError) as excinfo:
+        await create_ghl_subaccount._handler(ctx)
+
+    assert not isinstance(excinfo.value, inngest.NonRetriableError), (
+        "pool exhaustion is transient - the connections free when the long holds "
+        "complete - so dead-lettering on first contact kills a signing the next "
+        "attempt would complete"
+    )
+    assert "worker" in str(excinfo.value), (
+        "the operator needs to know WHICH pool ran out; this string is what the "
+        "dead-letter recorder writes into last_error"
+    )
+
+
+@pytest.mark.db
+async def test_the_dead_letter_recorder_writes_a_visible_failed_action(
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 17, B2 recorder. The whole point of C-plus, as one assertion.
+
+    Without this handler a pool-exhaustion dead-letter leaves NOTHING in
+    `platform_actions`: not a failed action, not an `in_progress` zombie. The
+    dashboard shows the signing as never having been attempted, and the S1-24
+    replay endpoint cannot re-drive it (it returns `duplicate` with no emit,
+    because `client_record` already committed the `onboarding_events` row). The
+    only recovery is Inngest's own dashboard.
+
+    The handler fires only after the retry budget is exhausted, so by the time
+    it runs the saturation has very likely cleared - and it draws from the API
+    engine, not the worker pool, so it is not queueing behind the very holds
+    that caused the failure.
+    """
+    from types import SimpleNamespace
+
+    client_id = await _seed_client(
+        async_session,
+        email="ops@deadletter.example.com",
+        business_name="Dead Letter Gym",
+        legal_entity="Dead Letter Gym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+
+    # The handler must use the API sessionmaker. Point it at the test session so
+    # the assertions below can see its writes.
+    monkeypatch.setattr(
+        ghl_subaccount_module, "AsyncSessionLocal", lambda: _NonClosingSession(async_session)
+    )
+
+    ctx = SimpleNamespace(
+        event=SimpleNamespace(
+            data={
+                "function_id": "bullet-api-create-ghl-subaccount",
+                "run_id": "run_that_died",
+                "error": {
+                    "name": "PoolExhaustedError",
+                    "message": "the worker pool was exhausted; no connection for the client load",
+                },
+                "event": {
+                    "name": "client.created",
+                    "data": {
+                        "client_id": str(client_id),
+                        "onboarding_event_id": str(event_id),
+                    },
+                },
+            }
+        ),
+        run_id="failure_handler_run",
+    )
+
+    await ghl_subaccount_module.record_ghl_subaccount_dead_letter(ctx)
+
+    row = (
+        await async_session.execute(
+            text(
+                "SELECT status, last_error FROM platform_actions "
+                "WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+    assert row.status == "failed", (
+        "a dead-lettered signing must be VISIBLE in the dashboard; that is the "
+        "entire difference between option C and option C-plus"
+    )
+    assert "worker pool was exhausted" in row.last_error, (
+        "and the recorded error must name the cause the belt identified, not a generic failure"
+    )
+
+
+def test_the_dead_letter_recorder_is_wired_as_the_functions_on_failure() -> None:
+    # A handler nothing calls is worth nothing. None of the eight Inngest
+    # functions had an `on_failure` before this round, so this is genuinely new
+    # surface and the wiring itself needs pinning, not just the handler body.
+    assert (
+        create_ghl_subaccount._opts.on_failure
+        is ghl_subaccount_module.record_ghl_subaccount_dead_letter
+    ), "the recorder must be registered as the function's on_failure handler"
 
 
 @pytest.mark.db

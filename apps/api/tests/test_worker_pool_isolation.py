@@ -23,12 +23,15 @@ fixture.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import pathlib
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import TimeoutError as SqlaTimeoutError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import QueuePool
 
 from bullet_api.config import get_async_database_url
 from bullet_api.db.session import (
@@ -45,6 +48,48 @@ from bullet_api.db.session import (
 )
 
 WORKER_PACKAGE = pathlib.Path(__file__).parents[1] / "src" / "bullet_api" / "worker"
+SESSION_MODULE = pathlib.Path(__file__).parents[1] / "src" / "bullet_api" / "db" / "session.py"
+
+
+def _engine_kwargs(variable: str) -> dict[str, str]:
+    """Return `{kwarg: source text of its value}` for a `create_async_engine` call.
+
+    SOURCE-LEVEL, and round 17 proved it has to be. A value comparison cannot
+    tell "we passed 5" from "we passed nothing and SQLAlchemy defaulted to 5",
+    and four of the six shipped kwargs are in exactly that position (see
+    `test_each_shipped_pool_kwarg_differs_from_the_library_default_or_says_so`).
+    Reading the call site is the only way to assert the kwarg was SET.
+    """
+    tree = ast.parse(SESSION_MODULE.read_text())
+    assignments = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == variable for target in node.targets)
+    ]
+    # THE ASSERTIONS ARE UNCONDITIONAL (G4). They sat inside the search `if` in
+    # the first draft, and the static gate caught it: an `assert` behind a
+    # condition read from the system under test passes silently in exactly the
+    # case it exists to catch, which here is a `session.py` where the assignment
+    # has been renamed away. Collecting first and asserting after also buys a
+    # strictly stronger check - that there is EXACTLY ONE such assignment, so a
+    # second engine added later cannot be silently ignored by this reader.
+    assert len(assignments) == 1, (
+        f"expected exactly one module-level assignment to `{variable}` in "
+        f"{SESSION_MODULE}, found {len(assignments)}"
+    )
+    call = assignments[0]
+    assert isinstance(call, ast.Call), f"`{variable}` is no longer built by a call"
+    return {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg is not None}
+
+
+def _queue_pool_defaults() -> dict[str, object]:
+    """SQLAlchemy's own pool defaults, read BY EXECUTION rather than retyped."""
+    return {
+        name: param.default
+        for name, param in inspect.signature(QueuePool.__init__).parameters.items()
+        if param.default is not inspect.Parameter.empty
+    }
 
 
 def test_the_worker_and_the_api_do_not_share_a_pool() -> None:
@@ -57,11 +102,13 @@ def test_the_worker_and_the_api_do_not_share_a_pool() -> None:
     assert worker_engine.pool is not engine.pool
 
 
-def test_both_pools_are_sized_deliberately_rather_than_by_omission() -> None:
-    # Before this change `create_async_engine` was called with no pool
-    # arguments at all, so capacity was 15 because that is what SQLAlchemy
-    # happens to default to. Nobody chose it, and nothing said so. Sizes are now
-    # named constants: the Neon ceiling reading adjusts ONE place.
+def test_both_pools_carry_the_sizes_their_constants_name() -> None:
+    # RENAMED in round 17, because the old name
+    # (`..._are_sized_deliberately_rather_than_by_omission`) claimed more than
+    # this body proves. Comparing a live pool against the constant proves the
+    # VALUES agree; it cannot prove the kwarg was passed, which is the whole of
+    # what "rather than by omission" asserts. That claim now lives in
+    # `test_every_pool_kwarg_is_passed_explicitly`, which reads the call site.
     assert (engine.pool.size(), engine.pool._max_overflow, engine.pool._timeout) == (
         API_POOL_SIZE,
         API_MAX_OVERFLOW,
@@ -76,6 +123,89 @@ def test_both_pools_are_sized_deliberately_rather_than_by_omission() -> None:
     # holds connections for tens of seconds; exceeding it must degrade the
     # FAN-OUT (a run waits, fails visibly, Inngest retries) and not the dashboard.
     assert WORKER_POOL_SIZE + WORKER_MAX_OVERFLOW > API_POOL_SIZE + API_MAX_OVERFLOW
+
+
+@pytest.mark.parametrize(
+    ("variable", "expected"),
+    [
+        (
+            "engine",
+            {
+                "pool_size": "API_POOL_SIZE",
+                "max_overflow": "API_MAX_OVERFLOW",
+                "pool_timeout": "API_POOL_TIMEOUT",
+            },
+        ),
+        (
+            "worker_engine",
+            {
+                "pool_size": "WORKER_POOL_SIZE",
+                "max_overflow": "WORKER_MAX_OVERFLOW",
+                "pool_timeout": "WORKER_POOL_TIMEOUT",
+            },
+        ),
+    ],
+)
+def test_every_pool_kwarg_is_passed_explicitly(variable: str, expected: dict[str, str]) -> None:
+    """Round 17: the omission, pinned per kwarg per engine.
+
+    The defect round 16 fixed was an OMISSION - `create_async_engine` called
+    with no pool arguments, capacity 15 because that is SQLAlchemy's default
+    and not because anyone chose it. The test round 16 wrote to pin that fix
+    compared VALUES, and four of the six shipped kwargs happen to equal the
+    library default, so deleting any of those four from the call site changed
+    nothing observable and the test stayed green. Measured, not assumed:
+    deleting `pool_size`, `max_overflow` (api), `pool_size` or `pool_timeout`
+    (worker) individually all SURVIVED against the round-16 test.
+
+    Reading the call site is what closes that, and it is also what lets the
+    manifest carry one entry per kwarg per engine instead of one entry that
+    deletes three at once and kills only because one of them differed.
+    """
+    kwargs = _engine_kwargs(variable)
+    for name, constant in expected.items():
+        assert name in kwargs, (
+            f"`{variable}` does not pass `{name}` - so it silently inherits "
+            f"SQLAlchemy's default, which is the exact omission round 16 fixed"
+        )
+        assert kwargs[name] == constant, (
+            f"`{variable}` passes `{name}={kwargs[name]}`, not the named constant "
+            f"`{constant}`; the sizes are named so the Neon ceiling reading "
+            f"adjusts ONE place"
+        )
+
+
+def test_each_shipped_pool_kwarg_differs_from_the_library_default_or_says_so() -> None:
+    """Round 17: state, per kwarg, whether a value comparison could pin it.
+
+    Four of the six deliberately EQUAL SQLAlchemy's default. That is not a
+    defect - 5 is a reasonable pool size and 30s a reasonable worker timeout -
+    but it does mean no value-comparing test can ever defend them, which is why
+    `test_every_pool_kwarg_is_passed_explicitly` exists. Recording the
+    coincidence here means a future SQLAlchemy release that moves a default, or
+    a resize that moves one of ours, reddens this test and says which.
+    """
+    defaults = _queue_pool_defaults()
+    deliberately_equal = {
+        "API_POOL_SIZE": (API_POOL_SIZE, defaults["pool_size"]),
+        "API_MAX_OVERFLOW": (API_MAX_OVERFLOW, defaults["max_overflow"]),
+        "WORKER_POOL_SIZE": (WORKER_POOL_SIZE, defaults["pool_size"]),
+        "WORKER_POOL_TIMEOUT": (WORKER_POOL_TIMEOUT, defaults["timeout"]),
+    }
+    genuinely_different = {
+        "API_POOL_TIMEOUT": (API_POOL_TIMEOUT, defaults["timeout"]),
+        "WORKER_MAX_OVERFLOW": (WORKER_MAX_OVERFLOW, defaults["max_overflow"]),
+    }
+    for name, (ours, default) in deliberately_equal.items():
+        assert ours == default, (
+            f"{name} no longer equals SQLAlchemy's default ({ours} vs {default}). "
+            f"That is fine, but this list is now stale - move it to the other one"
+        )
+    for name, (ours, default) in genuinely_different.items():
+        assert ours != default, (
+            f"{name} now EQUALS SQLAlchemy's default ({ours}), so a value "
+            f"comparison can no longer pin it - move it to the other list"
+        )
 
 
 def test_the_api_pool_fails_faster_than_the_worker_pool() -> None:
@@ -97,21 +227,57 @@ def test_both_engines_carry_identical_connect_args() -> None:
     assert worker_engine.url == engine.url
 
 
+# The ONE module allowed to reach for the API sessionmaker, and how many
+# EXECUTABLE references it may make (round 17, B2). `ghl_subaccount` uses it in
+# exactly one place: the `on_failure` dead-letter recorder, which must not draw
+# from the worker pool, because the failure it exists to record may BE that the
+# worker pool ran out.
+_API_SESSIONMAKER_ALLOWANCE = {"ghl_subaccount.py": 1}
+
+
+def _api_sessionmaker_uses(path: pathlib.Path) -> int:
+    """Count EXECUTABLE references to `AsyncSessionLocal`, by AST.
+
+    Deliberately not a substring scan. That module names the symbol four times
+    - twice in prose explaining precisely this exception, once in the import,
+    once in the actual call - and a guard whose count moves when someone edits
+    a comment is a guard nobody can keep green. `ast.Name` sees the call and
+    not the import alias or the prose.
+    """
+    return sum(
+        1
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Name) and node.id == "AsyncSessionLocal"
+    )
+
+
 def test_no_worker_module_reaches_for_the_api_sessionmaker() -> None:
     # The guard that survives the next fan-out. Asana, Stripe, Xero and Timely
     # are all still to be written, and each will start by copying an existing
     # worker module; if one copies `AsyncSessionLocal` the split silently stops
     # covering it, with nothing failing. Source-level, because there is no
     # runtime moment at which a not-yet-written module can be checked.
-    offenders = [
-        path.name
+    offenders = {
+        path.name: (uses, _API_SESSIONMAKER_ALLOWANCE.get(path.name, 0))
         for path in sorted(WORKER_PACKAGE.glob("*.py"))
-        if "AsyncSessionLocal" in path.read_text()
-    ]
-    assert offenders == [], (
-        f"{offenders} import the API's sessionmaker; worker code uses "
-        "WorkerSessionLocal so the fan-out cannot consume the dashboard's pool"
+        if (uses := _api_sessionmaker_uses(path)) > _API_SESSIONMAKER_ALLOWANCE.get(path.name, 0)
+    }
+    assert offenders == {}, (
+        f"{offenders} use the API's sessionmaker more than allowed (name: "
+        "(found, allowed)); worker code uses WorkerSessionLocal so the fan-out "
+        "cannot consume the dashboard's pool"
     )
+
+    # AND THE ALLOWANCE MUST NOT GO STALE. If the recorder is deleted or moved,
+    # the carve-out above would silently keep permitting a use that no longer
+    # exists, and the next careless `AsyncSessionLocal` in this module would
+    # inherit the permission. Prove the exception is still earning it.
+    for name, allowed in _API_SESSIONMAKER_ALLOWANCE.items():
+        actual = _api_sessionmaker_uses(WORKER_PACKAGE / name)
+        assert actual == allowed, (
+            f"{name} is allowed {allowed} use(s) of the API sessionmaker but has "
+            f"{actual}; update the allowance deliberately or remove it"
+        )
 
 
 @pytest.mark.db

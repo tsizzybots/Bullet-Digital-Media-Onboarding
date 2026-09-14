@@ -94,9 +94,36 @@ ENGINE_SERVER_SETTINGS = {"statement_timeout": "5000"}
 #
 # Sizes are NAMED so the Neon ceiling reading adjusts one place, and so a test
 # can assert they were chosen rather than inherited. The worker gets the larger
-# capacity deliberately: exceeding it must degrade the FAN-OUT (a run waits,
-# fails visibly through `_record_failure`, and Inngest retries it) rather than
-# the dashboard, which is the failure being fixed.
+# capacity deliberately: exceeding it must degrade the FAN-OUT rather than the
+# dashboard, which is the failure being fixed.
+#
+# HOW THE FAN-OUT ACTUALLY DEGRADES, CORRECTED (round 17, B2). This comment
+# used to say a run "fails visibly through `_record_failure`", and that was
+# false in the one case the sentence exists to describe. `create_ghl_subaccount`
+# checks out its connection at its FIRST STATEMENT - the client SELECT - which
+# is eighty-two lines before `begin_action`. So when the WORKER pool is what is
+# exhausted, the run never reaches `begin_action`, there is no
+# `platform_actions` row, and `_record_failure` is never called at all.
+# Measured: `checkedout=0` after opening the session, `1` after the first
+# statement with no commit, and `sqlalchemy.exc.TimeoutError` subclasses
+# `SQLAlchemyError` and none of the wrapper's mapped types.
+#
+# What makes it visible is not this pool sizing but the pair added in round 17:
+# the wrapper maps that timeout to `PoolExhaustedError`, which NAMES the pool
+# and stays RETRIABLE (the connections free when the long holds complete, so
+# dead-lettering on first contact would terminally fail a signing the next
+# attempt would complete), and the `on_failure` handler records the dead-letter
+# into `platform_actions` once the retry budget is spent, drawing from the API
+# engine so it is not queueing behind the very holds that caused the failure.
+#
+# The budget is roughly 6 to 8 minutes (Inngest default 4 retries plus the
+# initial attempt, backoff 15s/30s/1m/2m with 0-30s jitter, plus each attempt's
+# own `pool_timeout` wait). That figure is INDICATIVE - it was read from the
+# Inngest OSS repo and Cloud may differ - and it bounds only HOW LONG until an
+# operator sees the failed row, never WHETHER they see it: the handler catches
+# the dead-letter whenever it arrives, short incident or long. The structural
+# fix that removes the window entirely is a dedicated GHL pool, carded on
+# S1-26l; see `docs/s1-26bc-round17-b2-pool-claim-first-spec.md`.
 #
 # The api timeout drops from SQLAlchemy's default 30s to 10s. Nothing on the
 # dashboard's read path is worth holding a request for half a minute; failing

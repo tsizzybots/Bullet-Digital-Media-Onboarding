@@ -158,10 +158,19 @@ from datetime import timedelta
 import inngest
 from sqlalchemy import Row, text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SqlaTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.config import get_settings
-from bullet_api.db.session import WorkerSessionLocal
+
+# `AsyncSessionLocal` is the API engine's sessionmaker, and importing it HERE is
+# the one deliberate exception to "worker code uses WorkerSessionLocal" (round
+# 17, B2). It is used by exactly one function - the dead-letter recorder below -
+# which must not draw from the worker pool, because the failure it exists to
+# record is that the worker pool ran out. `test_worker_pool_isolation.py` allows
+# this module by name and asserts the mention COUNT, so a second, careless use
+# here is still an offender.
+from bullet_api.db.session import AsyncSessionLocal, WorkerSessionLocal
 from bullet_api.ghl.client import (
     GhlClient,
     GhlClientError,
@@ -216,6 +225,46 @@ class ClientNotFoundError(LookupError):
     def __init__(self, client_id: uuid.UUID) -> None:
         self.client_id = client_id
         super().__init__(f"clients row {client_id} not found; cannot create GHL sub-account.")
+
+
+class PoolExhaustedError(Exception):
+    """The connection pool ran out before this run could claim its action row.
+
+    Round 17, B2. `create_ghl_subaccount_core` checks out its pooled connection
+    at its FIRST STATEMENT - the client SELECT - which is eighty-two lines
+    before `begin_action`. A pool timeout there therefore happens with NO
+    `platform_actions` row in existence: nothing for the dashboard to show,
+    nothing for `_record_failure` to update (it is never even called), and
+    nothing `reconcile_pandadoc` can re-emit, because its `ON CONFLICT DO
+    NOTHING` sees the `onboarding_events` row already committed. Measured:
+    `checkedout=0` after opening the session, `1` after the first statement
+    with no commit.
+
+    Before this type existed the failure surfaced as a raw
+    `sqlalchemy.exc.TimeoutError`, which subclasses `SQLAlchemyError` and none
+    of the wrapper's mapped types, so it reached Inngest unclassified.
+
+    RETRIABLE ON PURPOSE, and deliberately NOT an `inngest.NonRetriableError`.
+    Pool exhaustion is transient by nature: the connections free the moment the
+    long phase-2 holds complete. Dead-lettering on first contact would
+    terminally fail a signing that the next attempt would complete, which is
+    the round-5 mistake (the broad `except RuntimeError` that dead-lettered
+    recoverable `httpx.StreamError` transport failures) committed in a new
+    place. So this propagates, Inngest retries, and only if the budget is
+    genuinely exhausted does `record_ghl_subaccount_dead_letter` write the
+    failure into `platform_actions`.
+
+    The message NAMES THE POOL, because that string is what the dead-letter
+    recorder copies into `last_error`, and it is the only thing that tells an
+    operator which pool to go and look at.
+    """
+
+    def __init__(self, pool: str, detail: str) -> None:
+        self.pool = pool
+        super().__init__(
+            f"the {pool} connection pool was exhausted before the run could claim its "
+            f"platform_actions row, so this attempt recorded nothing on its own: {detail}"
+        )
 
 
 @dataclass(frozen=True)
@@ -1578,7 +1627,6 @@ async def create_ghl_subaccount_core(
         # payload commit - still decline to overwrite, and must: they fail
         # without having touched the recorded id, so the next redelivery still
         # reaches this repair and heals cleanly with no GHL call at all.
-        treat_as_succeeded = False
         # GUARDED (round 15), AND THE GUARD ONLY BEGAN RECORDING IN ROUND 16.
         # The torn-action repair writes to `clients` and commits after the
         # committed `in_progress` row; unguarded, a failure here strands the
@@ -1587,10 +1635,23 @@ async def create_ghl_subaccount_core(
         # begun.already_succeeded:`, and `_record_failure` returned early on
         # that same flag, so it wrote a log line and nothing else. Ninth
         # instance of the guard-that-cannot-fire shape, shipped by the round
-        # that was cataloguing them. The rebind above is what makes the
-        # sentence true. Same class as the reuse branch, and the reviewer named
-        # it as pre-existing. Idiom copied VERBATIM - improvements go on the
-        # extraction card (S1-26l).
+        # that was cataloguing them. The rebind BELOW, on the fall-through path,
+        # is what makes the sentence true. Same class as the reuse branch, and
+        # the reviewer named it as pre-existing. Idiom copied VERBATIM -
+        # improvements go on the extraction card (S1-26l).
+        #
+        # WHAT THIS REGION MUST NOT DO, and round 16 did (round 17, B1). The
+        # rebind used to sit HERE, above the try, which armed failure-recording
+        # for BOTH halves of this branch. Only the fall-through half earns it.
+        # Reaching the recovery below with an id still on the ACTION row means
+        # the recorded success is a durable fact one UPDATE away from being
+        # whole: recording `failed` on a transient error throws that away, and
+        # the next redelivery - no longer seeing `already_succeeded` - takes the
+        # lookup-then-create path and mints a SECOND location, which is the
+        # orphan shape round 14's P1 was about. So the recovery half keeps
+        # declining to overwrite, exactly like the call sites above this branch,
+        # and for the same reason: it fails without having touched the recorded
+        # id, so the next redelivery still heals with no GHL call at all.
         try:
             recovered = (
                 await session.execute(
@@ -1633,6 +1694,13 @@ async def create_ghl_subaccount_core(
         # self-healing route: the lookup runs first, so an existing location is
         # reused rather than duplicated. Silently returning None here is the one
         # outcome that leaves nobody able to notice.
+        # THE DURABILITY DECISION IS WRITTEN HERE, and only here (round 17, B1).
+        # Above this line the action row still holds the id, so the recorded
+        # success is durable and must survive a transient repair failure. From
+        # this line on there is no id in EITHER place, the run is about to
+        # re-POST, and every failure of that re-run has to be recorded or the
+        # action stays permanently green for a client with no sub-account.
+        treat_as_succeeded = False
         log.warning(
             "S1-26 action marked success with no external_id; re-running the create path",
             extra={"client_id": str(client_id), "action_id": str(begun.action_id)},
@@ -2008,9 +2076,112 @@ async def create_ghl_subaccount_core(
     )
 
 
+async def record_ghl_subaccount_dead_letter(ctx: inngest.Context) -> dict:
+    """Record a dead-lettered `create_ghl_subaccount` run in `platform_actions`.
+
+    Round 17, B2 (option C-plus). Registered as this function's `on_failure`
+    handler, so Inngest calls it ONLY after the retry budget is exhausted.
+
+    WHY IT EXISTS. A pool timeout raises before `begin_action`, so the run
+    leaves no action row at all: the dashboard shows the signing as never
+    attempted, `reconcile_pandadoc` cannot re-emit it (its `ON CONFLICT DO
+    NOTHING` sees the committed `onboarding_events` row), and the S1-24 replay
+    endpoint returns `duplicate` with no emit for the same reason. Without this
+    handler the only trace is in Inngest's own dashboard, which violates the
+    project's constraint that partial failures are visible in OURS.
+
+    WHY IT USES THE API ENGINE. `AsyncSessionLocal`, not `WorkerSessionLocal`,
+    and this is the one place in worker code that does so. The failure being
+    recorded may be that the WORKER pool ran out; queueing behind the very
+    holds that caused it would be how the record fails to get written. By the
+    time this runs the retry budget has been spent - roughly 6 to 8 minutes on
+    Inngest's default schedule - so saturation has very likely cleared anyway.
+
+    TIMING IS NOT A CORRECTNESS DEPENDENCY. That 6-to-8-minute figure is
+    indicative (read from the Inngest OSS backoff table; Cloud may differ) and
+    bounds only how long until an operator sees the row, never whether they see
+    it: this fires whenever the dead-letter arrives, short incident or long.
+
+    RESIDUAL, carded on S1-26e rather than solved here: the SDK registers
+    failure handlers with `retries=0` and the docs do not say whether one is
+    retried, so if THIS fails the backstop is Inngest-dashboard visibility.
+    """
+    failure = ctx.event.data
+    original = failure.get("event") or {}
+    data = original.get("data") or {}
+
+    raw_client_id = data.get("client_id")
+    if not raw_client_id:
+        # Nothing addressable to record against. Log loudly rather than raise:
+        # this handler is the last line, and raising here just loses the detail.
+        log.error(
+            "S1-26 dead-letter handler could not identify the client",
+            extra={"function_id": failure.get("function_id"), "run_id": failure.get("run_id")},
+        )
+        return {"recorded": False, "reason": "no client_id on the failed event"}
+
+    client_id = uuid.UUID(raw_client_id)
+    raw_event_id = data.get("onboarding_event_id")
+    onboarding_event_id = uuid.UUID(raw_event_id) if raw_event_id else None
+
+    error = failure.get("error") or {}
+    detail = error.get("message") or error.get("name") or "no error detail on the failure event"
+
+    # The SAME key the run itself would have used, so this either claims the row
+    # the run never got to claim, or lands on the row it did - never a parallel
+    # one the dashboard would show twice.
+    idempotency_key = build_idempotency_key(
+        client_id, GHL_PLATFORM, GHL_CREATE_SUBACCOUNT_ACTION, onboarding_event_id
+    )
+
+    async with AsyncSessionLocal() as session:
+        begun = await begin_action(
+            session,
+            client_id=client_id,
+            event_id=onboarding_event_id,
+            platform=GHL_PLATFORM,
+            action=GHL_CREATE_SUBACCOUNT_ACTION,
+            idempotency_key=idempotency_key,
+            payload=None,
+            inngest_run_id=failure.get("run_id"),
+        )
+        # SUCCESS IS STILL TERMINAL here, exactly as in `_record_failure`. A
+        # dead-letter that arrives after the action genuinely succeeded must not
+        # paint a green action red.
+        if begun.already_succeeded:
+            log.warning(
+                "S1-26 dead-letter arrived for an action already recorded successful",
+                extra={"client_id": str(client_id), "action_id": str(begun.action_id)},
+            )
+            return {"recorded": False, "reason": "action already succeeded"}
+
+        await fail_action(
+            session,
+            action_id=begun.action_id,
+            last_error=f"dead-lettered after Inngest exhausted its retries: {detail}",
+        )
+        await session.commit()
+
+    log.error(
+        "S1-26 GHL sub-account dead-lettered; recorded as failed for the dashboard",
+        extra={
+            "client_id": str(client_id),
+            "action_id": str(begun.action_id),
+            "failed_run_id": failure.get("run_id"),
+        },
+    )
+    return {"recorded": True, "client_id": str(client_id)}
+
+
 @inngest_client.create_function(
     fn_id="create-ghl-subaccount",
     trigger=inngest.TriggerEvent(event=CLIENT_CREATED_EVENT),
+    # ROUND 17, B2. The first `on_failure` handler in this codebase - none of
+    # the eight Inngest functions had one. It is what converts a pool-exhaustion
+    # dead-letter from "silent in our dashboard, visible only in Inngest" into
+    # "a failed row an operator can act on", which is the whole difference
+    # between option C and the option C-plus that shipped.
+    on_failure=record_ghl_subaccount_dead_letter,
     # Global GHL-politeness rate limit (S1-26a follow-up). Bounds the START rate
     # across ALL clients, which the two per-key concurrency caps below cannot: a
     # `reconcile_pandadoc` nightly pass can heal several dropped signings at once,
@@ -2150,6 +2321,20 @@ async def create_ghl_subaccount(ctx: inngest.Context) -> dict:
                 snapshot_id=settings.ghl_snapshot_id,
                 inngest_run_id=ctx.run_id,
             )
+        except SqlaTimeoutError as exc:
+            # THE BELT (round 17, B2). A pool checkout that timed out reached
+            # here as a raw `sqlalchemy.exc.TimeoutError`: it subclasses
+            # `SQLAlchemyError` and none of the types mapped below, so Inngest
+            # saw an unclassified stack and an operator saw no cause.
+            #
+            # Re-raised as a TYPED but still RETRIABLE error, never
+            # `NonRetriableError`. The connections free when the long phase-2
+            # holds complete, so this heals on its own; dead-lettering on first
+            # contact would terminally fail a signing the next attempt would
+            # complete. If the budget really is exhausted, the `on_failure`
+            # recorder above writes it into `platform_actions`, and the message
+            # built here is what lands in `last_error`.
+            raise PoolExhaustedError("worker", str(exc)) from exc
         except (ClientNotFoundError, GhlClientError) as exc:
             raise inngest.NonRetriableError(str(exc)) from exc
         except GhlNotConfiguredError as exc:
@@ -2180,6 +2365,8 @@ __all__ = [
     "GHL_SKIP_REASON_GHL_LOOKUP",
     "ClientNotFoundError",
     "CreateSubaccountResult",
+    "PoolExhaustedError",
     "create_ghl_subaccount",
     "create_ghl_subaccount_core",
+    "record_ghl_subaccount_dead_letter",
 ]

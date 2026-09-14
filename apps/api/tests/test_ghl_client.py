@@ -267,7 +267,10 @@ class TestTwoxxParseGuard:
         client = HttpGhlClient(api_key="agency-key", transport=transport)
         with pytest.raises(GhlServerError) as excinfo:
             await client.find_location_by_email("ops@example.com", company_id="comp_1")
-        assert "could not be parsed" in str(excinfo.value)
+        # Round 17 split the message with the classification: a body that did
+        # not parse at all says "is not JSON", a parsed body with the wrong keys
+        # says "unexpected SHAPE". This test owns the first.
+        assert "is not JSON" in str(excinfo.value)
 
     async def test_the_lookup_guard_does_not_swallow_a_valid_empty_result(self) -> None:
         # The mirror worth pinning: an empty `locations` array is a legitimate
@@ -276,37 +279,72 @@ class TestTwoxxParseGuard:
         client = HttpGhlClient(api_key="agency-key", transport=transport)
         assert await client.find_location_by_email("ops@example.com", company_id="comp_1") is None
 
-    async def test_the_lookup_2xx_missing_id_is_retriable(self) -> None:
-        # ROUND 16, P1.2 - the mirror of `test_2xx_missing_id_is_non_retriable`
-        # on the lookup, and the reason this class needed a second look. Round
-        # 15's guard stopped one line short: `response.json()` and the
-        # `locations` lookup were inside the try, but `locations[0]` and
-        # `hit["id"]` were not. A hit carrying `locationId` instead of `id`
-        # raised a bare `KeyError` straight past the guard - and a bare
-        # exception is not classified at all, which is the failure mode the
-        # guard exists to remove.
+    async def test_the_lookup_2xx_missing_id_is_NON_retriable(self) -> None:
+        # ROUND 17, P2 - the breadth split, and the THIRD classification this
+        # one body has been given. Round 15 raised `GhlClientError` by copying
+        # the create path; round 16 reversed it to `GhlServerError` because the
+        # lookup is read-only and a WAF interstitial is transient. Both rounds
+        # classified on the METHOD, and the method is only half the question.
+        #
+        # THE BODY DECIDES. This one PARSED, and carried a hit keyed
+        # `locationId` instead of `id`: that is GHL's contract having changed,
+        # and no amount of retrying re-keys it. Retrying spends the whole
+        # Inngest budget to arrive at the same dead-letter minutes later, under
+        # an error string blaming a WAF that was never involved.
         transport = _transport(200, {"locations": [{"name": "Sample Gym", "locationId": "loc_1"}]})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlClientError) as excinfo:
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+        assert "unexpected SHAPE" in str(excinfo.value)
+        assert "WAF" not in str(excinfo.value), (
+            "an operator reads this string out of `last_error`; a parsed body with "
+            "the wrong keys is a contract change, so naming a transient sends them "
+            "to look at the wrong system entirely"
+        )
+
+    async def test_the_lookup_2xx_with_locations_as_a_mapping_is_NON_retriable(self) -> None:
+        # `body.get("locations") or []` keeps a non-empty MAPPING, because a
+        # mapping is truthy. `locations[0]` then raises `KeyError(0)`. The body
+        # PARSED, so this is the shape half of the round-17 split, not the
+        # transient half.
+        transport = _transport(200, {"locations": {"id": "loc_1"}})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlClientError):
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+
+    async def test_the_lookup_2xx_with_string_items_is_NON_retriable(self) -> None:
+        # A list of bare id strings indexes as `"loc_1"["id"]` -> `TypeError`.
+        # Parsed body again, so non-retriable again.
+        transport = _transport(200, {"locations": ["loc_1"]})
+        client = HttpGhlClient(api_key="agency-key", transport=transport)
+        with pytest.raises(GhlClientError):
+            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+
+    async def test_the_lookup_2xx_that_is_not_json_at_all_STAYS_retriable(self) -> None:
+        # The other half of the split, and the half round 16 got right. NOTHING
+        # parsed, so the likeliest cause is a CDN or WAF interstitial sat in
+        # front of a read-only GET. That is transient, costs nothing to retry,
+        # and is exactly the case the create path cannot afford to retry
+        # because its POST may already have minted a location.
+        transport = _transport(200, "<html>WAF interstitial</html>")
         client = HttpGhlClient(api_key="agency-key", transport=transport)
         with pytest.raises(GhlServerError) as excinfo:
             await client.find_location_by_email("ops@example.com", company_id="comp_1")
-        assert "could not be parsed" in str(excinfo.value)
+        assert "is not JSON" in str(excinfo.value)
 
-    async def test_the_lookup_2xx_with_locations_as_a_mapping_is_retriable(self) -> None:
-        # `body.get("locations") or []` keeps a non-empty MAPPING, because a
-        # mapping is truthy. `locations[0]` then raises `KeyError(0)` - outside
-        # the round-15 try.
-        transport = _transport(200, {"locations": {"id": "loc_1"}})
-        client = HttpGhlClient(api_key="agency-key", transport=transport)
+    async def test_the_two_halves_of_the_split_classify_OPPOSITELY(self) -> None:
+        # The split stated as one assertion, so a later "consistency" tidy-up
+        # that re-unifies the two halves has to delete a test to do it. Same
+        # method, same 2xx status, two verdicts - decided by whether the body
+        # parsed, which is the distinction rounds 15 and 16 both missed.
+        shape = HttpGhlClient(
+            api_key="agency-key", transport=_transport(200, {"locations": [{"locationId": "l"}]})
+        )
+        with pytest.raises(GhlClientError):
+            await shape.find_location_by_email("ops@example.com", company_id="comp_1")
+        nonjson = HttpGhlClient(api_key="agency-key", transport=_transport(200, "<html>x</html>"))
         with pytest.raises(GhlServerError):
-            await client.find_location_by_email("ops@example.com", company_id="comp_1")
-
-    async def test_the_lookup_2xx_with_string_items_is_retriable(self) -> None:
-        # A list of bare id strings indexes as `"loc_1"["id"]` -> `TypeError`,
-        # the third shape that escaped the round-15 try.
-        transport = _transport(200, {"locations": ["loc_1"]})
-        client = HttpGhlClient(api_key="agency-key", transport=transport)
-        with pytest.raises(GhlServerError):
-            await client.find_location_by_email("ops@example.com", company_id="comp_1")
+            await nonjson.find_location_by_email("ops@example.com", company_id="comp_1")
 
     async def test_the_create_and_the_lookup_classify_an_unparseable_2xx_OPPOSITELY(self) -> None:
         # The asymmetry stated as an assertion rather than only in the two
