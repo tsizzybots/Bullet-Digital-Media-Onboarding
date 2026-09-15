@@ -157,7 +157,7 @@ from datetime import timedelta
 
 import inngest
 from sqlalchemy import Row, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as SqlaTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -193,6 +193,7 @@ from bullet_api.worker.identity_key import (
     postcodes_materially_diverge,
 )
 from bullet_api.worker.platform_actions import (
+    STATUS_FAILED,
     begin_action,
     build_idempotency_key,
     complete_action,
@@ -2102,9 +2103,13 @@ async def record_ghl_subaccount_dead_letter(ctx: inngest.Context) -> dict:
     bounds only how long until an operator sees the row, never whether they see
     it: this fires whenever the dead-letter arrives, short incident or long.
 
-    RESIDUAL, carded on S1-26e rather than solved here: the SDK registers
-    failure handlers with `retries=0` and the docs do not say whether one is
-    retried, so if THIS fails the backstop is Inngest-dashboard visibility.
+    RESIDUAL, narrowed in round 18. The SDK registers failure handlers with
+    `Retries(attempts=0)`, so this handler's write is itself un-retried: if the
+    WRITE fails, the record is lost and Inngest's own dashboard is the only
+    remaining trace. That half is carded on S1-26e. The other half - the
+    handler CRASHING rather than writing - is closed here rather than deferred:
+    a malformed id and a missing client row both used to raise straight out of
+    the last line in the chain, and both now return `recorded: False`.
     """
     failure = ctx.event.data
     original = failure.get("event") or {}
@@ -2120,9 +2125,23 @@ async def record_ghl_subaccount_dead_letter(ctx: inngest.Context) -> dict:
         )
         return {"recorded": False, "reason": "no client_id on the failed event"}
 
-    client_id = uuid.UUID(raw_client_id)
-    raw_event_id = data.get("onboarding_event_id")
-    onboarding_event_id = uuid.UUID(raw_event_id) if raw_event_id else None
+    # PARSE DEFENSIVELY (round 18, fix 2b). A malformed id raised straight out
+    # of `uuid.UUID()` and escaped. This handler is the LAST LINE in the chain,
+    # so anything that raises here loses the very record it exists to write,
+    # and there is nothing behind it to notice the loss.
+    try:
+        client_id = uuid.UUID(raw_client_id)
+        raw_event_id = data.get("onboarding_event_id")
+        onboarding_event_id = uuid.UUID(raw_event_id) if raw_event_id else None
+    except (ValueError, AttributeError, TypeError) as exc:
+        log.error(
+            "S1-26 dead-letter handler could not parse the ids on the failed event",
+            extra={
+                "error": f"{type(exc).__name__}: {exc}",
+                "run_id": failure.get("run_id"),
+            },
+        )
+        return {"recorded": False, "reason": "unparseable ids on the failed event"}
 
     error = failure.get("error") or {}
     detail = error.get("message") or error.get("name") or "no error detail on the failure event"
@@ -2135,19 +2154,36 @@ async def record_ghl_subaccount_dead_letter(ctx: inngest.Context) -> dict:
     )
 
     async with AsyncSessionLocal() as session:
-        begun = await begin_action(
-            session,
-            client_id=client_id,
-            event_id=onboarding_event_id,
-            platform=GHL_PLATFORM,
-            action=GHL_CREATE_SUBACCOUNT_ACTION,
-            idempotency_key=idempotency_key,
-            payload=None,
-            inngest_run_id=failure.get("run_id"),
-        )
+        # THE CLIENT ROW MAY NOT EXIST (round 18, fix 2a). `on_failure` also
+        # fires for `ClientNotFoundError`, which is the ONE failure the core
+        # legitimately leaves with no `platform_actions` row - and
+        # `platform_actions.client_id` is a foreign key, so claiming a row for
+        # a client that is not there violates it. Reproduced at head:
+        # `ForeignKeyViolationError` propagated out of the last line.
+        try:
+            begun = await begin_action(
+                session,
+                client_id=client_id,
+                event_id=onboarding_event_id,
+                platform=GHL_PLATFORM,
+                action=GHL_CREATE_SUBACCOUNT_ACTION,
+                idempotency_key=idempotency_key,
+                payload=None,
+                inngest_run_id=failure.get("run_id"),
+            )
+        except IntegrityError:
+            await session.rollback()
+            log.error(
+                "S1-26 dead-letter handler has no client row to record against",
+                extra={"client_id": str(client_id), "run_id": failure.get("run_id")},
+            )
+            return {"recorded": False, "reason": "no clients row for the failed event"}
+
         # SUCCESS IS STILL TERMINAL here, exactly as in `_record_failure`. A
         # dead-letter that arrives after the action genuinely succeeded must not
-        # paint a green action red.
+        # paint a green action red. Round 18 gave this its own test and pin: it
+        # is B1's defect returning through the `on_failure` path instead of the
+        # inline one, and it was load-bearing with nothing holding it down.
         if begun.already_succeeded:
             log.warning(
                 "S1-26 dead-letter arrived for an action already recorded successful",
@@ -2155,10 +2191,29 @@ async def record_ghl_subaccount_dead_letter(ctx: inngest.Context) -> dict:
             )
             return {"recorded": False, "reason": "action already succeeded"}
 
+        # AND TERMINAL FAILURE IS TERMINAL TOO (round 18, fix 3), which is the
+        # same rule one state over. On a `NonRetriableError` - a GHL 4xx, or the
+        # parsed-but-wrong-shape verdict - `_record_failure` has ALREADY
+        # recorded the true cause inline. Writing again bumps `retry_count` a
+        # second time for one attempt and replaces a precise diagnosis with a
+        # generic one, so the operator loses the only string that said what went
+        # wrong. A recorded cause is authoritative; this handler writes only
+        # where nothing has been written.
+        if begun.status == STATUS_FAILED:
+            log.info(
+                "S1-26 dead-letter arrived for an action that already recorded its cause",
+                extra={"client_id": str(client_id), "action_id": str(begun.action_id)},
+            )
+            return {"recorded": False, "reason": "cause already recorded inline"}
+
+        # NEUTRAL WORDING (round 18, fix 3). This used to say "after Inngest
+        # exhausted its retries", which the handler is not in a position to
+        # claim: a `NonRetriableError` dead-letters on the FIRST attempt with
+        # the budget untouched. It knows Inngest stopped, not why.
         await fail_action(
             session,
             action_id=begun.action_id,
-            last_error=f"dead-lettered after Inngest exhausted its retries: {detail}",
+            last_error=f"dead-lettered by Inngest: {detail}",
         )
         await session.commit()
 

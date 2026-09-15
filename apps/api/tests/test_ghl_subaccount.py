@@ -5798,7 +5798,14 @@ async def test_a_transient_failure_repairing_a_recoverable_torn_action_keeps_the
         return await real_execute(statement, *args, **kwargs)
 
     monkeypatch.setattr(async_session, "execute", _explode_once_on_repair)
-    with contextlib.suppress(Exception):
+    # ROUND 18: `pytest.raises(..., match=...)` instead of
+    # `contextlib.suppress(Exception)`. Suppressing meant this test passed
+    # whether or not the injected fault ever fired, and whether or not the
+    # thing that fired was the thing injected - the "test describing an
+    # injection it never made" shape flagged three rounds running. B1 is this
+    # PR's most-scrutinised fix, so its mirror does not get to be a test that
+    # cannot fail. A different exception, or none at all, now fails here.
+    with pytest.raises(SQLAlchemyError, match="transient reset repairing the torn client row"):
         await create_ghl_subaccount_core(
             async_session,
             FakeGhlClient(location=_ghl_location("loc_UNUSED"), lookup_result=None),
@@ -6031,6 +6038,269 @@ def test_the_dead_letter_recorder_is_wired_as_the_functions_on_failure() -> None
         create_ghl_subaccount._opts.on_failure
         is ghl_subaccount_module.record_ghl_subaccount_dead_letter
     ), "the recorder must be registered as the function's on_failure handler"
+
+
+def _dead_letter_ctx(
+    client_id: object,
+    event_id: object,
+    *,
+    name: str = "PoolExhaustedError",
+    message: str = "the worker pool was exhausted; no connection for the client load",
+) -> object:
+    """An `inngest/function.failed` ctx, shaped the way Inngest sends it.
+
+    The original triggering event nests at `data.event.data` and the error at
+    `data.error`, per Inngest's system-event reference (looked up in round 17,
+    not assumed). Built once here so the round-18 tests below cannot each
+    invent a slightly different payload and agree with themselves.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        event=SimpleNamespace(
+            data={
+                "function_id": "bullet-api-create-ghl-subaccount",
+                "run_id": "run_that_died",
+                "error": {"name": name, "message": message},
+                "event": {
+                    "name": "client.created",
+                    "data": {
+                        "client_id": str(client_id),
+                        "onboarding_event_id": str(event_id),
+                    },
+                },
+            }
+        ),
+        run_id="failure_handler_run",
+    )
+
+
+@pytest.mark.db
+async def test_the_dead_letter_recorder_never_paints_a_committed_success_red(
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 18, fix 1. B1's principle one level up, in the handler.
+
+    The recorder's `already_succeeded` guard was load-bearing and untested.
+    Deleting it lets a dead-letter arriving after a genuine success overwrite
+    that success with `failed` - which is B1 returning through the `on_failure`
+    path instead of the inline one. Same rule, same reason: a success carrying
+    its id is a durable fact, and nothing that arrives afterwards gets to
+    discard it.
+
+    This can happen for real. Inngest dead-letters the RUN; a run can fail on a
+    late step after the action row was already completed and committed, which
+    is precisely the state round 15's terminal-success check exists for.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@dl-success.example.com",
+        business_name="Dead Letter Success Gym",
+        legal_entity="Dead Letter Success Gym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    first = await create_ghl_subaccount_core(
+        async_session,
+        FakeGhlClient(location=_ghl_location("loc_DONE"), lookup_result=None),
+        client_id=client_id,
+        onboarding_event_id=event_id,
+        company_id=COMPANY_ID,
+    )
+    assert first.created is True
+
+    monkeypatch.setattr(
+        ghl_subaccount_module, "AsyncSessionLocal", lambda: _NonClosingSession(async_session)
+    )
+    result = await ghl_subaccount_module.record_ghl_subaccount_dead_letter(
+        _dead_letter_ctx(client_id, event_id)
+    )
+
+    assert result["recorded"] is False
+    row = (
+        await async_session.execute(
+            text(
+                "SELECT status, external_id, last_error, retry_count FROM platform_actions "
+                "WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+    assert row.status == "success", "a committed success must survive a late dead-letter"
+    assert row.external_id == "loc_DONE"
+    assert row.last_error is None, "and it must not acquire an error it never had"
+    assert row.retry_count == 0
+
+
+@pytest.mark.db
+async def test_the_dead_letter_recorder_does_not_crash_on_a_missing_client(
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 18, fix 2a. `on_failure` also fires for `ClientNotFoundError`.
+
+    That is the one failure the core legitimately leaves with no
+    `platform_actions` row, because `platform_actions.client_id` is a foreign
+    key to `clients` and the row is not there. The recorder then tried to
+    INSERT against the missing client and the FK violation escaped, so the
+    handler whose entire job is to be the last line crashed instead of
+    reporting. Reproduced at head: `IntegrityError` propagates.
+    """
+    missing_client = uuid.uuid4()
+    event_id = await _seed_onboarding_event(async_session)
+
+    monkeypatch.setattr(
+        ghl_subaccount_module, "AsyncSessionLocal", lambda: _NonClosingSession(async_session)
+    )
+    result = await ghl_subaccount_module.record_ghl_subaccount_dead_letter(
+        _dead_letter_ctx(
+            missing_client,
+            event_id,
+            name="ClientNotFoundError",
+            message=f"clients row {missing_client} not found; cannot create GHL sub-account.",
+        )
+    )
+
+    assert result["recorded"] is False, (
+        "no client row means nothing to record against; the handler must say so "
+        "rather than raise a foreign-key violation out of the last line"
+    )
+    await async_session.rollback()
+
+
+async def test_the_dead_letter_recorder_does_not_crash_on_a_malformed_client_id() -> None:
+    """Round 18, fix 2b. A malformed id raised out of `uuid.UUID()`.
+
+    No DB needed: at head this dies before the session is ever opened. The
+    handler is the last line in the chain, so ANY unhandled raise here loses
+    the record it exists to write.
+    """
+    result = await ghl_subaccount_module.record_ghl_subaccount_dead_letter(
+        _dead_letter_ctx("not-a-uuid", uuid.uuid4())
+    )
+    assert result["recorded"] is False
+
+
+@pytest.mark.db
+async def test_the_dead_letter_recorder_does_not_overwrite_a_recorded_cause(
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 18, fix 3. Terminal failure is terminal, mirroring terminal success.
+
+    On a `NonRetriableError` - a GHL 4xx, or round 17's parsed-but-wrong-shape
+    verdict - `_record_failure` has ALREADY recorded the true cause inline.
+    Inngest then dead-letters the run and the recorder fired on top, bumping
+    `retry_count` a second time and replacing a precise diagnosis with
+    "exhausted its retries". Both are false: the budget was never spent, and
+    the operator loses the only string that said what actually went wrong.
+
+    A recorded cause is authoritative. The recorder writes only where nothing
+    has been written.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@dl-precise.example.com",
+        business_name="Dead Letter Precise Gym",
+        legal_entity="Dead Letter Precise Gym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+    with pytest.raises(GhlClientError):
+        await create_ghl_subaccount_core(
+            async_session,
+            FakeGhlClient(
+                error=GhlClientError(
+                    422, "2xx location-search response has an unexpected SHAPE (KeyError)"
+                ),
+                lookup_result=None,
+            ),
+            client_id=client_id,
+            onboarding_event_id=event_id,
+            company_id=COMPANY_ID,
+        )
+
+    before = (
+        await async_session.execute(
+            text(
+                "SELECT status, last_error, retry_count FROM platform_actions "
+                "WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+    assert before.status == "failed"
+    assert "unexpected SHAPE" in before.last_error
+
+    monkeypatch.setattr(
+        ghl_subaccount_module, "AsyncSessionLocal", lambda: _NonClosingSession(async_session)
+    )
+    result = await ghl_subaccount_module.record_ghl_subaccount_dead_letter(
+        _dead_letter_ctx(client_id, event_id, name="NonRetriableError", message="dead-lettered")
+    )
+
+    assert result["recorded"] is False
+    after = (
+        await async_session.execute(
+            text(
+                "SELECT status, last_error, retry_count FROM platform_actions "
+                "WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+    assert after.last_error == before.last_error, (
+        "the inline recorder already diagnosed this; the dead-letter handler "
+        "must not replace a precise cause with a generic one"
+    )
+    assert after.retry_count == before.retry_count, "and must not bump the count a second time"
+
+
+@pytest.mark.db
+async def test_the_dead_letter_record_does_not_claim_the_retry_budget_was_spent(
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 18, fix 3, the other half: the prefix on rows it DOES write.
+
+    The handler cannot know WHY Inngest stopped. A `NonRetriableError`
+    dead-letters on the first attempt with the budget untouched, so
+    "after Inngest exhausted its retries" is a claim the recorder is not in a
+    position to make. Neutral wording, and the detail carries the cause.
+    """
+    client_id = await _seed_client(
+        async_session,
+        email="ops@dl-neutral.example.com",
+        business_name="Dead Letter Neutral Gym",
+        legal_entity="Dead Letter Neutral Gym",
+        postal_code="E8 1AA",
+    )
+    event_id = await _seed_onboarding_event(async_session)
+
+    monkeypatch.setattr(
+        ghl_subaccount_module, "AsyncSessionLocal", lambda: _NonClosingSession(async_session)
+    )
+    result = await ghl_subaccount_module.record_ghl_subaccount_dead_letter(
+        _dead_letter_ctx(client_id, event_id)
+    )
+
+    assert result["recorded"] is True
+    row = (
+        await async_session.execute(
+            text(
+                "SELECT status, last_error FROM platform_actions "
+                "WHERE client_id = :id AND action = :action"
+            ),
+            {"id": client_id, "action": GHL_CREATE_SUBACCOUNT_ACTION},
+        )
+    ).one()
+    assert row.status == "failed"
+    assert "the worker pool was exhausted" in row.last_error
+    assert "exhausted its retries" not in row.last_error, (
+        "the recorder cannot know the budget was spent - a NonRetriableError "
+        "dead-letters on attempt one - so it must not assert it"
+    )
 
 
 @pytest.mark.db

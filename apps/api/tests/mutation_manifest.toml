@@ -2060,9 +2060,14 @@ must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_is_wire
 # `fail_action` call leaves a handler that opens a session, claims the row and
 # commits nothing useful - which reads as working and shows the operator
 # nothing, the exact failure mode option C-plus exists to close.
+# RETARGETED IN ROUND 18, and by this round's own edit. The `find` embedded the
+# literal `dead-lettered after Inngest exhausted its retries`, which fix 3
+# replaced with neutral wording, so the anchor matched nothing. The guard it
+# pins is unchanged in intent: the handler must actually WRITE, not merely
+# claim a row and commit nothing.
 name = "R17 - the dead-letter recorder writes the failure, not just an action row"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "        await fail_action(\n            session,\n            action_id=begun.action_id,\n            last_error=f\"dead-lettered after Inngest exhausted its retries: {detail}\",\n        )\n"
+find = "        await fail_action(\n            session,\n            action_id=begun.action_id,\n            last_error=f\"dead-lettered by Inngest: {detail}\",\n        )\n"
 replace = ""
 must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_writes_a_visible_failed_action"
 
@@ -2076,6 +2081,65 @@ file = "src/bullet_api/worker/ghl_subaccount.py"
 find = "    async with AsyncSessionLocal() as session:"
 replace = "    async with WorkerSessionLocal() as session:"
 must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_writes_a_visible_failed_action"
+
+[[mutation]]
+# Round 18, fix 1. B1's defect returning through the `on_failure` path instead
+# of the inline one. The guard was load-bearing and had NOTHING holding it
+# down: delete it and a dead-letter arriving after a genuine success overwrites
+# that success with `failed`, discarding a committed id. Same rule as round
+# 15's terminal-success check, one level up, and it shipped unpinned.
+name = "R18 - the dead-letter recorder never paints a committed success red"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if begun.already_succeeded:\n            log.warning(\n                \"S1-26 dead-letter arrived for an action already recorded successful\","
+replace = "        if False:\n            log.warning(\n                \"S1-26 dead-letter arrived for an action already recorded successful\","
+must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_never_paints_a_committed_success_red"
+
+[[mutation]]
+# Round 18, fix 2a. `on_failure` also fires for `ClientNotFoundError`, which is
+# the one failure the core legitimately leaves with no action row - and
+# `platform_actions.client_id` is a foreign key. Without this catch the
+# recorder's INSERT violates it and the exception escapes the LAST LINE in the
+# chain, so the handler whose whole job is to report crashes instead.
+name = "R18 - a missing client row makes the recorder report, not crash"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        except IntegrityError:\n            await session.rollback()"
+replace = "        except (KeyboardInterrupt,):\n            await session.rollback()"
+must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_does_not_crash_on_a_missing_client"
+
+[[mutation]]
+# Round 18, fix 2b. A malformed id raised straight out of `uuid.UUID()`, one
+# step earlier than the FK case and with the same consequence: the record the
+# handler exists to write is lost, and nothing behind it notices.
+name = "R18 - an unparseable id makes the recorder report, not crash"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "    except (ValueError, AttributeError, TypeError) as exc:\n        log.error(\n            \"S1-26 dead-letter handler could not parse the ids on the failed event\","
+replace = "    except (KeyboardInterrupt,) as exc:\n        log.error(\n            \"S1-26 dead-letter handler could not parse the ids on the failed event\","
+must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_does_not_crash_on_a_malformed_client_id"
+
+[[mutation]]
+# Round 18, fix 3. TERMINAL FAILURE IS TERMINAL, the same rule as the success
+# guard one state over. `_record_failure` has already recorded the true cause
+# inline on a NonRetriableError; without this guard the recorder bumps
+# `retry_count` a second time for one attempt and replaces a precise diagnosis
+# ("unexpected SHAPE") with a generic one, so the operator loses the only
+# string that said what actually went wrong.
+name = "R18 - a cause already recorded inline is not overwritten by the recorder"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "        if begun.status == STATUS_FAILED:"
+replace = "        if False:"
+must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_recorder_does_not_overwrite_a_recorded_cause"
+
+[[mutation]]
+# Round 18, fix 3, the other half. The handler knows Inngest STOPPED, not why.
+# A NonRetriableError dead-letters on the FIRST attempt with the budget
+# untouched, so "after Inngest exhausted its retries" is a claim it is not in a
+# position to make - and it lands in `last_error`, which is what an operator
+# reads.
+name = "R18 - the dead-letter record does not claim the retry budget was spent"
+file = "src/bullet_api/worker/ghl_subaccount.py"
+find = "            last_error=f\"dead-lettered by Inngest: {detail}\","
+replace = "            last_error=f\"dead-lettered after Inngest exhausted its retries: {detail}\","
+must_fail = "tests/test_ghl_subaccount.py::test_the_dead_letter_record_does_not_claim_the_retry_budget_was_spent"
 
 [[mutation]]
 # Round 17, P3 (replacing round 16's entry of the same intent, whose `find` went

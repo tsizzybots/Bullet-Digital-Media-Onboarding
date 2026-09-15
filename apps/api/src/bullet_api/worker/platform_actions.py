@@ -43,6 +43,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # 0005_create_platform_actions.STATUS_VALUES.
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_SUCCESS = "success"
+# Read by `ghl_subaccount`'s dead-letter recorder (round 18, fix 3) to skip a
+# row whose cause was already recorded inline, so a `NonRetriableError` keeps
+# its precise diagnosis instead of being overwritten with a generic one.
 STATUS_FAILED = "failed"
 
 

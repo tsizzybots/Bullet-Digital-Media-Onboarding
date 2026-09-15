@@ -119,11 +119,23 @@ ENGINE_SERVER_SETTINGS = {"statement_timeout": "5000"}
 # The budget is roughly 6 to 8 minutes (Inngest default 4 retries plus the
 # initial attempt, backoff 15s/30s/1m/2m with 0-30s jitter, plus each attempt's
 # own `pool_timeout` wait). That figure is INDICATIVE - it was read from the
-# Inngest OSS repo and Cloud may differ - and it bounds only HOW LONG until an
-# operator sees the failed row, never WHETHER they see it: the handler catches
-# the dead-letter whenever it arrives, short incident or long. The structural
-# fix that removes the window entirely is a dedicated GHL pool, carded on
-# S1-26l; see `docs/s1-26bc-round17-b2-pool-claim-first-spec.md`.
+# Inngest OSS repo and Cloud may differ - and it bounds HOW LONG until an
+# operator sees the failed row.
+#
+# IT DOES NOT GUARANTEE THAT THEY SEE IT, and this comment previously said it
+# did (corrected round 18). The words were "never WHETHER they see it", and
+# they are false for a reason round 17's own new rule should have caught before
+# they were written: the SDK registers failure handlers with
+# `Retries(attempts=0)`, so the recorder's write is ITSELF un-retried. If that
+# single write fails - the API pool saturated as well, a connection reset,
+# anything - the record is lost and Inngest's own dashboard is the only
+# remaining trace. Retrying that write is carded on S1-26e. What the handler
+# does guarantee is that it FIRES whenever the dead-letter arrives, short
+# incident or long; whether its write lands is a separate question, and the old
+# wording asserted it as settled.
+#
+# The structural fix that removes the window entirely is a dedicated GHL pool,
+# carded on S1-26l; see `docs/s1-26bc-round17-b2-pool-claim-first-spec.md`.
 #
 # The api timeout drops from SQLAlchemy's default 30s to 10s. Nothing on the
 # dashboard's read path is worth holding a request for half a minute; failing
