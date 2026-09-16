@@ -41,7 +41,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bullet_api.db.session import AsyncSessionLocal
+from bullet_api.db.session import WorkerSessionLocal
 from bullet_api.storage.client import ObjectNotFound, StorageClient, get_storage_client
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.events import (
@@ -342,7 +342,7 @@ async def summarise_sales_call(ctx: inngest.Context) -> dict:
     storage = get_storage_client()
     summary_client = get_summary_client()
 
-    async with AsyncSessionLocal() as session:
+    async with WorkerSessionLocal() as session:
         try:
             result = await summarise_sales_call_core(
                 session,

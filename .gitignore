@@ -53,3 +53,7 @@ logs/
 # Local investigation dumps (apps/api/.tmp holds PandaDoc shape recon output;
 # raw bodies contain real client PII so must never be committed)
 .tmp/
+
+# review-gate mutation runner: exclusive-run lock + crash-recovery sidecars
+apps/api/.review_gate_mutate.lock
+*.review_gate.orig

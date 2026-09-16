@@ -97,6 +97,7 @@ export function ClientDetail({ id }: { id: string }) {
     <div className="space-y-6">
       <BackLink />
       <HeaderCard client={data} />
+      <DuplicateNotice client={data} />
       <Section title="AI sales summary">
         <SalesSummary entries={data.sales_summary} />
       </Section>
@@ -149,6 +150,24 @@ function HeaderCard({ client }: { client: ClientDetail }) {
           <div className="mt-1 text-xs text-muted-foreground">
             Legal entity: {client.legal_entity}
           </div>
+          {/*
+            S1-26c: this signing was auto-linked into an existing client's GHL
+            sub-account as a returning client. Shown because an auto-link is a
+            merge decision the automation made on its own - if the identity key
+            matched two businesses that only LOOK alike, this line is the only
+            place a human would notice.
+          */}
+          {client.parent_client_id && (
+            <div className="mt-1 text-xs text-muted-foreground">
+              Returning client - shares a sub-account with{' '}
+              <Link
+                href={`/clients/${client.parent_client_id}`}
+                className="underline underline-offset-4 hover:text-foreground"
+              >
+                the original client record
+              </Link>
+            </div>
+          )}
         </div>
         <div className="flex flex-col items-end gap-1">
           <Badge variant="neutral">{stepLabel(client.current_step)}</Badge>
@@ -158,6 +177,52 @@ function HeaderCard({ client }: { client: ClientDetail }) {
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * S1-26c: surface an uncorroborated returning-client match.
+ *
+ * The worker never auto-merges a match it cannot prove (an identity-key
+ * collision whose full names diverge, or a GHL location found by email whose
+ * name/postcode do not corroborate). It provisions this client its own
+ * sub-account and raises the flag instead. That decision is only safe if a
+ * human can see it, so the notice names the candidate - the sibling client, or
+ * the GHL location id - rather than leaving someone to search the agency.
+ *
+ * Renders nothing on the normal path.
+ */
+function DuplicateNotice({ client }: { client: ClientDetail }) {
+  if (!client.possible_duplicate) {
+    return null
+  }
+  return (
+    <Alert variant="warning">
+      <div className="font-medium">Possible duplicate - needs review</div>
+      <p className="mt-1">
+        A returning-client match was found but could not be confirmed, so this
+        client was given its own GHL sub-account rather than being merged.
+      </p>
+      {client.possible_duplicate_of && (
+        <p className="mt-2">
+          Candidate client:{' '}
+          <Link
+            href={`/clients/${client.possible_duplicate_of}`}
+            className="underline underline-offset-4"
+          >
+            {client.possible_duplicate_of}
+          </Link>
+        </p>
+      )}
+      {client.possible_duplicate_ghl_id && (
+        <p className="mt-2">
+          Candidate GHL sub-account:{' '}
+          <code className="rounded bg-black/20 px-1">
+            {client.possible_duplicate_ghl_id}
+          </code>
+        </p>
+      )}
+    </Alert>
   )
 }
 

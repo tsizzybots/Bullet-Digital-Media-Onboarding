@@ -444,3 +444,106 @@ async def test_malformed_id_404_not_500(authed_client: AsyncClient) -> None:
 async def test_requires_authentication(anon_client: AsyncClient) -> None:
     resp = await anon_client.get(f"/clients/{uuid.uuid4()}")
     assert resp.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# S1-26c: the duplicate / returning-client fields the dashboard renders.
+#
+# These are the ONLY signal a human gets that the automation made (or declined
+# to make) a merge decision, so the endpoint must actually return them - a
+# badge bound to a field the API never sends is a silently dead warning.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.db
+async def test_detail_returns_duplicate_fields_defaulted_when_clean(
+    authed_client: AsyncClient, async_session: AsyncSession
+) -> None:
+    """The normal path: not a duplicate, not linked. All four fields present."""
+    run = uuid.uuid4().hex[:8]
+    client_id = await _seed_client(async_session, email=f"clean-{run}@example.com")
+
+    response = await authed_client.get(f"/clients/{client_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["possible_duplicate"] is False
+    assert body["possible_duplicate_of"] is None
+    assert body["possible_duplicate_ghl_id"] is None
+    assert body["parent_client_id"] is None
+
+
+@pytest.mark.db
+async def test_detail_surfaces_a_client_collision_candidate(
+    authed_client: AsyncClient, async_session: AsyncSession
+) -> None:
+    """An identity-key collision against another CLIENT names that client, so
+    the dashboard can link straight to it."""
+    run = uuid.uuid4().hex[:8]
+    sibling_id = await _seed_client(async_session, email=f"sib-{run}@example.com")
+    client_id = await _seed_client(async_session, email=f"dup-{run}@example.com")
+    await async_session.execute(
+        text(
+            "UPDATE clients SET possible_duplicate = true, possible_duplicate_of = :sib "
+            "WHERE id = :id"
+        ),
+        {"sib": sibling_id, "id": client_id},
+    )
+
+    body = (await authed_client.get(f"/clients/{client_id}")).json()
+
+    assert body["possible_duplicate"] is True
+    assert body["possible_duplicate_of"] == str(sibling_id)
+    assert body["possible_duplicate_ghl_id"] is None
+
+
+@pytest.mark.db
+async def test_detail_surfaces_a_ghl_location_candidate(
+    authed_client: AsyncClient, async_session: AsyncSession
+) -> None:
+    """A collision against a GHL LOCATION has no clients row to point at, so the
+    location id is what the dashboard must show - otherwise the reviewer's
+    "the flag is inert" holds even with a badge, because nobody knows WHAT to
+    merge into."""
+    run = uuid.uuid4().hex[:8]
+    client_id = await _seed_client(async_session, email=f"ghldup-{run}@example.com")
+    await async_session.execute(
+        text(
+            "UPDATE clients SET possible_duplicate = true, "
+            "  possible_duplicate_ghl_id = 'loc_legacy_123' WHERE id = :id"
+        ),
+        {"id": client_id},
+    )
+
+    body = (await authed_client.get(f"/clients/{client_id}")).json()
+
+    assert body["possible_duplicate"] is True
+    assert body["possible_duplicate_ghl_id"] == "loc_legacy_123"
+    assert body["possible_duplicate_of"] is None
+
+
+@pytest.mark.db
+async def test_detail_surfaces_an_auto_link_to_the_parent(
+    authed_client: AsyncClient, async_session: AsyncSession
+) -> None:
+    """A returning client auto-linked into an existing sub-account exposes
+    `parent_client_id`. This is a merge the automation performed on its own, so
+    it has to be visible - it is the only place a wrong link would be noticed."""
+    run = uuid.uuid4().hex[:8]
+    parent_id = await _seed_client(
+        async_session, email=f"parent-{run}@example.com", ghl_subaccount_id="loc_shared"
+    )
+    child_id = await _seed_client(async_session, email=f"child-{run}@example.com")
+    await async_session.execute(
+        text(
+            "UPDATE clients SET parent_client_id = :parent, ghl_subaccount_id = 'loc_shared' "
+            "WHERE id = :id"
+        ),
+        {"parent": parent_id, "id": child_id},
+    )
+
+    body = (await authed_client.get(f"/clients/{child_id}")).json()
+
+    assert body["parent_client_id"] == str(parent_id)
+    assert body["ghl_subaccount_id"] == "loc_shared"
+    assert body["possible_duplicate"] is False

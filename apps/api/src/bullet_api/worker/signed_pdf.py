@@ -44,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.config import get_settings
 from bullet_api.db.enums import DOCUMENT_KIND_PANDADOC_SIGNED_PDF
-from bullet_api.db.session import AsyncSessionLocal
+from bullet_api.db.session import WorkerSessionLocal
 from bullet_api.pandadoc.accounts import PANDADOC_ACCOUNT_UK, api_key_for
 from bullet_api.pandadoc.client import HttpPandaDocClient, PandaDocClient, PandaDocNotFound
 from bullet_api.storage.client import StorageClient, get_storage_client
@@ -277,7 +277,7 @@ async def store_signed_pdf(ctx: inngest.Context) -> dict:
     )
     storage = get_storage_client()
 
-    async with AsyncSessionLocal() as session:
+    async with WorkerSessionLocal() as session:
         try:
             result = await store_signed_pdf_core(
                 session,

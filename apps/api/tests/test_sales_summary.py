@@ -468,7 +468,7 @@ async def _invoke_wrapper(monkeypatch, *, data=None, core_exc=None):
     monkeypatch.setattr(sales_summary_module, "summarise_sales_call_core", _core)
     monkeypatch.setattr(sales_summary_module, "get_storage_client", lambda: object())
     monkeypatch.setattr(sales_summary_module, "get_summary_client", lambda: object())
-    monkeypatch.setattr(sales_summary_module, "AsyncSessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(sales_summary_module, "WorkerSessionLocal", lambda: _FakeSession())
     return await summarise_sales_call._handler(_ctx(data))
 
 

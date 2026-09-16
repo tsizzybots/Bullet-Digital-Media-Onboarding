@@ -31,9 +31,25 @@ PANDADOC_SIGNED_EVENT = "pandadoc.signed"
 # signed-PDF storage in R2, ...) keys off this event rather than
 # `pandadoc.signed` directly, so `client_id` is guaranteed to exist in the
 # payload they receive. Data payload: {client_id, onboarding_event_id,
-# document_id, email, account}. `account` (S1-25c) is propagated from
+# document_id, email, account, dedup_key}. `account` (S1-25c) is propagated from
 # `pandadoc.signed` so the signed-PDF worker downloads with the matching
 # PandaDoc API key.
+#
+# `dedup_key` (S1-26c) is a CONCURRENCY CONTRACT, not informational: the GHL
+# sub-account worker declares a per-key `Concurrency(limit=1)` on it, so two
+# signings for the same business serialise through the returning-client check
+# instead of both seeing "no sibling" and both provisioning. Producers MUST set
+# it - `identity_key` when computable, else `email:<lowercased>`, else the
+# client_id. The CONSUMER's CEL key expression is
+# `has(event.data.dedup_key) ? event.data.dedup_key : "email:" + event.data.email`
+# (verified against a local Inngest dev server, not just a successful sync -
+# S1-34a taught that a sync alone is not proof) - it falls back to
+# `"email:" + email`, NOT `client_id` (fixed docstring, review round 4: this
+# comment used to claim the fallback was `client_id`, which stopped matching
+# the deployed CEL expression once the email fallback was added). Events
+# emitted BEFORE S1-26c (already queued when it deploys) still land in a
+# well-defined bucket rather than colliding in one null bucket; that fallback
+# is back-compat only, not a licence to omit the field.
 CLIENT_CREATED_EVENT = "client.created"
 
 # Emitted by the S1-27 Google Meet webhook (`/webhooks/google-meet`) once a

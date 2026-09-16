@@ -44,7 +44,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bullet_api.db.enums import CLIENT_KNOWLEDGE_SOURCE_SALES_CALL
-from bullet_api.db.session import AsyncSessionLocal
+from bullet_api.db.session import WorkerSessionLocal
 from bullet_api.summary.models import SalesCallSummary
 from bullet_api.worker._inngest import inngest_client
 from bullet_api.worker.embedding_client import (
@@ -373,7 +373,7 @@ async def store_sales_knowledge(ctx: inngest.Context) -> dict:
 
     embedder = get_embedding_client()
 
-    async with AsyncSessionLocal() as session:
+    async with WorkerSessionLocal() as session:
         try:
             result = await store_sales_knowledge_core(
                 session,

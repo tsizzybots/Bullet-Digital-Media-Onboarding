@@ -88,13 +88,27 @@ function ClientRowView({ client }: { client: ClientRow }) {
   return (
     <tr className="border-t border-border transition-colors hover:bg-muted/50">
       <td className="px-4 py-3">
-        <Link
-          href={`/clients/${client.id}`}
-          title={primary}
-          className="block max-w-[240px] truncate font-medium text-foreground underline-offset-4 hover:underline"
-        >
-          {primary}
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            href={`/clients/${client.id}`}
+            title={primary}
+            className="block max-w-[240px] truncate font-medium text-foreground underline-offset-4 hover:underline"
+          >
+            {primary}
+          </Link>
+          {/*
+            S1-26c: the returning-client check found a match it could not
+            corroborate, so this client was given its OWN sub-account rather
+            than merged. Without this badge the flag is invisible (it only
+            reached a log line), which makes the whole dedup guard inert as a
+            human-review mechanism. The detail page names the candidate.
+          */}
+          {client.possible_duplicate && (
+            <Badge variant="warning" title="Possible duplicate - open the client to review">
+              Possible duplicate
+            </Badge>
+          )}
+        </div>
         <div
           className="max-w-[240px] truncate text-xs text-muted-foreground"
           title={client.email}

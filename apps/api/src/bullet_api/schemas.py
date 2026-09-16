@@ -91,6 +91,9 @@ class ClientListItem(BaseModel):
     email: str
     current_step: str
     step_entered_at: datetime
+    # S1-26c: badge a client whose identity key collided with an existing one
+    # (divergent names) so a human can review the possible duplicate.
+    possible_duplicate: bool
     last_action_status: str | None
     last_action_platform: str | None
     last_action: str | None
@@ -157,6 +160,26 @@ class ClientDetailResponse(BaseModel):
     current_step: str
     step_entered_at: datetime
     created_at: datetime
+    # S1-26c: raised when a returning-client match was found but could not be
+    # corroborated - an identity-key collision whose full business names
+    # diverged, or a GHL location found by email that we could not prove is the
+    # same site. The client is provisioned its OWN sub-account either way; the
+    # flag is the human-review signal. EITHER OR BOTH candidate fields may be
+    # populated - `possible_duplicate_of` for a clients-row collision,
+    # `possible_duplicate_ghl_id` for a GHL-location one. Both is only
+    # reachable ACROSS runs (round 12, P3 - a single run cannot: a DB collision
+    # suppresses the GHL leg entirely, so it never reaches an undecidable GHL
+    # verdict in the same pass): `_flag_possible_duplicate`'s COALESCE keeps
+    # the other run's field when a later run flags the other kind. The
+    # dashboard renders whichever are present so a human is told what to merge
+    # into rather than sent hunting for it.
+    possible_duplicate: bool
+    possible_duplicate_of: str | None
+    possible_duplicate_ghl_id: str | None
+    # Set when this signing was linked into an EXISTING client's sub-account as
+    # a returning client. Surfaced so an auto-link is visible and reviewable,
+    # not just an id silently shared between two rows.
+    parent_client_id: str | None
     sales_summary: list[KnowledgeEntry]
     actions: list[PlatformActionItem]
     hubspot_contact_id: str | None

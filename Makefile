@@ -3,6 +3,7 @@
 
 .PHONY: install lint typecheck build test precommit-install precommit-run \
         api-test api-dev dashboard-build clean help codegen e2e \
+        review-gate review-gate-db \
         db-upgrade db-downgrade db-revision db-reset db-seed-team
 
 help:
@@ -15,6 +16,8 @@ help:
 	@echo "  build              Build all workspace packages"
 	@echo "  codegen            Regenerate the OpenAPI doc + typed TS client (S1-17)"
 	@echo "  test               Run JS + Python test suites"
+	@echo "  review-gate        Run the reviewer's own catch techniques against the diff"
+	@echo "  review-gate-db     Mutation-test the db-marked guards too (needs Postgres up)"
 	@echo "  e2e                Run the Playwright E2E suite (needs Postgres up + db-upgrade + DATABASE_URL)"
 	@echo "  api-dev            Run the FastAPI app locally on :8000 with reload"
 	@echo "  db-upgrade         Run Alembic upgrade head against DATABASE_URL"
@@ -37,6 +40,30 @@ precommit-run:
 lint:
 	pnpm -r --if-present lint
 	uv run ruff check apps/api
+
+# Mechanized review techniques (S1-26b/c round 5). Run BEFORE raising a PR:
+# it catches the revert-green / silently-passing / net-new-PII classes that
+# produced findings in five consecutive review rounds. BASE overrides the
+# branch to diff against.
+# Runs BOTH halves, and the mutation half includes the db-marked guards by
+# default. Needs Postgres up: without it those tests SKIP, a skipped test cannot
+# fail, so it cannot prove a guard - the runner reports UNPROVEN and FAILS.
+# Pass MUTATE_ARGS=--allow-unproven on a laptop with no Postgres, knowing those
+# guards are then unverified.
+#
+# The static half runs under `-` so a finding there does not hide the mutation
+# results, which are the higher-value half; the explicit exit re-raises it.
+review-gate:
+	@uv run python apps/api/scripts/review_gate.py --base $(or $(BASE),main); static=$$?; \
+	uv run python apps/api/scripts/review_gate_mutate.py --include-db $(MUTATE_ARGS); mutate=$$?; \
+	if [ $$static -ne 0 ] || [ $$mutate -ne 0 ]; then exit 1; fi
+# ^ NOT `exit $$((static + mutate))` (round 12, P3): shell exit codes are
+# taken modulo 256, so two failures summing to 256 exited 0 - a green gate
+# made of two red halves.
+
+# The mutation half alone.
+review-gate-db:
+	uv run python apps/api/scripts/review_gate_mutate.py --include-db $(MUTATE_ARGS)
 
 typecheck:
 	pnpm -r --if-present typecheck

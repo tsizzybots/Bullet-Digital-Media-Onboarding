@@ -28,6 +28,11 @@ dependencies = [
     "google-auth[requests]>=2.30,<3.0",
     "anthropic>=0.69,<1.0",
     "openai>=1.50,<3.0",
+    # Round 13: replaces regex-based phone-tail heuristics in
+    # `worker/identity_key.py`'s bar-2 corroboration with real per-country
+    # numbering-plan validation (the Python port of Google's libphonenumber -
+    # actual metadata, not a guessed digit-prefix pattern). No transitive deps.
+    "phonenumbers>=8.13,<10.0",
 ]
 
 [dependency-groups]
