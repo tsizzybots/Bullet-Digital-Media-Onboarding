@@ -642,8 +642,8 @@ requires_db = true
 [[mutation]]
 name = "R6 - a corroborated link CLEARS an earlier possible-duplicate flag"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "            await _clear_possible_duplicate(session, client_id=client_id)\n            # `begun` is the row claimed and committed above, before the lock"
-replace = "            pass\n            # `begun` is the row claimed and committed above, before the lock"
+find = "        await _clear_possible_duplicate(session, client_id=client_id)\n        # `begun` is the row claimed and committed above, before the lock"
+replace = "        pass\n        # `begun` is the row claimed and committed above, before the lock"
 must_fail = "tests/test_ghl_subaccount.py::test_a_confident_link_clears_an_earlier_possible_duplicate_flag"
 requires_db = true
 
@@ -838,7 +838,7 @@ must_fail = "tests/test_identity_key.py::TestPostcodeCandidateSpec::test_trailin
 # differently from the bare postcode - the invariant the raw probe exists for.
 name = "R12 - a single REAL candidate is returned (the town invariant's engine)"
 file = "src/bullet_api/worker/identity_key.py"
-find = "        return _classified(real_candidates[0], PostcodeConfidence.AMBIGUOUS)"
+find = "        return _classified(non_ordinal_candidates[0], PostcodeConfidence.AMBIGUOUS)"
 replace = "        return PostcodeResult(\"\", PostcodeConfidence.EMPTY)"
 must_fail = "tests/test_identity_key.py::TestPostcodeCandidateSpec::test_previously_verified_rows_unchanged"
 
@@ -847,8 +847,8 @@ must_fail = "tests/test_identity_key.py::TestPostcodeCandidateSpec::test_previou
 # to first-match-wins silently guesses which site a two-postcode value means.
 name = "R12 - two REAL candidates SPLIT instead of guessing"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    if len(distinct_real) >= 2:\n        return PostcodeResult(\"\", PostcodeConfidence.EMPTY)"
-replace = "    if len(distinct_real) >= 2:\n        return _classified(real_candidates[0], PostcodeConfidence.AMBIGUOUS)"
+find = "    if len(distinct_non_ordinal) >= 2:\n        return PostcodeResult(\"\", PostcodeConfidence.EMPTY)"
+replace = "    if len(distinct_non_ordinal) >= 2:\n        return _classified(non_ordinal_candidates[0], PostcodeConfidence.AMBIGUOUS)"
 must_fail = "tests/test_identity_key.py::TestPostcodeCandidateSpec::test_two_real_postcodes_are_ambiguous_and_split"
 
 [[mutation]]
@@ -1244,8 +1244,8 @@ must_fail = "tests/test_identity_key.py::TestEachBarThreeShapeRuleIsStillLoadBea
 # Dedupe-by-value: a copy-pasted duplicate postcode is one value, not two.
 name = "R13 - duplicate real-postcode candidates are not ambiguous"
 file = "src/bullet_api/worker/identity_key.py"
-find = "    distinct_real = set(real_candidates)"
-replace = "    distinct_real = real_candidates"
+find = "    distinct_non_ordinal = set(non_ordinal_candidates)"
+replace = "    distinct_non_ordinal = non_ordinal_candidates"
 must_fail = "tests/test_identity_key.py::TestPostcodeDuplicateCandidateNotAmbiguous::test_duplicated_postcode_still_keys"
 
 [[mutation]]
@@ -1263,8 +1263,8 @@ must_fail = "tests/test_identity_key.py::TestSlashSeparatedPostcodes::test_town_
 # row NULL forever.
 name = "R13 - a torn sibling-link replay repairs the client row"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "                repaired = await session.execute(\n                    text(\n                        \"UPDATE clients \"\n                        \"SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id \"\n                        \"WHERE id = :client_id AND ghl_subaccount_id IS NULL\"\n                    ),\n                    {\n                        \"root_id\": sibling.root_id,\n                        \"ghl_id\": sibling.ghl_subaccount_id,\n                        \"client_id\": client_id,\n                    },\n                )\n                if repaired.rowcount > 0:"
-replace = "                repaired = None\n                if False:"
+find = "            repaired = await session.execute(\n                text(\n                    \"UPDATE clients \"\n                    \"SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id \"\n                    \"WHERE id = :client_id AND ghl_subaccount_id IS NULL\"\n                ),\n                {\n                    \"root_id\": sibling.root_id,\n                    \"ghl_id\": sibling.ghl_subaccount_id,\n                    \"client_id\": client_id,\n                },\n            )\n            if repaired.rowcount > 0:"
+replace = "            repaired = None\n            if False:"
 must_fail = "tests/test_ghl_subaccount.py::test_torn_sibling_repair_writes_the_id_back_with_no_racer"
 requires_db = true
 
@@ -1273,8 +1273,8 @@ requires_db = true
 # reported as success with the SIBLING's id.
 name = "R13 - a torn sibling-link repair race returns the row's id, not the sibling's"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "                    if surviving and surviving != sibling.ghl_subaccount_id:\n                        await session.commit()\n                        log.warning(\n                            \"S1-26 torn sibling repair lost a write race; returning the row's id\","
-replace = "                    if False:\n                        await session.commit()\n                        log.warning(\n                            \"S1-26 torn sibling repair lost a write race; returning the row's id\","
+find = "                if surviving and surviving != sibling.ghl_subaccount_id:\n                    await session.commit()\n                    log.warning(\n                        \"S1-26 torn sibling repair lost a write race; returning the row's id\","
+replace = "                if False:\n                    await session.commit()\n                    log.warning(\n                        \"S1-26 torn sibling repair lost a write race; returning the row's id\","
 must_fail = "tests/test_ghl_subaccount.py::test_torn_sibling_repair_losing_the_race_does_not_overwrite_the_racer"
 requires_db = true
 
@@ -1291,8 +1291,8 @@ requires_db = true
 [[mutation]]
 name = "R13 - the DB-sibling link UPDATE's rowcount guard (forced, not just present)"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "                if linked.rowcount == 0:\n                    surviving = (\n                        await session.execute(\n                            text(\"SELECT ghl_subaccount_id FROM clients WHERE id = :client_id\"),\n                            {\"client_id\": client_id},\n                        )\n                    ).scalar_one_or_none()\n                    if surviving and surviving != sibling.ghl_subaccount_id:"
-replace = "                if False:\n                    surviving = (\n                        await session.execute(\n                            text(\"SELECT ghl_subaccount_id FROM clients WHERE id = :client_id\"),\n                            {\"client_id\": client_id},\n                        )\n                    ).scalar_one_or_none()\n                    if surviving and surviving != sibling.ghl_subaccount_id:"
+find = "            if linked.rowcount == 0:\n                surviving = (\n                    await session.execute(\n                        text(\"SELECT ghl_subaccount_id FROM clients WHERE id = :client_id\"),\n                        {\"client_id\": client_id},\n                    )\n                ).scalar_one_or_none()\n                if surviving and surviving != sibling.ghl_subaccount_id:"
+replace = "            if False:\n                surviving = (\n                    await session.execute(\n                        text(\"SELECT ghl_subaccount_id FROM clients WHERE id = :client_id\"),\n                        {\"client_id\": client_id},\n                    )\n                ).scalar_one_or_none()\n                if surviving and surviving != sibling.ghl_subaccount_id:"
 must_fail = "tests/test_ghl_subaccount.py::test_sibling_link_update_losing_the_race_returns_the_rows_id"
 requires_db = true
 
@@ -1576,8 +1576,8 @@ requires_db = true
 [[mutation]]
 name = "R14 - the phase-2 re-check link UPDATE's rowcount guard (the sixth, missed by round 13)"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "            surviving_parent = recheck_sibling.root_id\n            if linked.rowcount == 0:"
-replace = "            surviving_parent = recheck_sibling.root_id\n            if False:"
+find = "        surviving_parent = recheck_sibling.root_id\n        if linked.rowcount == 0:"
+replace = "        surviving_parent = recheck_sibling.root_id\n        if False:"
 must_fail = "tests/test_ghl_subaccount.py::test_phase2_recheck_link_losing_the_race_returns_the_rows_id"
 
 
@@ -1732,8 +1732,8 @@ must_fail = "tests/test_ghl_subaccount.py::test_a_failure_flagging_a_collision_l
 # link write-back, both race repairs and the terminal commit.
 name = "R15 region 2 - a failure in the reuse branch is recorded, not stranded"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "        # GUARDED (round 15). Every write in this reuse branch - the flag"
-replace = "        # MUTATED\n        raise AssertionError(\"reuse-branch guard removed\")\n        # GUARDED (round 15). Every write in this reuse branch - the flag"
+find = "    # GUARDED (round 15). Every write in this reuse branch - the flag"
+replace = "    # MUTATED\n    raise AssertionError(\"reuse-branch guard removed\")\n    # GUARDED (round 15). Every write in this reuse branch - the flag"
 must_fail = "tests/test_ghl_subaccount.py::test_a_failure_in_the_reuse_branch_lands_failed_not_stranded"
 
 [[mutation]]
@@ -1753,8 +1753,8 @@ must_fail = "tests/test_ghl_subaccount.py::test_a_failure_in_the_torn_action_rep
 # complete_action, the id write-back, the lost-race repair and the commit.
 name = "R15 region 4 - a failure adopting a GHL location is recorded, not stranded"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "        # GUARDED (round 15). The GHL-lookup adoption completes the action,"
-replace = "        # MUTATED\n        raise AssertionError(\"adoption guard removed\")\n        # GUARDED (round 15). The GHL-lookup adoption completes the action,"
+find = "    # GUARDED (round 15). The GHL-lookup adoption completes the action,"
+replace = "    # MUTATED\n    raise AssertionError(\"adoption guard removed\")\n    # GUARDED (round 15). The GHL-lookup adoption completes the action,"
 must_fail = "tests/test_ghl_subaccount.py::test_a_failure_in_the_ghl_lookup_adoption_lands_failed_not_stranded"
 
 [[mutation]]
@@ -1843,8 +1843,8 @@ must_fail = "tests/test_ghl_client.py::TestTwoxxParseGuard::test_the_lookup_also
 # fields; the create path's own rowcount==0 branches return no parent at all.
 name = "R15 - the phase-2 lost-race repair reports the row's parent, not the sibling's"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "                    surviving_parent = raced.parent_client_id\n"
-replace = "                    surviving_parent = raced.parent_client_id or surviving_parent\n"
+find = "                surviving_parent = raced.parent_client_id\n"
+replace = "                surviving_parent = raced.parent_client_id or surviving_parent\n"
 must_fail = "tests/test_ghl_subaccount.py::test_phase2_recheck_link_losing_the_race_returns_the_rows_id"
 
 [[mutation]]
@@ -1854,8 +1854,8 @@ must_fail = "tests/test_ghl_subaccount.py::test_phase2_recheck_link_losing_the_r
 # parent even when the link UPDATE matched no row.
 name = "R15 - the phase-2 payload records the row's parent, not the intended one"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "                    \"parent_client_id\": (str(surviving_parent) if surviving_parent else None),\n"
-replace = "                    \"parent_client_id\": str(recheck_sibling.root_id),\n"
+find = "                \"parent_client_id\": (str(surviving_parent) if surviving_parent else None),\n"
+replace = "                \"parent_client_id\": str(recheck_sibling.root_id),\n"
 must_fail = "tests/test_ghl_subaccount.py::test_phase2_recheck_link_losing_the_race_returns_the_rows_id"
 
 [[mutation]]
@@ -1866,8 +1866,8 @@ must_fail = "tests/test_ghl_subaccount.py::test_phase2_recheck_link_losing_the_r
 # forever, waiting on a human resolution the link already made unnecessary.
 name = "R15 - the phase-2 re-check link also clears an earlier possible-duplicate flag"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "            await _clear_possible_duplicate(session, client_id=client_id)\n            linked = await session.execute("
-replace = "            pass\n            linked = await session.execute("
+find = "        await _clear_possible_duplicate(session, client_id=client_id)\n        linked = await session.execute("
+replace = "        pass\n        linked = await session.execute("
 must_fail = "tests/test_ghl_subaccount.py::test_phase2_lock_and_recheck_run_even_after_a_phase1_collision"
 requires_db = true
 
