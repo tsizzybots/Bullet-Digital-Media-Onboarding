@@ -151,7 +151,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -194,6 +194,7 @@ from bullet_api.worker.identity_key import (
 )
 from bullet_api.worker.platform_actions import (
     STATUS_FAILED,
+    BeginActionResult,
     begin_action,
     build_idempotency_key,
     complete_action,
@@ -266,6 +267,15 @@ class PoolExhaustedError(Exception):
             f"the {pool} connection pool was exhausted before the run could claim its "
             f"platform_actions row, so this attempt recorded nothing on its own: {detail}"
         )
+
+
+# The spine's `_record_failure` closure, as the extracted regions receive it
+# (S1-26l). Spelled once so the four signatures cannot drift, and named so the
+# parameter reads as what it is: a callback the SPINE owns. It keeps the
+# leading underscore at every call site because the moved code calls
+# `_record_failure(exc)` verbatim, and four manifest guards are anchored on
+# those call sites.
+RecordFailure = Callable[[Exception], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -1074,6 +1084,546 @@ async def _flag_possible_duplicate(
     )
 
 
+async def _load_client(session: AsyncSession, *, client_id: uuid.UUID) -> Row:
+    """Load the one `clients` row this run is about.
+
+    S1-26l: extracted verbatim from `create_ghl_subaccount_core`.
+
+    THIS IS THE POOL CHECKOUT POINT. The SELECT below is the function's
+    first statement, so the pooled connection is acquired HERE - before
+    `begin_action`, which is why a pool timeout leaves no `platform_actions`
+    row and why `record_ghl_subaccount_dead_letter` exists (round 17, B2).
+    Moving this call later in the spine changes that, and the dead-letter
+    recorder's reason for existing with it.
+
+    Raises:
+        ClientNotFoundError: no row. Raised before the action row is
+            claimed, so this is the one failure that legitimately leaves
+            no `platform_actions` row.
+    """
+    client = (
+        await session.execute(
+            text(
+                "SELECT email, business_name, legal_entity, "
+                "       contact_first_name, contact_last_name, phone, "
+                "       ghl_subaccount_id, identity_key, postal_code, address "
+                "FROM clients WHERE id = :client_id"
+            ),
+            {"client_id": client_id},
+        )
+    ).one_or_none()
+    if client is None:
+        raise ClientNotFoundError(client_id)
+    return client
+
+
+async def _skip_already_provisioned(
+    session: AsyncSession,
+    *,
+    client: Row,
+    client_id: uuid.UUID,
+    onboarding_event_id: uuid.UUID | None,
+    idempotency_key: str,
+    inngest_run_id: str | None,
+) -> CreateSubaccountResult:
+    """Record the action against the id the client row already holds.
+
+    S1-26l: extracted verbatim from `create_ghl_subaccount_core`.
+
+    Never POST a second location for a client that has one. This runs BEFORE
+    the `begin_action` claim in the spine, so it owns its own claim and commit
+    and never touches `_record_failure` - which is why it takes no
+    `_record_failure` parameter. `_load_client` takes none either, for the
+    different reason that it runs before there is any action row to record
+    against; the four regions that run AFTER the claim all take one.
+    """
+    begun = await begin_action(
+        session,
+        client_id=client_id,
+        event_id=onboarding_event_id,
+        platform=GHL_PLATFORM,
+        action=GHL_CREATE_SUBACCOUNT_ACTION,
+        idempotency_key=idempotency_key,
+        payload=None,
+        inngest_run_id=inngest_run_id,
+    )
+    if not begun.already_succeeded:
+        await complete_action(
+            session,
+            action_id=begun.action_id,
+            external_id=client.ghl_subaccount_id,
+            response={"skipped": "client already has ghl_subaccount_id"},
+        )
+    await session.commit()
+    log.info(
+        "S1-25 GHL sub-account skipped (client already provisioned)",
+        extra={
+            "client_id": str(client_id),
+            "ghl_subaccount_id": client.ghl_subaccount_id,
+        },
+    )
+    return CreateSubaccountResult(
+        ghl_subaccount_id=client.ghl_subaccount_id, created=False, skipped=True
+    )
+
+
+async def _reuse_db_sibling(
+    session: AsyncSession,
+    *,
+    client_id: uuid.UUID,
+    sibling: Row,
+    begun: BeginActionResult,
+    _record_failure: RecordFailure,
+) -> CreateSubaccountResult:
+    """Reuse a phase-1 DB sibling's sub-account and link to its root.
+
+    S1-26l: extracted verbatim from `create_ghl_subaccount_core`.
+
+    RELEASES THE PHASE-1 DEDUP LOCK. The spine acquires it; this region's
+    terminal commit is one of the points that releases it. The spine stays
+    the only acquirer - see the comment at `_acquire_dedup_lock`'s phase-1
+    call site.
+
+    `_record_failure` is the spine's closure, passed as a callable so it
+    still reads the spine's `treat_as_succeeded` local at call time. Do not
+    re-derive that decision here; only the spine's torn branch can make it.
+    """
+    # A corroborated link answers the question any earlier flag was asking,
+    # so clear it rather than leaving the badge up forever (it would
+    # otherwise saturate the board before S1-26e lands and stop being read).
+    # `begun` is the row the SPINE claimed and committed BEFORE the phase-1
+    # lock (round 13, P1.5); it arrives here as a parameter, so there is no
+    # "above" to point at from inside this function. This branch used to claim
+    # its own row, and hoisting the claim made it unconditional, so both the
+    # reuse and the create paths inherit one committed `in_progress` row rather
+    # than racing to create one after the lock.
+    #
+    # GUARDED (round 15). Every write in this reuse branch - the flag clear,
+    # `complete_action`, the link write-back, both race repairs and the
+    # terminal commit - sits after that committed `in_progress` row, so any
+    # error here strands the action `in_progress` with no `last_error`. The
+    # idiom is copied VERBATIM from the phase-2 re-check guard rather than
+    # adapted: this function's repairs already diverged into two shapes once,
+    # and that divergence is why the round-14 mirrors survived review.
+    # Unifying the six of them is S1-26l ITEM 2, deliberately NOT part of this
+    # extraction: the six guards are not interchangeable today (the phase-2
+    # site reports two fields from the row where the phase-1 sites report one),
+    # so collapsing them changes what a lost race reports, and that is a
+    # behaviour change in a commit whose whole claim is that behaviour is
+    # byte-identical.
+    try:
+        await _clear_possible_duplicate(session, client_id=client_id)
+        if not begun.already_succeeded:
+            await complete_action(
+                session,
+                action_id=begun.action_id,
+                external_id=sibling.ghl_subaccount_id,
+                response={
+                    "skipped_existing": True,
+                    "reason": GHL_SKIP_REASON_DB_SIBLING,
+                    "ghl_subaccount_id": sibling.ghl_subaccount_id,
+                    "parent_client_id": str(sibling.root_id),
+                    "sibling_client_id": str(sibling.id),
+                },
+            )
+            # Link the new row to the original root and reuse the sub-account
+            # id. Guard with `ghl_subaccount_id IS NULL` so a concurrent
+            # writer is never clobbered.
+            linked = await session.execute(
+                text(
+                    "UPDATE clients "
+                    "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
+                    "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+                ),
+                {
+                    "root_id": sibling.root_id,
+                    "ghl_id": sibling.ghl_subaccount_id,
+                    "client_id": client_id,
+                },
+            )
+            # rowcount == 0 (round 12, P2): the guard matched no row, so a
+            # concurrent writer already set an id. The ROW is the authority -
+            # report what it holds, not what this run intended.
+            if linked.rowcount == 0:
+                surviving = (
+                    await session.execute(
+                        text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                        {"client_id": client_id},
+                    )
+                ).scalar_one_or_none()
+                if surviving and surviving != sibling.ghl_subaccount_id:
+                    await session.commit()
+                    log.warning(
+                        "S1-26 sibling link lost a write race; returning the row's id",
+                        extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
+                    )
+                    return CreateSubaccountResult(
+                        ghl_subaccount_id=surviving, created=False, skipped=True
+                    )
+        else:
+            # TORN-STATE REPAIR, this branch's own copy (round 13, concurrency
+            # execution audit - proved live against the DB). `already_succeeded`
+            # meant this exact link was RECORDED once before, but recording it
+            # is not the same as the `clients` row HOLDING the id: if the row
+            # lost it (a crash, a bug, manual intervention - however it tore),
+            # the old code fell straight to `session.commit()` below and
+            # reported success from every surface while never attempting the
+            # write-back. Every future replay repeated the identical no-op
+            # forever. The create-path's own already_succeeded branch already
+            # self-heals this shape; this branch is where it was missing.
+            repaired = await session.execute(
+                text(
+                    "UPDATE clients "
+                    "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
+                    "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+                ),
+                {
+                    "root_id": sibling.root_id,
+                    "ghl_id": sibling.ghl_subaccount_id,
+                    "client_id": client_id,
+                },
+            )
+            if repaired.rowcount > 0:
+                log.warning(
+                    "S1-26 repaired a torn sibling link: action already succeeded "
+                    "but the client row held no id",
+                    extra={
+                        "client_id": str(client_id),
+                        "ghl_subaccount_id": sibling.ghl_subaccount_id,
+                    },
+                )
+            else:
+                # rowcount == 0 here too (round 13, caught proving the repair
+                # branch above): a racer set the row between our load and
+                # this UPDATE. The unconditional `return sibling....` a few
+                # lines below would have reported the SIBLING's id regardless
+                # of what THIS row actually holds - the same bug the round-12
+                # `linked.rowcount == 0` branch above already guards against.
+                # Same posture here: the row is the authority.
+                surviving = (
+                    await session.execute(
+                        text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                        {"client_id": client_id},
+                    )
+                ).scalar_one_or_none()
+                if surviving and surviving != sibling.ghl_subaccount_id:
+                    await session.commit()
+                    log.warning(
+                        "S1-26 torn sibling repair lost a write race; returning the row's id",
+                        extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
+                    )
+                    return CreateSubaccountResult(
+                        ghl_subaccount_id=surviving, created=False, skipped=True
+                    )
+        await session.commit()
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
+    log.info(
+        "S1-26 GHL sub-account reused (returning client, DB sibling)",
+        extra={
+            "client_id": str(client_id),
+            "ghl_subaccount_id": sibling.ghl_subaccount_id,
+            "parent_client_id": str(sibling.root_id),
+        },
+    )
+    return CreateSubaccountResult(
+        ghl_subaccount_id=sibling.ghl_subaccount_id,
+        created=False,
+        skipped=True,
+        parent_client_id=sibling.root_id,
+    )
+
+
+async def _reuse_recheck_sibling(
+    session: AsyncSession,
+    *,
+    client_id: uuid.UUID,
+    recheck_sibling: Row,
+    begun: BeginActionResult,
+    _record_failure: RecordFailure,
+) -> CreateSubaccountResult:
+    """Reuse a sibling that landed in the phase1-to-phase2 window.
+
+    S1-26l: extracted verbatim from `create_ghl_subaccount_core`.
+
+    RELEASES THE PHASE-2 DEDUP LOCK, which the spine acquired at its phase-2
+    call site and which is held across the GHL call by design (round 12,
+    P1.4). This region's terminal commit is one of THREE that can release
+    it - see also `_adopt_ghl_location` and `_create_and_write_back`. No
+    single region owns the lock's lifetime, which is why the spine is the
+    only place that acquires it.
+
+    `_record_failure` is the spine's closure - see `_reuse_db_sibling`.
+    """
+    try:
+        await _clear_possible_duplicate(session, client_id=client_id)
+        linked = await session.execute(
+            text(
+                "UPDATE clients "
+                "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
+                "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+            ),
+            {
+                "root_id": recheck_sibling.root_id,
+                "ghl_id": recheck_sibling.ghl_subaccount_id,
+                "client_id": client_id,
+            },
+        )
+        surviving = recheck_sibling.ghl_subaccount_id
+        surviving_parent = recheck_sibling.root_id
+        if linked.rowcount == 0:
+            # THE ROW IS THE AUTHORITY, for BOTH fields (round 15). This
+            # branch already re-read `ghl_subaccount_id` when the guarded
+            # UPDATE matched nothing, but still returned
+            # `parent_client_id=recheck_sibling.root_id` unconditionally -
+            # so a run that lost the write race reported the id the row
+            # holds alongside the parent it does NOT hold. That is a
+            # half-applied version of the rule that `_reuse_db_sibling`'s own
+            # `linked.rowcount == 0` branch applies in full - a SIBLING
+            # FUNCTION since the S1-26l extraction, not code above this line -
+            # and the divergence between the two idioms is what
+            # `CreateSubaccountResult`'s own docstring forbids.
+            raced = (
+                await session.execute(
+                    text(
+                        "SELECT ghl_subaccount_id, parent_client_id "
+                        "FROM clients WHERE id = :client_id"
+                    ),
+                    {"client_id": client_id},
+                )
+            ).one_or_none()
+            if raced is not None:
+                surviving = raced.ghl_subaccount_id or surviving
+                # The parent is taken from the row UNCONDITIONALLY, with no
+                # fallback to `recheck_sibling.root_id`. A fallback would
+                # enumerate the deny side: it reports a parent link for every
+                # row EXCEPT the ones that hold their own, so the unknown case
+                # (the row holds NULL, which is what losing this all-or-nothing
+                # UPDATE actually leaves) fails toward MERGE - claiming a link
+                # the row does not record. Reporting only what the row holds
+                # fails toward SPLIT, and matches the create path's two
+                # `rowcount == 0` branches, which return no `parent_client_id`
+                # at all on this path.
+                surviving_parent = raced.parent_client_id
+        # THE PAYLOAD IS RECORDED AFTER THE LINK, NOT BEFORE (round 15).
+        # It used to be written first, from `recheck_sibling`, so a run that
+        # lost the race recorded the parent it INTENDED to write - the same
+        # invented merge the returned result carried, preserved in the audit
+        # row a human actually reads in the dashboard. Both statements land
+        # in this one transaction, so moving the write later changes nothing
+        # about atomicity and everything about what it says. Recording only
+        # what the row holds means the unknown case records no parent.
+        await complete_action(
+            session,
+            action_id=begun.action_id,
+            external_id=surviving,
+            response={
+                "skipped_existing": True,
+                "reason": GHL_SKIP_REASON_DB_SIBLING,
+                "raced_concurrent_signing": True,
+                "ghl_subaccount_id": surviving,
+                "parent_client_id": (str(surviving_parent) if surviving_parent else None),
+                "sibling_client_id": str(recheck_sibling.id),
+            },
+        )
+        await session.commit()
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
+    log.info(
+        "S1-26 GHL sub-account reused (returning client, DB sibling on re-check)",
+        extra={
+            "client_id": str(client_id),
+            "ghl_subaccount_id": surviving,
+            "parent_client_id": str(surviving_parent) if surviving_parent else None,
+        },
+    )
+    return CreateSubaccountResult(
+        ghl_subaccount_id=surviving,
+        created=False,
+        skipped=True,
+        parent_client_id=surviving_parent,
+    )
+
+
+async def _adopt_ghl_location(
+    session: AsyncSession,
+    *,
+    client_id: uuid.UUID,
+    existing: GhlLocation,
+    begun: BeginActionResult,
+    _record_failure: RecordFailure,
+) -> CreateSubaccountResult:
+    """Adopt a corroborated GHL lookup hit instead of creating a location.
+
+    S1-26l: extracted verbatim from `create_ghl_subaccount_core`.
+
+    RELEASES THE PHASE-2 DEDUP LOCK - one of three such regions, see
+    `_reuse_recheck_sibling`.
+
+    `_record_failure` is the spine's closure - see `_reuse_db_sibling`.
+    """
+    # GUARDED (round 15). The GHL-lookup adoption completes the action,
+    # writes the id back, repairs a lost race and commits - all after the
+    # committed `in_progress` row. The reviewer named this one as
+    # pre-existing and same-class. Idiom copied VERBATIM from the reuse
+    # branch; unifying the six of them is S1-26l ITEM 2, which is a behaviour
+    # change and deliberately not part of the extraction.
+    try:
+        await complete_action(
+            session,
+            action_id=begun.action_id,
+            external_id=existing.id,
+            response={
+                "skipped_existing": True,
+                "reason": GHL_SKIP_REASON_GHL_LOOKUP,
+                "ghl_subaccount_id": existing.id,
+            },
+        )
+        adopted = await session.execute(
+            text(
+                "UPDATE clients SET ghl_subaccount_id = :ghl_id "
+                "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+            ),
+            {"ghl_id": existing.id, "client_id": client_id},
+        )
+        # rowcount == 0 (round 12, P2): a concurrent writer set the row first;
+        # the row is the authority (same posture as the sibling-link site).
+        if adopted.rowcount == 0:
+            surviving = (
+                await session.execute(
+                    text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                    {"client_id": client_id},
+                )
+            ).scalar_one_or_none()
+            if surviving and surviving != existing.id:
+                await session.commit()
+                log.warning(
+                    "S1-26 GHL-lookup adoption lost a write race; returning the row's id",
+                    extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
+                )
+                return CreateSubaccountResult(
+                    ghl_subaccount_id=surviving, created=False, skipped=True
+                )
+        await session.commit()
+        log.info(
+            "S1-26 GHL sub-account reused (returning client, GHL lookup)",
+            extra={
+                "client_id": str(client_id),
+                "ghl_subaccount_id": existing.id,
+                "action_id": str(begun.action_id),
+            },
+        )
+        return CreateSubaccountResult(ghl_subaccount_id=existing.id, created=False, skipped=True)
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
+
+
+async def _create_and_write_back(
+    session: AsyncSession,
+    *,
+    ghl_client: GhlClient,
+    client_id: uuid.UUID,
+    payload: dict,
+    begun: BeginActionResult,
+    _record_failure: RecordFailure,
+) -> CreateSubaccountResult:
+    """POST the new location and write its id back onto the client row.
+
+    S1-26l: extracted verbatim from `create_ghl_subaccount_core`.
+
+    RELEASES THE PHASE-2 DEDUP LOCK - one of three such regions, see
+    `_reuse_recheck_sibling`. This is the path the lock exists to
+    serialise: the create and its write-back run under it.
+
+    `_record_failure` is the spine's closure - see `_reuse_db_sibling`.
+    """
+    try:
+        location = await ghl_client.create_location(payload)
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
+
+    # GUARDED (review round 8): this was the only unguarded raise point on the
+    # success path. A commit failure here - and `_record_failure`'s own comment,
+    # in the spine, calls Neon connection resets routine - used to discard a
+    # location id we are HOLDING IN MEMORY, leave the action `in_progress` with no retry_count
+    # bump, and hand the retry to an eventually-consistent lookup that may mint
+    # a second location. Routing through `_record_failure` records `failed` +
+    # the error (its own SQLAlchemyError path rolls back and retries the
+    # write), so the retry arrives with a visible, bumped action row - and the
+    # orphan it must reconcile carries the full payload we just sent, which the
+    # lookup corroborates on name, postcode and phone.
+    try:
+        await complete_action(
+            session,
+            action_id=begun.action_id,
+            external_id=location.id,
+            response=location.raw,
+        )
+        # Guard with `ghl_subaccount_id IS NULL` so a concurrent writer cannot
+        # be clobbered; the per-client concurrency cap makes that race
+        # near-impossible, but the guard is cheap insurance.
+        written = await session.execute(
+            text(
+                "UPDATE clients SET ghl_subaccount_id = :ghl_id "
+                "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
+            ),
+            {"ghl_id": location.id, "client_id": client_id},
+        )
+        # rowcount == 0 here is the WORST of the SIX guarded sites (round 12,
+        # P2): the location just POSTed is real in GHL but recorded on no
+        # client row - an orphan. Flag it with the orphan's id so a human can
+        # merge or delete it (the action row already records it as this run's
+        # external_id), and return the row's actual id rather than the
+        # orphan's.
+        #
+        # The count said FOUR until round 15 counted them by grep. The six are
+        # the phase-1 sibling link, its torn-state repair, the reuse branch's
+        # repair, the phase-2 re-check link, the GHL-lookup adoption, and this
+        # write-back. Two were added after the sentence was written and nobody
+        # revisited the number, which is how a comment stops describing the
+        # code it sits in.
+        surviving_id = location.id
+        if written.rowcount == 0:
+            surviving_id = (
+                await session.execute(
+                    text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
+                    {"client_id": client_id},
+                )
+            ).scalar_one_or_none() or location.id
+            if surviving_id != location.id:
+                await _flag_possible_duplicate(
+                    session, client_id=client_id, ghl_location_id=location.id
+                )
+                log.warning(
+                    "S1-25 create write-back lost a write race; the new location is an orphan",
+                    extra={
+                        "client_id": str(client_id),
+                        "ghl_subaccount_id": surviving_id,
+                        "orphan_ghl_location_id": location.id,
+                    },
+                )
+        await session.commit()
+    except Exception as exc:
+        await _record_failure(exc)
+        raise
+
+    log.info(
+        "S1-25 GHL sub-account created",
+        extra={
+            "client_id": str(client_id),
+            "ghl_subaccount_id": surviving_id,
+            "action_id": str(begun.action_id),
+        },
+    )
+    return CreateSubaccountResult(
+        ghl_subaccount_id=surviving_id, created=surviving_id == location.id, skipped=False
+    )
+
+
 async def create_ghl_subaccount_core(
     session: AsyncSession,
     ghl_client: GhlClient,
@@ -1114,19 +1664,7 @@ async def create_ghl_subaccount_core(
             a `failed` action and committed, then re-raised unchanged so the
             wrapper can decide retriable vs not.
     """
-    client = (
-        await session.execute(
-            text(
-                "SELECT email, business_name, legal_entity, "
-                "       contact_first_name, contact_last_name, phone, "
-                "       ghl_subaccount_id, identity_key, postal_code, address "
-                "FROM clients WHERE id = :client_id"
-            ),
-            {"client_id": client_id},
-        )
-    ).one_or_none()
-    if client is None:
-        raise ClientNotFoundError(client_id)
+    client = await _load_client(session, client_id=client_id)
 
     idempotency_key = build_idempotency_key(
         client_id, GHL_PLATFORM, GHL_CREATE_SUBACCOUNT_ACTION, onboarding_event_id
@@ -1135,33 +1673,13 @@ async def create_ghl_subaccount_core(
     # Already provisioned: record the action as success against the existing
     # id and return. Never POST a second location for a client that has one.
     if client.ghl_subaccount_id:
-        begun = await begin_action(
+        return await _skip_already_provisioned(
             session,
+            client=client,
             client_id=client_id,
-            event_id=onboarding_event_id,
-            platform=GHL_PLATFORM,
-            action=GHL_CREATE_SUBACCOUNT_ACTION,
+            onboarding_event_id=onboarding_event_id,
             idempotency_key=idempotency_key,
-            payload=None,
             inngest_run_id=inngest_run_id,
-        )
-        if not begun.already_succeeded:
-            await complete_action(
-                session,
-                action_id=begun.action_id,
-                external_id=client.ghl_subaccount_id,
-                response={"skipped": "client already has ghl_subaccount_id"},
-            )
-        await session.commit()
-        log.info(
-            "S1-25 GHL sub-account skipped (client already provisioned)",
-            extra={
-                "client_id": str(client_id),
-                "ghl_subaccount_id": client.ghl_subaccount_id,
-            },
-        )
-        return CreateSubaccountResult(
-            ghl_subaccount_id=client.ghl_subaccount_id, created=False, skipped=True
         )
 
     client_name = identity_name(client.business_name, client.legal_entity)
@@ -1401,143 +1919,12 @@ async def create_ghl_subaccount_core(
         )
 
     if sibling is not None:
-        # A corroborated link answers the question any earlier flag was asking,
-        # so clear it rather than leaving the badge up forever (it would
-        # otherwise saturate the board before S1-26e lands and stop being read).
-        # GUARDED (round 15). Every write in this reuse branch - the flag
-        # clear, `complete_action`, the link write-back, both race repairs and
-        # the terminal commit - sits after the committed `in_progress` row, so
-        # any error here strands the action `in_progress` with no `last_error`.
-        # Idiom copied VERBATIM from the phase-2 re-check guard, not adapted:
-        # this function's repairs already diverged into two shapes once, and
-        # that divergence is why round-14 mirrors survived. Improvements belong
-        # on the extraction card (S1-26l), not here.
-        try:
-            await _clear_possible_duplicate(session, client_id=client_id)
-            # `begun` is the row claimed and committed above, before the lock
-            # (round 13, P1.5). This branch used to claim its own; hoisting it made
-            # the claim unconditional, so BOTH the reuse and create paths now
-            # inherit the same committed `in_progress` row rather than each racing
-            # to create one after the lock.
-            if not begun.already_succeeded:
-                await complete_action(
-                    session,
-                    action_id=begun.action_id,
-                    external_id=sibling.ghl_subaccount_id,
-                    response={
-                        "skipped_existing": True,
-                        "reason": GHL_SKIP_REASON_DB_SIBLING,
-                        "ghl_subaccount_id": sibling.ghl_subaccount_id,
-                        "parent_client_id": str(sibling.root_id),
-                        "sibling_client_id": str(sibling.id),
-                    },
-                )
-                # Link the new row to the original root and reuse the sub-account
-                # id. Guard with `ghl_subaccount_id IS NULL` so a concurrent
-                # writer is never clobbered.
-                linked = await session.execute(
-                    text(
-                        "UPDATE clients "
-                        "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
-                        "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
-                    ),
-                    {
-                        "root_id": sibling.root_id,
-                        "ghl_id": sibling.ghl_subaccount_id,
-                        "client_id": client_id,
-                    },
-                )
-                # rowcount == 0 (round 12, P2): the guard matched no row, so a
-                # concurrent writer already set an id. The ROW is the authority -
-                # report what it holds, not what this run intended.
-                if linked.rowcount == 0:
-                    surviving = (
-                        await session.execute(
-                            text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
-                            {"client_id": client_id},
-                        )
-                    ).scalar_one_or_none()
-                    if surviving and surviving != sibling.ghl_subaccount_id:
-                        await session.commit()
-                        log.warning(
-                            "S1-26 sibling link lost a write race; returning the row's id",
-                            extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
-                        )
-                        return CreateSubaccountResult(
-                            ghl_subaccount_id=surviving, created=False, skipped=True
-                        )
-            else:
-                # TORN-STATE REPAIR, this branch's own copy (round 13, concurrency
-                # execution audit - proved live against the DB). `already_succeeded`
-                # meant this exact link was RECORDED once before, but recording it
-                # is not the same as the `clients` row HOLDING the id: if the row
-                # lost it (a crash, a bug, manual intervention - however it tore),
-                # the old code fell straight to `session.commit()` below and
-                # reported success from every surface while never attempting the
-                # write-back. Every future replay repeated the identical no-op
-                # forever. The create-path's own already_succeeded branch already
-                # self-heals this shape; this branch is where it was missing.
-                repaired = await session.execute(
-                    text(
-                        "UPDATE clients "
-                        "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
-                        "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
-                    ),
-                    {
-                        "root_id": sibling.root_id,
-                        "ghl_id": sibling.ghl_subaccount_id,
-                        "client_id": client_id,
-                    },
-                )
-                if repaired.rowcount > 0:
-                    log.warning(
-                        "S1-26 repaired a torn sibling link: action already succeeded "
-                        "but the client row held no id",
-                        extra={
-                            "client_id": str(client_id),
-                            "ghl_subaccount_id": sibling.ghl_subaccount_id,
-                        },
-                    )
-                else:
-                    # rowcount == 0 here too (round 13, caught proving the repair
-                    # branch above): a racer set the row between our load and
-                    # this UPDATE. The unconditional `return sibling....` a few
-                    # lines below would have reported the SIBLING's id regardless
-                    # of what THIS row actually holds - the same bug the round-12
-                    # `linked.rowcount == 0` branch above already guards against.
-                    # Same posture here: the row is the authority.
-                    surviving = (
-                        await session.execute(
-                            text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
-                            {"client_id": client_id},
-                        )
-                    ).scalar_one_or_none()
-                    if surviving and surviving != sibling.ghl_subaccount_id:
-                        await session.commit()
-                        log.warning(
-                            "S1-26 torn sibling repair lost a write race; returning the row's id",
-                            extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
-                        )
-                        return CreateSubaccountResult(
-                            ghl_subaccount_id=surviving, created=False, skipped=True
-                        )
-            await session.commit()
-        except Exception as exc:
-            await _record_failure(exc)
-            raise
-        log.info(
-            "S1-26 GHL sub-account reused (returning client, DB sibling)",
-            extra={
-                "client_id": str(client_id),
-                "ghl_subaccount_id": sibling.ghl_subaccount_id,
-                "parent_client_id": str(sibling.root_id),
-            },
-        )
-        return CreateSubaccountResult(
-            ghl_subaccount_id=sibling.ghl_subaccount_id,
-            created=False,
-            skipped=True,
-            parent_client_id=sibling.root_id,
+        return await _reuse_db_sibling(
+            session,
+            client_id=client_id,
+            sibling=sibling,
+            begun=begun,
+            _record_failure=_record_failure,
         )
 
     payload = _build_location_payload(
@@ -1639,7 +2026,11 @@ async def create_ghl_subaccount_core(
         # that was cataloguing them. The rebind BELOW, on the fall-through path,
         # is what makes the sentence true. Same class as the reuse branch, and
         # the reviewer named it as pre-existing. Idiom copied VERBATIM -
-        # improvements go on the extraction card (S1-26l).
+        # unifying the six of them is S1-26l ITEM 2, a behaviour change kept
+        # out of the extraction. This region stayed INLINE in the spine for a
+        # separate reason: it owns the `treat_as_succeeded` rebind below, and
+        # moving that across a function boundary restates what rounds 16 and
+        # 17 were each spent settling.
         #
         # WHAT THIS REGION MUST NOT DO, and round 16 did (round 17, B1). The
         # rebind used to sit HERE, above the try, which armed failure-recording
@@ -1738,93 +2129,12 @@ async def create_ghl_subaccount_core(
         await _record_failure(exc)
         raise
     if recheck_sibling is not None:
-        try:
-            await _clear_possible_duplicate(session, client_id=client_id)
-            linked = await session.execute(
-                text(
-                    "UPDATE clients "
-                    "SET parent_client_id = :root_id, ghl_subaccount_id = :ghl_id "
-                    "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
-                ),
-                {
-                    "root_id": recheck_sibling.root_id,
-                    "ghl_id": recheck_sibling.ghl_subaccount_id,
-                    "client_id": client_id,
-                },
-            )
-            surviving = recheck_sibling.ghl_subaccount_id
-            surviving_parent = recheck_sibling.root_id
-            if linked.rowcount == 0:
-                # THE ROW IS THE AUTHORITY, for BOTH fields (round 15). This
-                # branch already re-read `ghl_subaccount_id` when the guarded
-                # UPDATE matched nothing, but still returned
-                # `parent_client_id=recheck_sibling.root_id` unconditionally -
-                # so a run that lost the write race reported the id the row
-                # holds alongside the parent it does NOT hold. That is a
-                # half-applied version of the rule the create path at the
-                # `linked.rowcount == 0` branch above applies in full, and the
-                # divergence between the two idioms is what
-                # `CreateSubaccountResult`'s own docstring forbids.
-                raced = (
-                    await session.execute(
-                        text(
-                            "SELECT ghl_subaccount_id, parent_client_id "
-                            "FROM clients WHERE id = :client_id"
-                        ),
-                        {"client_id": client_id},
-                    )
-                ).one_or_none()
-                if raced is not None:
-                    surviving = raced.ghl_subaccount_id or surviving
-                    # The parent is taken from the row UNCONDITIONALLY, with no
-                    # fallback to `recheck_sibling.root_id`. A fallback would
-                    # enumerate the deny side: it reports a parent link for every
-                    # row EXCEPT the ones that hold their own, so the unknown case
-                    # (the row holds NULL, which is what losing this all-or-nothing
-                    # UPDATE actually leaves) fails toward MERGE - claiming a link
-                    # the row does not record. Reporting only what the row holds
-                    # fails toward SPLIT, and matches the create path's two
-                    # `rowcount == 0` branches, which return no `parent_client_id`
-                    # at all on this path.
-                    surviving_parent = raced.parent_client_id
-            # THE PAYLOAD IS RECORDED AFTER THE LINK, NOT BEFORE (round 15).
-            # It used to be written first, from `recheck_sibling`, so a run that
-            # lost the race recorded the parent it INTENDED to write - the same
-            # invented merge the returned result carried, preserved in the audit
-            # row a human actually reads in the dashboard. Both statements land
-            # in this one transaction, so moving the write later changes nothing
-            # about atomicity and everything about what it says. Recording only
-            # what the row holds means the unknown case records no parent.
-            await complete_action(
-                session,
-                action_id=begun.action_id,
-                external_id=surviving,
-                response={
-                    "skipped_existing": True,
-                    "reason": GHL_SKIP_REASON_DB_SIBLING,
-                    "raced_concurrent_signing": True,
-                    "ghl_subaccount_id": surviving,
-                    "parent_client_id": (str(surviving_parent) if surviving_parent else None),
-                    "sibling_client_id": str(recheck_sibling.id),
-                },
-            )
-            await session.commit()
-        except Exception as exc:
-            await _record_failure(exc)
-            raise
-        log.info(
-            "S1-26 GHL sub-account reused (returning client, DB sibling on re-check)",
-            extra={
-                "client_id": str(client_id),
-                "ghl_subaccount_id": surviving,
-                "parent_client_id": str(surviving_parent) if surviving_parent else None,
-            },
-        )
-        return CreateSubaccountResult(
-            ghl_subaccount_id=surviving,
-            created=False,
-            skipped=True,
-            parent_client_id=surviving_parent,
+        return await _reuse_recheck_sibling(
+            session,
+            client_id=client_id,
+            recheck_sibling=recheck_sibling,
+            begun=begun,
+            _record_failure=_record_failure,
         )
     if recheck_collision is not None:
         # Same handling as a phase-1 collision: flag (guarded - this write
@@ -1936,144 +2246,21 @@ async def create_ghl_subaccount_core(
             existing = None
 
     if existing is not None:
-        # GUARDED (round 15). The GHL-lookup adoption completes the action,
-        # writes the id back, repairs a lost race and commits - all after the
-        # committed `in_progress` row. The reviewer named this one as
-        # pre-existing and same-class. Idiom copied VERBATIM from the reuse
-        # branch; improvements go on the extraction card (S1-26l).
-        try:
-            await complete_action(
-                session,
-                action_id=begun.action_id,
-                external_id=existing.id,
-                response={
-                    "skipped_existing": True,
-                    "reason": GHL_SKIP_REASON_GHL_LOOKUP,
-                    "ghl_subaccount_id": existing.id,
-                },
-            )
-            adopted = await session.execute(
-                text(
-                    "UPDATE clients SET ghl_subaccount_id = :ghl_id "
-                    "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
-                ),
-                {"ghl_id": existing.id, "client_id": client_id},
-            )
-            # rowcount == 0 (round 12, P2): a concurrent writer set the row first;
-            # the row is the authority (same posture as the sibling-link site).
-            if adopted.rowcount == 0:
-                surviving = (
-                    await session.execute(
-                        text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
-                        {"client_id": client_id},
-                    )
-                ).scalar_one_or_none()
-                if surviving and surviving != existing.id:
-                    await session.commit()
-                    log.warning(
-                        "S1-26 GHL-lookup adoption lost a write race; returning the row's id",
-                        extra={"client_id": str(client_id), "ghl_subaccount_id": surviving},
-                    )
-                    return CreateSubaccountResult(
-                        ghl_subaccount_id=surviving, created=False, skipped=True
-                    )
-            await session.commit()
-            log.info(
-                "S1-26 GHL sub-account reused (returning client, GHL lookup)",
-                extra={
-                    "client_id": str(client_id),
-                    "ghl_subaccount_id": existing.id,
-                    "action_id": str(begun.action_id),
-                },
-            )
-            return CreateSubaccountResult(
-                ghl_subaccount_id=existing.id, created=False, skipped=True
-            )
-        except Exception as exc:
-            await _record_failure(exc)
-            raise
-
-    try:
-        location = await ghl_client.create_location(payload)
-    except Exception as exc:
-        await _record_failure(exc)
-        raise
-
-    # GUARDED (review round 8): this was the only unguarded raise point on the
-    # success path. A commit failure here - the comment above `_record_failure`
-    # calls Neon connection resets routine - used to discard a location id we
-    # are HOLDING IN MEMORY, leave the action `in_progress` with no retry_count
-    # bump, and hand the retry to an eventually-consistent lookup that may mint
-    # a second location. Routing through `_record_failure` records `failed` +
-    # the error (its own SQLAlchemyError path rolls back and retries the
-    # write), so the retry arrives with a visible, bumped action row - and the
-    # orphan it must reconcile carries the full payload we just sent, which the
-    # lookup corroborates on name, postcode and phone.
-    try:
-        await complete_action(
+        return await _adopt_ghl_location(
             session,
-            action_id=begun.action_id,
-            external_id=location.id,
-            response=location.raw,
+            client_id=client_id,
+            existing=existing,
+            begun=begun,
+            _record_failure=_record_failure,
         )
-        # Guard with `ghl_subaccount_id IS NULL` so a concurrent writer cannot
-        # be clobbered; the per-client concurrency cap makes that race
-        # near-impossible, but the guard is cheap insurance.
-        written = await session.execute(
-            text(
-                "UPDATE clients SET ghl_subaccount_id = :ghl_id "
-                "WHERE id = :client_id AND ghl_subaccount_id IS NULL"
-            ),
-            {"ghl_id": location.id, "client_id": client_id},
-        )
-        # rowcount == 0 here is the WORST of the SIX guarded sites (round 12,
-        # P2): the location just POSTed is real in GHL but recorded on no
-        # client row - an orphan. Flag it with the orphan's id so a human can
-        # merge or delete it (the action row already records it as this run's
-        # external_id), and return the row's actual id rather than the
-        # orphan's.
-        #
-        # The count said FOUR until round 15 counted them by grep. The six are
-        # the phase-1 sibling link, its torn-state repair, the reuse branch's
-        # repair, the phase-2 re-check link, the GHL-lookup adoption, and this
-        # write-back. Two were added after the sentence was written and nobody
-        # revisited the number, which is how a comment stops describing the
-        # code it sits in.
-        surviving_id = location.id
-        if written.rowcount == 0:
-            surviving_id = (
-                await session.execute(
-                    text("SELECT ghl_subaccount_id FROM clients WHERE id = :client_id"),
-                    {"client_id": client_id},
-                )
-            ).scalar_one_or_none() or location.id
-            if surviving_id != location.id:
-                await _flag_possible_duplicate(
-                    session, client_id=client_id, ghl_location_id=location.id
-                )
-                log.warning(
-                    "S1-25 create write-back lost a write race; the new location is an orphan",
-                    extra={
-                        "client_id": str(client_id),
-                        "ghl_subaccount_id": surviving_id,
-                        "orphan_ghl_location_id": location.id,
-                    },
-                )
-        await session.commit()
-    except Exception as exc:
-        await _record_failure(exc)
-        raise
 
-    log.info(
-        "S1-25 GHL sub-account created",
-        extra={
-            "client_id": str(client_id),
-            "ghl_subaccount_id": surviving_id,
-            "action_id": str(begun.action_id),
-        },
-    )
-    return CreateSubaccountResult(
-        ghl_subaccount_id=surviving_id, created=surviving_id == location.id, skipped=False
+    return await _create_and_write_back(
+        session,
+        ghl_client=ghl_client,
+        client_id=client_id,
+        payload=payload,
+        begun=begun,
+        _record_failure=_record_failure,
     )
 
 

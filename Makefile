@@ -65,6 +65,16 @@ review-gate:
 review-gate-db:
 	uv run python apps/api/scripts/review_gate_mutate.py --include-db $(MUTATE_ARGS)
 
+# The wide key-invariance sweep (S1-26l). `clients.identity_key` is DERIVED and
+# STORED, so a change that moves any produced value orphans every row holding
+# the old one. The golden file is the CI gate at 3,752 pinned postcodes; this is
+# the wider proof, and it is CHECKED IN because rounds 14 and 15 both reported a
+# ~400k sweep whose harness was then lost with a session scratchpad - which is
+# why the golden file was demanded in the first place.
+# Always proves the probe before reporting a zero. BASE overrides the revision.
+key-sweep:
+	uv run python apps/api/scripts/key_invariance_sweep.py --base $(or $(BASE),main)
+
 typecheck:
 	pnpm -r --if-present typecheck
 

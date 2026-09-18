@@ -1033,23 +1033,24 @@ def classify_postcode(postcode: str | None) -> PostcodeResult:
     # evidence drops what it can prove is not a postcode, a REAL candidate
     # outranks what remains, and any residual tie fails toward SPLIT ("" ->
     # NULL key -> fail-safe CREATE), never toward a guess.
-    # NAMING WARNING - "real" here means NON-ORDINAL, not REAL confidence, and
-    # the two meanings collided the moment round 14 introduced
-    # `PostcodeConfidence.REAL`. A candidate in this list has an inward half
-    # that is not an English ordinal; whether it is REAL is decided later and
-    # separately by `_classified`, which asks `_is_recognised_format`. So
-    # `real_candidates[0]` can perfectly well come back AMBIGUOUS - see the
-    # `_classified(..., AMBIGUOUS)` call below, which is not a contradiction.
+    # A candidate in this list has an inward half that is NOT an English
+    # ordinal. Whether it is REAL is decided later and separately by
+    # `_classified`, which asks `_is_recognised_format` - so
+    # `non_ordinal_candidates[0]` can perfectly well come back AMBIGUOUS from
+    # the `_classified(..., AMBIGUOUS)` call below, and that is not a
+    # contradiction.
     #
-    # The rename to `non_ordinal_candidates` is deferred to S1-26l rather than
-    # taken here, and the reason is specific: `classify_postcode` is inside
-    # `_G7_KEY_FUNCTIONS`, and round 15 proved by execution that the fingerprint
-    # moves on ANY change to this body, identifier names included. Spending the
-    # gate's first proven movement on a cosmetic rename teaches the next
-    # maintainer that fingerprint moves are sometimes noise, which is how a gate
-    # decays. The extraction PR changes this body for real reasons, so the move
-    # is earned there. The clarity this comment buys costs nothing.
-    real_candidates: list[str] = []
+    # RENAMED FROM `real_candidates` / `distinct_real` in S1-26l. "real" here
+    # always meant NON-ORDINAL, and it collided with `PostcodeConfidence.REAL`
+    # the moment round 14 introduced the enum. Round 15 found the collision and
+    # deferred the rename deliberately: `classify_postcode` is inside
+    # `_G7_KEY_FUNCTIONS`, and the fingerprint moves on ANY change to this body,
+    # identifier names included, so spending the gate's first proven movement on
+    # a cosmetic rename would teach the next maintainer that fingerprint moves
+    # are sometimes noise. S1-26l changes this body for real reasons, so the
+    # move is earned here. Migration 0014_identity_key_rename carries the
+    # measurement showing that no produced VALUE moved with it.
+    non_ordinal_candidates: list[str] = []
     ordinal_candidates: list[str] = []
     for uk_match in _UK_POSTCODE.finditer(upper):
         candidate = uk_match.group(1) + uk_match.group(2)
@@ -1060,15 +1061,15 @@ def classify_postcode(postcode: str | None) -> PostcodeResult:
                 continue
             ordinal_candidates.append(candidate)
         else:
-            real_candidates.append(candidate)
+            non_ordinal_candidates.append(candidate)
     # SELECTION IS UNCHANGED FROM HEAD, deliberately: only the confidence
     # attached to the winner is new. Keeping selection byte-identical is what
     # makes this rework key-invariant, so a stored key cannot change under a
     # deployed row and no recompute migration is owed (G7's obligation).
-    distinct_real = set(real_candidates)
-    if len(distinct_real) == 1:
-        return _classified(real_candidates[0], PostcodeConfidence.AMBIGUOUS)
-    if len(distinct_real) >= 2:
+    distinct_non_ordinal = set(non_ordinal_candidates)
+    if len(distinct_non_ordinal) == 1:
+        return _classified(non_ordinal_candidates[0], PostcodeConfidence.AMBIGUOUS)
+    if len(distinct_non_ordinal) >= 2:
         return PostcodeResult("", PostcodeConfidence.EMPTY)
     distinct_ordinal = set(ordinal_candidates)
     if len(distinct_ordinal) == 1:

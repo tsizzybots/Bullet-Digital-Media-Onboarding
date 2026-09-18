@@ -215,6 +215,28 @@ jobs:
           DATABASE_URL: ${{ steps.neon-branch.outputs.db_url || secrets.NEON_STAGING_DATABASE_URL }}
         run: uv run python apps/api/scripts/review_gate_mutate.py --include-db
 
+      # The key-invariance sweep's own probe (S1-26l, round 19). Only the
+      # SELF-TEST runs here, not the 400k sweep: the sweep answers "did this
+      # diff move a stored key", which is a question for the branch that
+      # touches `identity_key.py`, while the self-test answers "can this
+      # harness detect a change at all" - and an instrument nobody exercises
+      # is how rounds 14 and 15 ended up quoting a sweep whose harness had
+      # been lost. It runs on every PR, including the ones that leave the
+      # module alone, which is why the probe deliberately precedes the
+      # VACUOUS short-circuit inside the script.
+      #
+      # `base_ref` is bound through `env:` rather than interpolated into the
+      # `run` block. Round 14's deferred list flagged the interpolated form as
+      # an injection surface and it is still open on the two steps above; this
+      # step does not add a third instance.
+      - name: Key-invariance sweep (prove the probe)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          uv run python apps/api/scripts/key_invariance_sweep.py \
+            --self-test --limit 2000 --base "origin/$BASE_REF"
+
       # Always clean up the ephemeral branch, even if earlier steps failed.
       - name: Delete Neon branch
         if: always() && steps.neon-branch.outcome == 'success'
