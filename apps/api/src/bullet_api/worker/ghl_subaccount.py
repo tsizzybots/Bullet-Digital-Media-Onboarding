@@ -269,6 +269,15 @@ class PoolExhaustedError(Exception):
         )
 
 
+# The spine's `_record_failure` closure, as the extracted regions receive it
+# (S1-26l). Spelled once so the four signatures cannot drift, and named so the
+# parameter reads as what it is: a callback the SPINE owns. It keeps the
+# leading underscore at every call site because the moved code calls
+# `_record_failure(exc)` verbatim, and four manifest guards are anchored on
+# those call sites.
+RecordFailure = Callable[[Exception], Awaitable[None]]
+
+
 @dataclass(frozen=True)
 class CreateSubaccountResult:
     """Outcome of one `create_ghl_subaccount_core` run.
@@ -1121,10 +1130,12 @@ async def _skip_already_provisioned(
 
     S1-26l: extracted verbatim from `create_ghl_subaccount_core`.
 
-    Never POST a second location for a client that has one. This runs
-    BEFORE the `begin_action` claim in the spine, so it owns its own claim
-    and commit and never touches `_record_failure` - which is why it takes
-    no `_record_failure` parameter, unlike every other extracted region.
+    Never POST a second location for a client that has one. This runs BEFORE
+    the `begin_action` claim in the spine, so it owns its own claim and commit
+    and never touches `_record_failure` - which is why it takes no
+    `_record_failure` parameter. `_load_client` takes none either, for the
+    different reason that it runs before there is any action row to record
+    against; the four regions that run AFTER the claim all take one.
     """
     begun = await begin_action(
         session,
@@ -1162,7 +1173,7 @@ async def _reuse_db_sibling(
     client_id: uuid.UUID,
     sibling: Row,
     begun: BeginActionResult,
-    _record_failure: Callable[[Exception], Awaitable[None]],
+    _record_failure: RecordFailure,
 ) -> CreateSubaccountResult:
     """Reuse a phase-1 DB sibling's sub-account and link to its root.
 
@@ -1180,21 +1191,28 @@ async def _reuse_db_sibling(
     # A corroborated link answers the question any earlier flag was asking,
     # so clear it rather than leaving the badge up forever (it would
     # otherwise saturate the board before S1-26e lands and stop being read).
-    # GUARDED (round 15). Every write in this reuse branch - the flag
-    # clear, `complete_action`, the link write-back, both race repairs and
-    # the terminal commit - sits after the committed `in_progress` row, so
-    # any error here strands the action `in_progress` with no `last_error`.
-    # Idiom copied VERBATIM from the phase-2 re-check guard, not adapted:
-    # this function's repairs already diverged into two shapes once, and
-    # that divergence is why round-14 mirrors survived. Improvements belong
-    # on the extraction card (S1-26l), not here.
+    # `begun` is the row the SPINE claimed and committed BEFORE the phase-1
+    # lock (round 13, P1.5); it arrives here as a parameter, so there is no
+    # "above" to point at from inside this function. This branch used to claim
+    # its own row, and hoisting the claim made it unconditional, so both the
+    # reuse and the create paths inherit one committed `in_progress` row rather
+    # than racing to create one after the lock.
+    #
+    # GUARDED (round 15). Every write in this reuse branch - the flag clear,
+    # `complete_action`, the link write-back, both race repairs and the
+    # terminal commit - sits after that committed `in_progress` row, so any
+    # error here strands the action `in_progress` with no `last_error`. The
+    # idiom is copied VERBATIM from the phase-2 re-check guard rather than
+    # adapted: this function's repairs already diverged into two shapes once,
+    # and that divergence is why the round-14 mirrors survived review.
+    # Unifying the six of them is S1-26l ITEM 2, deliberately NOT part of this
+    # extraction: the six guards are not interchangeable today (the phase-2
+    # site reports two fields from the row where the phase-1 sites report one),
+    # so collapsing them changes what a lost race reports, and that is a
+    # behaviour change in a commit whose whole claim is that behaviour is
+    # byte-identical.
     try:
         await _clear_possible_duplicate(session, client_id=client_id)
-        # `begun` is the row claimed and committed above, before the lock
-        # (round 13, P1.5). This branch used to claim its own; hoisting it made
-        # the claim unconditional, so BOTH the reuse and create paths now
-        # inherit the same committed `in_progress` row rather than each racing
-        # to create one after the lock.
         if not begun.already_succeeded:
             await complete_action(
                 session,
@@ -1323,7 +1341,7 @@ async def _reuse_recheck_sibling(
     client_id: uuid.UUID,
     recheck_sibling: Row,
     begun: BeginActionResult,
-    _record_failure: Callable[[Exception], Awaitable[None]],
+    _record_failure: RecordFailure,
 ) -> CreateSubaccountResult:
     """Reuse a sibling that landed in the phase1-to-phase2 window.
 
@@ -1361,9 +1379,10 @@ async def _reuse_recheck_sibling(
             # `parent_client_id=recheck_sibling.root_id` unconditionally -
             # so a run that lost the write race reported the id the row
             # holds alongside the parent it does NOT hold. That is a
-            # half-applied version of the rule the create path at the
-            # `linked.rowcount == 0` branch above applies in full, and the
-            # divergence between the two idioms is what
+            # half-applied version of the rule that `_reuse_db_sibling`'s own
+            # `linked.rowcount == 0` branch applies in full - a SIBLING
+            # FUNCTION since the S1-26l extraction, not code above this line -
+            # and the divergence between the two idioms is what
             # `CreateSubaccountResult`'s own docstring forbids.
             raced = (
                 await session.execute(
@@ -1434,7 +1453,7 @@ async def _adopt_ghl_location(
     client_id: uuid.UUID,
     existing: GhlLocation,
     begun: BeginActionResult,
-    _record_failure: Callable[[Exception], Awaitable[None]],
+    _record_failure: RecordFailure,
 ) -> CreateSubaccountResult:
     """Adopt a corroborated GHL lookup hit instead of creating a location.
 
@@ -1449,7 +1468,8 @@ async def _adopt_ghl_location(
     # writes the id back, repairs a lost race and commits - all after the
     # committed `in_progress` row. The reviewer named this one as
     # pre-existing and same-class. Idiom copied VERBATIM from the reuse
-    # branch; improvements go on the extraction card (S1-26l).
+    # branch; unifying the six of them is S1-26l ITEM 2, which is a behaviour
+    # change and deliberately not part of the extraction.
     try:
         await complete_action(
             session,
@@ -1508,7 +1528,7 @@ async def _create_and_write_back(
     client_id: uuid.UUID,
     payload: dict,
     begun: BeginActionResult,
-    _record_failure: Callable[[Exception], Awaitable[None]],
+    _record_failure: RecordFailure,
 ) -> CreateSubaccountResult:
     """POST the new location and write its id back onto the client row.
 
@@ -1527,9 +1547,9 @@ async def _create_and_write_back(
         raise
 
     # GUARDED (review round 8): this was the only unguarded raise point on the
-    # success path. A commit failure here - the comment above `_record_failure`
-    # calls Neon connection resets routine - used to discard a location id we
-    # are HOLDING IN MEMORY, leave the action `in_progress` with no retry_count
+    # success path. A commit failure here - and `_record_failure`'s own comment,
+    # in the spine, calls Neon connection resets routine - used to discard a
+    # location id we are HOLDING IN MEMORY, leave the action `in_progress` with no retry_count
     # bump, and hand the retry to an eventually-consistent lookup that may mint
     # a second location. Routing through `_record_failure` records `failed` +
     # the error (its own SQLAlchemyError path rolls back and retries the
@@ -2006,7 +2026,11 @@ async def create_ghl_subaccount_core(
         # that was cataloguing them. The rebind BELOW, on the fall-through path,
         # is what makes the sentence true. Same class as the reuse branch, and
         # the reviewer named it as pre-existing. Idiom copied VERBATIM -
-        # improvements go on the extraction card (S1-26l).
+        # unifying the six of them is S1-26l ITEM 2, a behaviour change kept
+        # out of the extraction. This region stayed INLINE in the spine for a
+        # separate reason: it owns the `treat_as_succeeded` rebind below, and
+        # moving that across a function boundary restates what rounds 16 and
+        # 17 were each spent settling.
         #
         # WHAT THIS REGION MUST NOT DO, and round 16 did (round 17, B1). The
         # rebind used to sit HERE, above the try, which armed failure-recording

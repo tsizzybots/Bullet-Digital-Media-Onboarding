@@ -642,8 +642,8 @@ requires_db = true
 [[mutation]]
 name = "R6 - a corroborated link CLEARS an earlier possible-duplicate flag"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "        await _clear_possible_duplicate(session, client_id=client_id)\n        # `begun` is the row claimed and committed above, before the lock"
-replace = "        pass\n        # `begun` is the row claimed and committed above, before the lock"
+find = "        await _clear_possible_duplicate(session, client_id=client_id)\n        if not begun.already_succeeded:"
+replace = "        pass\n        if not begun.already_succeeded:"
 must_fail = "tests/test_ghl_subaccount.py::test_a_confident_link_clears_an_earlier_possible_duplicate_flag"
 requires_db = true
 
@@ -1732,8 +1732,8 @@ must_fail = "tests/test_ghl_subaccount.py::test_a_failure_flagging_a_collision_l
 # link write-back, both race repairs and the terminal commit.
 name = "R15 region 2 - a failure in the reuse branch is recorded, not stranded"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "    # GUARDED (round 15). Every write in this reuse branch - the flag"
-replace = "    # MUTATED\n    raise AssertionError(\"reuse-branch guard removed\")\n    # GUARDED (round 15). Every write in this reuse branch - the flag"
+find = "    try:\n        await _clear_possible_duplicate(session, client_id=client_id)\n        if not begun.already_succeeded:"
+replace = "    raise AssertionError(\"reuse-branch guard removed\")\n    try:\n        await _clear_possible_duplicate(session, client_id=client_id)\n        if not begun.already_succeeded:"
 must_fail = "tests/test_ghl_subaccount.py::test_a_failure_in_the_reuse_branch_lands_failed_not_stranded"
 
 [[mutation]]
@@ -1744,8 +1744,8 @@ must_fail = "tests/test_ghl_subaccount.py::test_a_failure_in_the_reuse_branch_la
 # failure propagates bare instead of being recorded against the action.
 name = "R15 region 3 - a failure in the torn-action repair is recorded, not bare"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "        # GUARDED (round 15), AND THE GUARD ONLY BEGAN RECORDING IN ROUND 16."
-replace = "        raise AssertionError(\"torn-repair guard removed\")\n        # GUARDED (round 15), AND THE GUARD ONLY BEGAN RECORDING IN ROUND 16."
+find = "        try:\n            recovered = ("
+replace = "        raise AssertionError(\"torn-repair guard removed\")\n        try:\n            recovered = ("
 must_fail = "tests/test_ghl_subaccount.py::test_a_failure_in_the_torn_action_repair_lands_failed_not_stranded"
 
 [[mutation]]
@@ -1753,8 +1753,8 @@ must_fail = "tests/test_ghl_subaccount.py::test_a_failure_in_the_torn_action_rep
 # complete_action, the id write-back, the lost-race repair and the commit.
 name = "R15 region 4 - a failure adopting a GHL location is recorded, not stranded"
 file = "src/bullet_api/worker/ghl_subaccount.py"
-find = "    # GUARDED (round 15). The GHL-lookup adoption completes the action,"
-replace = "    # MUTATED\n    raise AssertionError(\"adoption guard removed\")\n    # GUARDED (round 15). The GHL-lookup adoption completes the action,"
+find = "    try:\n        await complete_action(\n            session,\n            action_id=begun.action_id,\n            external_id=existing.id,"
+replace = "    raise AssertionError(\"adoption guard removed\")\n    try:\n        await complete_action(\n            session,\n            action_id=begun.action_id,\n            external_id=existing.id,"
 must_fail = "tests/test_ghl_subaccount.py::test_a_failure_in_the_ghl_lookup_adoption_lands_failed_not_stranded"
 
 [[mutation]]
