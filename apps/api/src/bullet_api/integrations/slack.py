@@ -139,3 +139,17 @@ def format_reconciliation_alert(doc: PandaDocDocument) -> str:
         f"(document id `{doc.document_id}`){completed_suffix}. "
         "The live webhook did not deliver this signing; the event was healed after the fact."
     )
+
+
+def format_agreement_gate_alert(document_id: str, account: str, reason: str) -> str:
+    """Build the Slack alert text for a signing the S1-38 agreement-type gate ignored.
+
+    PURE: no I/O, no side effects. `reason` is one of
+    `agreement_gate.agreement_gate_ignore_reason`'s two shapes (missing vs
+    unrecognised template id); this formatter does not interpret it further.
+    """
+    return (
+        ":no_entry: PandaDoc signing ignored by the agreement-type gate. "
+        f"Account `{account}`, document id `{document_id}`: {reason}. "
+        "No client record or GHL sub-account was created; the event was recorded for audit."
+    )

@@ -7,17 +7,28 @@
   ],
   "G1": [],
   "G6": [
+    "Kn7vBp56MLSxreXPXwpNWk",
+    "U9oZQVdWU7A7Y6A6qLrcmE",
+    "XMgdYd2b9y3VGa2o7RW9Vk",
     "aB3cD4eF5gH6iJ7kL8mN",
     "bot-name@some-project.iam.gserviceaccount.com",
+    "jqJJFqN5sFnwZypr3owPRV",
     "newdomainhit@bulletdigitalmedia.com",
     "olddomainhit@bulletdigitalmedia.com",
-    "person@bulletdigitalmedia.com"
+    "person@bulletdigitalmedia.com",
+    "rQ9jQ6f4dcP2jjmCfF3H6Y"
   ],
   "_G6_REASONS": {
     "aB3cD4eF5gH6iJ7kL8mN": "Fictional id in review_gate.py's own comment, documenting the shape the GHL pattern matches. Not a live identifier - it replaced a real one that this check itself caught.",
     "olddomainhit@bulletdigitalmedia.com": "Synthetic fixture in test_review_gate.py's G6 self-tests - must match the real client-domain pattern to prove the detector fires.",
     "newdomainhit@bulletdigitalmedia.com": "Same synthetic G6 self-test fixture.",
     "person@bulletdigitalmedia.com": "Same synthetic G6 self-test fixture (the negative case for the service-account pattern).",
-    "bot-name@some-project.iam.gserviceaccount.com": "Synthetic fixture proving the round-8 service-account pattern matches its shape."
+    "bot-name@some-project.iam.gserviceaccount.com": "Synthetic fixture proving the round-8 service-account pattern matches its shape.",
+    "Kn7vBp56MLSxreXPXwpNWk": "PandaDoc TEMPLATE id (UK), not a GHL location id. G6 cannot tell the two opaque shapes apart; confirmed live 21/09/2026 via GET /public/v1/templates as \"NEW GYM CLIENT & Bullet Digital Media - Digital Marketing Partnership Agreement\". S1-38 needs it in source because the gate IS the allowlist. Also independently confirmed by Bullet (Steve, 18/09) and already present on main in docs/CHANGELOG.md.",
+    "rQ9jQ6f4dcP2jjmCfF3H6Y": "PandaDoc TEMPLATE id (INT), confirmed live 21/09/2026 as \"NEW FITNESS FACILITY CLIENT & BULLET - Digital Marketing Partnership\". Same reasoning as the UK id; also confirmed by Bullet and already on main.",
+    "jqJJFqN5sFnwZypr3owPRV": "PandaDoc TEMPLATE id (INT), confirmed live 21/09/2026 as \"NEW CONSUMER CLIENT & BULLET - Digital Marketing Partnership\". REMOVED from the gate allowlist by S1-49: it is a different category of agreement, not an unconfirmed gym one, and it was set to PROCEED. It remains in source only as the negative test case asserting it does NOT fan out.",
+    "XMgdYd2b9y3VGa2o7RW9Vk": "PandaDoc TEMPLATE id (UK), confirmed live 21/09/2026 as \"NEW GYM CLIENT & Bullet Digital Media - Ads Management Only Agreement\". Deliberately NOT allowlisted by the gate; it appears in source only as the negative test case.",
+    "U9oZQVdWU7A7Y6A6qLrcmE": "PandaDoc TEMPLATE id (UK), confirmed live 21/09/2026 as \"Bullet - Rebrand Agreement template\". The gate's regression fixture: the exact class of document that wrongly reached staging. Never allowlisted.",
+    "_S1_38_NOTE": "The five PandaDoc template ids above ARE live identifiers, which the _README rule would normally exclude. They are admitted deliberately and narrowly: they identify TEMPLATES, not clients, people, locations or credentials; each was verified against the live PandaDoc templates endpoint on 21/09/2026 rather than assumed; and two were already committed on main. G6's detector is NOT weakened - it still fires on anything matching the GHL location shape, and a real location id appearing here would still be a finding. Shape note for the next reader: PandaDoc template ids are 22 characters, GHL location ids 20."
   }
 }

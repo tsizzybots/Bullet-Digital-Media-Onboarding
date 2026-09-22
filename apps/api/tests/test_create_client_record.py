@@ -29,13 +29,23 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 
+import httpx
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bullet_api.crons.reconcile_pandadoc import reconcile_pandadoc
+from bullet_api.integrations.pandadoc_client import (
+    FakePandaDocClient as FakeReconcilePandaDocClient,
+)
+from bullet_api.integrations.pandadoc_client import PandaDocDocument
+from bullet_api.integrations.slack import FakeSlackNotifier, SlackPostError
 from bullet_api.pandadoc.client import FakePandaDocClient, PandaDocNotFound
+from bullet_api.webhooks.pandadoc import persist_and_emit_signed_documents
+from bullet_api.webhooks.pandadoc_core import SignedDocument
 from bullet_api.worker import CLIENT_CREATED_EVENT, PANDADOC_SIGNED_EVENT, FakeEventEmitter
 from bullet_api.worker.client_record import (
     LEGAL_ENTITY_PLACEHOLDER,
@@ -56,13 +66,19 @@ def _detail_body(
     legal_entity: str = "Sample Gym Ltd",
     hubspot_contact_id: str = "hs-contact-1234",
     postal_code: str = "M1 1AA",
+    template_id: str | None = "Kn7vBp56MLSxreXPXwpNWk",
 ) -> dict:
     """Build a PandaDoc document detail body matching Bullet's UK template shape.
 
     Field names pinned to the inspection capture of 04/06/2026 (see
-    `apps/api/scripts/inspect_pandadoc_document.py`).
+    `apps/api/scripts/inspect_pandadoc_document.py`). `template_id` defaults to
+    the REAL UK gym template id (confirmed live 20/08/2026 via
+    `GET /public/v1/templates`) so every test passes the S1-38 agreement-type
+    gate unless it explicitly overrides `template_id` to exercise the ignored
+    path. `None` omits the `template` key entirely (matches a document where
+    PandaDoc did not return one - see `clients_payload._template_id`).
     """
-    return {
+    body = {
         "id": document_id,
         "name": "Bullet Digital Media - Digital Marketing Partnership Agreement",
         "status": "document.completed",
@@ -87,8 +103,10 @@ def _detail_body(
             "hubspot.deal_id": "hs-deal-5678",
             "hubspot.company_id": "hs-company-9012",
         },
-        "template": {"id": "tpl-uk-v3"},
     }
+    if template_id is not None:
+        body["template"] = {"id": template_id}
+    return body
 
 
 async def _seed_onboarding_event(
@@ -139,6 +157,7 @@ async def test_new_signing_creates_client_and_emits(async_session: AsyncSession)
         document_id=document_id,
         document=document,
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     assert result.created is True
@@ -216,8 +235,11 @@ async def test_account_is_propagated_to_client_created(async_session: AsyncSessi
         async_session,
         onboarding_event_id=event_id,
         document_id=document_id,
-        document=_detail_body(document_id),
+        # S1-38 gate is account-scoped: the UK default template id would be
+        # rejected under "int", so use an INT-allowlisted id here.
+        document=_detail_body(document_id, template_id="rQ9jQ6f4dcP2jjmCfF3H6Y"),
         emitter=emitter,
+        slack=FakeSlackNotifier(),
         account="int",
     )
 
@@ -243,6 +265,7 @@ async def test_missing_legal_entity_falls_back_to_business_name(
         document_id=document_id,
         document=document,
         emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -275,6 +298,7 @@ async def test_missing_both_legal_entity_and_business_name_uses_placeholder_only
         document_id=document_id,
         document=document,
         emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -306,6 +330,7 @@ async def test_replay_of_same_document_id_is_idempotent(
         document_id=document_id,
         document=document,
         emitter=first_emitter,
+        slack=FakeSlackNotifier(),
     )
     assert first.created is True
     assert len(first_emitter.sent) == 1
@@ -328,6 +353,7 @@ async def test_replay_of_same_document_id_is_idempotent(
         document_id=document_id,
         document=document,
         emitter=second_emitter,
+        slack=FakeSlackNotifier(),
     )
     assert second.created is False
     assert second.client_id == first.client_id
@@ -372,6 +398,7 @@ async def test_missing_client_email_token_raises_and_writes_no_client(
             document_id=document_id,
             document=document,
             emitter=emitter,
+            slack=FakeSlackNotifier(),
         )
     assert exc.value.field == "tokens[Client.Email]"
 
@@ -423,6 +450,7 @@ async def test_unknown_onboarding_event_id_raises_OnboardingEventNotFoundError(
             document_id=document_id,
             document=document,
             emitter=emitter,
+            slack=FakeSlackNotifier(),
         )
     assert exc.value.event_id == missing_event_id
     assert emitter.sent == []
@@ -455,6 +483,7 @@ async def test_payload_jsonb_is_NOT_read_for_field_extraction(
         document_id=document_id,
         document=document,
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     # The clients row's email comes from the document body (API), NOT
@@ -501,6 +530,7 @@ async def test_emit_failure_after_commit_propagates_and_row_is_durable(
             document_id=document_id,
             document=document,
             emitter=emitter,
+            slack=FakeSlackNotifier(),
         )
 
     # CRITICAL: the client row is durable despite the emit failure.
@@ -623,6 +653,7 @@ async def test_replay_backfills_a_null_identity_key(async_session: AsyncSession)
         document_id=document_id,
         document=_detail_body(document_id),
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -662,6 +693,7 @@ async def test_replay_does_not_overwrite_an_existing_identity_key(
         document_id=document_id,
         document=_detail_body(document_id),
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -699,6 +731,7 @@ async def test_dedup_key_falls_back_to_email_when_key_is_null(
         document_id=document_id,
         document=_detail_body(document_id, postal_code="N/A", client_email="Mixed@Example.com"),
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -743,6 +776,7 @@ async def test_identity_key_uses_legal_entity_when_no_business_name(
         document_id=document_id,
         document=document,
         emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -776,6 +810,7 @@ async def test_placeholder_legal_entity_yields_no_identity_key(
         document_id=document_id,
         document=document,
         emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -846,3 +881,313 @@ async def test_schema_drift_stays_retriable_and_logs_no_bind_params(
     assert drift_lines, "the drift branch must log loudly"
     for record in caplog.records:
         assert "leaked-bind-param@example.com" not in str(record.__dict__)
+
+
+# --------------------------------------------------------------------------- #
+# S1-38 phase 1: agreement-type gate (template-id allowlist)
+# --------------------------------------------------------------------------- #
+
+
+async def test_unrecognised_template_is_ignored_not_created(async_session: AsyncSession) -> None:
+    """A Rebrand/Content-Production-shaped document (template id not in the
+    allowlist) must be recorded, marked ignored, alert Slack, and create
+    nothing - the exact class of document that already reached staging."""
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    document = _detail_body(document_id, template_id="U9oZQVdWU7A7Y6A6qLrcmE")  # Rebrand template
+    slack = FakeSlackNotifier()
+
+    result = await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+        slack=slack,
+    )
+
+    assert result.client_id is None
+    assert result.created is False
+    assert result.client_created_emitted is False
+    assert result.ignored_reason == "agreement_type: unrecognised template 'U9oZQVdWU7A7Y6A6qLrcmE'"
+
+    client_count = await async_session.execute(
+        text("SELECT count(*) FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    assert client_count.scalar_one() == 0
+
+    event_row = await async_session.execute(
+        text(
+            "SELECT client_id, ignored_reason, processed_at FROM onboarding_events WHERE id = :id"
+        ),
+        {"id": event_id},
+    )
+    event = event_row.one()
+    assert event.client_id is None
+    assert event.ignored_reason == result.ignored_reason
+    assert event.processed_at is not None
+
+    assert len(slack.posted) == 1
+    assert "U9oZQVdWU7A7Y6A6qLrcmE" in slack.posted[0]
+
+
+@pytest.mark.db
+async def test_missing_template_id_is_ignored_with_distinct_reason(
+    async_session: AsyncSession,
+) -> None:
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    document = _detail_body(document_id, template_id=None)
+    slack = FakeSlackNotifier()
+
+    result = await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+        slack=slack,
+    )
+
+    assert result.client_id is None
+    assert result.ignored_reason == "agreement_type: missing pandadoc_template_id"
+
+    # The card is explicit that an ABSENT id must ALERT, not just be dropped:
+    # a missing id can mean a real gym document with an unusual payload shape,
+    # and a client falling through unnoticed is the worse failure. Asserted
+    # here because the alert was previously unpinned on this path - only the
+    # unrecognised-id path checked it, so deleting the post left this green.
+    assert len(slack.posted) == 1
+    assert "missing pandadoc_template_id" in slack.posted[0]
+
+
+@pytest.mark.db
+async def test_int_account_document_with_uk_template_id_is_ignored(
+    async_session: AsyncSession,
+) -> None:
+    """The allowlist is account-scoped: the UK gym template id must NOT pass
+    the gate for an INT-account signing."""
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    document = _detail_body(document_id)  # defaults to the UK gym template id
+
+    result = await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
+        account="int",
+    )
+
+    assert result.client_id is None
+    assert result.ignored_reason is not None
+
+
+@pytest.mark.db
+async def test_replay_of_ignored_event_is_idempotent(async_session: AsyncSession) -> None:
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    document = _detail_body(document_id, template_id="U9oZQVdWU7A7Y6A6qLrcmE")
+
+    first = await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
+    )
+    second = await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
+    )
+
+    assert first.ignored_reason == second.ignored_reason
+    client_count = await async_session.execute(
+        text("SELECT count(*) FROM clients WHERE pandadoc_document_id = :doc"),
+        {"doc": document_id},
+    )
+    assert client_count.scalar_one() == 0
+
+
+class _RaisingSlack:
+    async def post(self, text: str) -> None:
+        raise SlackPostError(500)
+
+
+@pytest.mark.db
+async def test_slack_failure_on_ignored_path_rolls_back_and_raises(
+    async_session: AsyncSession,
+) -> None:
+    """A Slack failure on the ignored path must raise (so Inngest retries)
+    and must NOT leave a half-written `ignored_reason` behind."""
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    # Commit the seed as its own savepoint so the rollback below (which must
+    # undo only the gate's UPDATE) does not also erase the seeded row.
+    await async_session.commit()
+    document = _detail_body(document_id, template_id="U9oZQVdWU7A7Y6A6qLrcmE")
+
+    with pytest.raises(SlackPostError):
+        await create_client_record_core(
+            async_session,
+            onboarding_event_id=event_id,
+            document_id=document_id,
+            document=document,
+            emitter=FakeEventEmitter(),
+            slack=_RaisingSlack(),
+        )
+
+    await async_session.rollback()
+    event_row = await async_session.execute(
+        text("SELECT ignored_reason FROM onboarding_events WHERE id = :id"),
+        {"id": event_id},
+    )
+    assert event_row.one().ignored_reason is None
+
+
+class _TransportFailingSlack:
+    """Simulates a network-level Slack failure (not a typed SlackPostError) -
+    e.g. a DNS blip or connection reset, which happens BEFORE any HTTP
+    response and so is not `SlackPostError`."""
+
+    async def post(self, text: str) -> None:
+        raise httpx.ConnectError("simulated DNS/connection failure")
+
+
+@pytest.mark.db
+async def test_slack_transport_failure_on_ignored_path_also_raises_and_rolls_back(
+    async_session: AsyncSession,
+) -> None:
+    """The same rollback-and-retry guarantee must hold for an UNTYPED
+    transport-level Slack failure, not just the typed `SlackPostError` -
+    `HttpSlackNotifier.post()` does not catch transport errors, so they
+    propagate raw and must be handled the same way here."""
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    event_id = await _seed_onboarding_event(async_session, document_id)
+    await async_session.commit()
+    document = _detail_body(document_id, template_id="U9oZQVdWU7A7Y6A6qLrcmE")
+
+    with pytest.raises(httpx.ConnectError):
+        await create_client_record_core(
+            async_session,
+            onboarding_event_id=event_id,
+            document_id=document_id,
+            document=document,
+            emitter=FakeEventEmitter(),
+            slack=_TransportFailingSlack(),
+        )
+
+    await async_session.rollback()
+    event_row = await async_session.execute(
+        text("SELECT ignored_reason FROM onboarding_events WHERE id = :id"),
+        {"id": event_id},
+    )
+    assert event_row.one().ignored_reason is None
+
+
+@pytest.mark.db
+async def test_a_rejected_document_stays_rejected_via_the_replay_path(
+    async_session: AsyncSession,
+) -> None:
+    """The gate holds for a document that arrived via POST /admin/pandadoc/replay.
+
+    S1-38 design rule 2: gate in the WORKER, because there are THREE intake
+    paths, not one. This drives the replay path's own intake function rather
+    than hand-seeding the event, so a change that let replay build its event
+    differently would surface here.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    await persist_and_emit_signed_documents(
+        [SignedDocument(document_id=document_id, event={})],
+        async_session,
+        FakeEventEmitter(),
+        account="uk",
+    )
+    event_id = (
+        await async_session.execute(
+            text("SELECT id FROM onboarding_events WHERE external_id = :d"),
+            {"d": document_id},
+        )
+    ).scalar_one()
+
+    result = await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id, template_id="U9oZQVdWU7A7Y6A6qLrcmE"),
+        emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
+    )
+
+    assert result.client_id is None
+    assert result.created is False
+    assert result.ignored_reason == "agreement_type: unrecognised template 'U9oZQVdWU7A7Y6A6qLrcmE'"
+    count = await async_session.execute(
+        text("SELECT count(*) FROM clients WHERE pandadoc_document_id = :d"),
+        {"d": document_id},
+    )
+    assert count.scalar_one() == 0
+
+
+@pytest.mark.db
+async def test_a_rejected_document_stays_rejected_via_the_reconcile_path(
+    async_session: AsyncSession,
+) -> None:
+    """The gate holds for a document that arrived via the nightly reconcile cron.
+
+    The cron does NOT call `persist_and_emit_signed_documents` - it replicates
+    the insert and emit so it can interleave a per-document Slack alert. That
+    replication is exactly why this path needs its own test: the 10/08 lesson
+    was that disabling the webhook left the cron ingesting freely, so a gate
+    proven only on the webhook is not proven at all.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    await reconcile_pandadoc(
+        async_session,
+        pandadoc_client=FakeReconcilePandaDocClient(
+            docs=[
+                PandaDocDocument(
+                    document_id=document_id,
+                    name="Rebrand Agreement",
+                    status="document.completed",
+                    date_completed=None,
+                    raw={},
+                )
+            ]
+        ),
+        emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
+        lookback_days=7,
+        now=datetime.now(UTC),
+    )
+    event_id = (
+        await async_session.execute(
+            text("SELECT id FROM onboarding_events WHERE external_id = :d"),
+            {"d": document_id},
+        )
+    ).scalar_one()
+
+    result = await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id, template_id="U9oZQVdWU7A7Y6A6qLrcmE"),
+        emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
+    )
+
+    assert result.client_id is None
+    assert result.ignored_reason is not None
+    count = await async_session.execute(
+        text("SELECT count(*) FROM clients WHERE pandadoc_document_id = :d"),
+        {"d": document_id},
+    )
+    assert count.scalar_one() == 0

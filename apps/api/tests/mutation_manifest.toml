@@ -2308,3 +2308,61 @@ file = "src/bullet_api/worker/ghl_subaccount.py"
 find = "    async with WorkerSessionLocal() as session:\n        try:\n            result = await create_ghl_subaccount_core("
 replace = "    async with AsyncSessionLocal() as session:\n        try:\n            result = await create_ghl_subaccount_core("
 must_fail = "tests/test_worker_pool_isolation.py::test_no_worker_module_reaches_for_the_api_sessionmaker"
+
+[[mutation]]
+# S1-38: the gate is an ALLOWLIST, so a MISSING template id must be rejected.
+# The mutation makes `None` pass. Note the guard's own `is not None` clause is
+# NOT what enforces this - probed 21/09 by deleting it, and both missing-id
+# tests still passed, because `None in frozenset[str]` is already False. That
+# clause is defensive typing; the `in` lookup is the behaviour, so this entry
+# mutates the behaviour rather than the redundant half.
+name = "S1-38 - a missing template id fails closed"
+file = "src/bullet_api/pandadoc/agreement_gate.py"
+find = "return template_id is not None and template_id in GYM_TEMPLATE_IDS.get(account, frozenset())"
+replace = "return template_id is None or template_id in GYM_TEMPLATE_IDS.get(account, frozenset())"
+must_fail = "tests/test_agreement_gate.py::test_missing_template_id_is_rejected"
+
+[[mutation]]
+# S1-38: an UNRECOGNISED template id must be rejected. The mutation accepts any
+# non-None id, which is the denylist failure mode the card forbids by name:
+# a document type nobody anticipated would provision real accounts.
+name = "S1-38 - an unrecognised template id fails closed"
+file = "src/bullet_api/pandadoc/agreement_gate.py"
+find = "return template_id is not None and template_id in GYM_TEMPLATE_IDS.get(account, frozenset())"
+replace = "return template_id is not None"
+must_fail = "tests/test_agreement_gate.py::test_unrecognised_template_id_is_rejected"
+
+[[mutation]]
+# S1-38: the allowlist is keyed PER ACCOUNT because UK and INT ids are
+# disjoint. The mutation drops the account key and matches against the union,
+# so a UK id presented under the INT account would be accepted - reusing one
+# account's id under the other must never match.
+name = "S1-38 - the allowlist is keyed per account, not a flat id set"
+file = "src/bullet_api/pandadoc/agreement_gate.py"
+find = "return template_id is not None and template_id in GYM_TEMPLATE_IDS.get(account, frozenset())"
+replace = "return template_id is not None and any(template_id in ids for ids in GYM_TEMPLATE_IDS.values())"
+must_fail = "tests/test_agreement_gate.py::test_uk_id_under_int_account_is_rejected"
+
+[[mutation]]
+# S1-38: the WIRING, not the pure function. A correct gate that is never called
+# is worth nothing, and the three pins above all pass with the call site
+# removed. This mutates the call site so the gate never fires, which must let a
+# Rebrand-shaped document through and create a client row.
+name = "S1-38 - the gate is actually wired into the worker path"
+file = "src/bullet_api/worker/client_record.py"
+find = "    if not is_gym_agreement(account, fields.pandadoc_template_id):"
+replace = "    if False:  # MUTATED - gate never fires"
+must_fail = "tests/test_create_client_record.py::test_unrecognised_template_is_ignored_not_created"
+
+[[mutation]]
+# S1-49: the INT "NEW CONSUMER CLIENT" template must stay OUT of the allowlist.
+# It was in it, set to PROCEED, so a signed consumer agreement would have
+# provisioned the full gym fan-out - the unanticipated-document-type case this
+# gate exists to refuse, sitting inside the gate. The mutation re-adds it, which
+# is exactly the regression to catch: an allowlist is only fail-safe for ids
+# that are ABSENT.
+name = "S1-49 - the INT consumer template is not re-added to the allowlist"
+file = "src/bullet_api/pandadoc/agreement_gate.py"
+find = '_INT_GYM_TEMPLATE_IDS: frozenset[str] = frozenset({"rQ9jQ6f4dcP2jjmCfF3H6Y"})'
+replace = '_INT_GYM_TEMPLATE_IDS: frozenset[str] = frozenset({"rQ9jQ6f4dcP2jjmCfF3H6Y", "jqJJFqN5sFnwZypr3owPRV"})'
+must_fail = "tests/test_agreement_gate.py::test_the_int_consumer_template_is_not_allowlisted"
