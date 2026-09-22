@@ -21,9 +21,25 @@ def test_uk_gym_template_is_allowlisted() -> None:
     assert is_gym_agreement("uk", _UK_GYM_ID) is True
 
 
-def test_both_int_gym_templates_are_allowlisted() -> None:
+def test_the_int_fitness_template_is_allowlisted() -> None:
     assert is_gym_agreement("int", _INT_FITNESS_ID) is True
-    assert is_gym_agreement("int", _INT_CONSUMER_ID) is True
+
+
+def test_the_int_consumer_template_is_not_allowlisted() -> None:
+    """The INT "NEW CONSUMER CLIENT" template must NOT fan out (S1-49).
+
+    It was allowlisted on the strength of its name alone and set to PROCEED,
+    so a signed consumer-client agreement would have provisioned a real GHL
+    sub-account for a document that is not a gym onboarding - the exact
+    unanticipated-document-type case this gate exists to refuse. Queried live
+    on 21/09/2026 the id resolves to "NEW CONSUMER CLIENT & BULLET - Digital
+    Marketing Partnership", so it is a different CATEGORY, not an unconfirmed
+    gym template.
+
+    This asserts the REMOVAL, so re-adding the id on the strength of it merely
+    existing turns this test red rather than silently widening the gate.
+    """
+    assert is_gym_agreement("int", _INT_CONSUMER_ID) is False
 
 
 def test_uk_id_under_int_account_is_rejected() -> None:

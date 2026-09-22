@@ -25,10 +25,21 @@ matter for anyone editing this list:
   call, pending confirmation it is in scope. Adding it later is a one-line
   change here, not a design change.
 
-When Bullet's `Agreement_Type` field spec lands (S1-39), this module either
-gets superseded by that check or becomes its backstop (the plan's own
-suggestion: "if the field cannot be made mandatory, use pandadoc_template_id
-as a backstop"). Either way this list needs revisiting then, not before.
+THE FIELD SPEC HAS SINCE LANDED (Bullet, 18/09/2026), and it changes this
+module's future role rather than its current behaviour. `Agreement Type` is a
+mandatory single-select on BOTH gym templates, values `Gym Single | Gym Multi`.
+Because it cannot be left blank, "no value = ignore" becomes safe, so phase 2
+supersedes this check as the primary mechanism and the template-id allowlist
+drops to belt-and-braces - the plan's own fallback, now the secondary rather
+than the only guard.
+
+Phase 2 is NOT built here and this module reads NO agreement-type field; it
+gates on `pandadoc_template_id` alone. S1-39 extracts the five fields and
+S1-38 phase 2 gates on them, on a separate branch. One trap recorded for
+whoever takes it: three spellings are in circulation (`Agreement Type`,
+`Existing Gym Client`, `Agreement_Type`), so read the real field id off a
+signed document with `scripts/inspect_pandadoc_document.py` before coding
+against a guessed name - a field read by the wrong name fails silently.
 """
 
 from __future__ import annotations
@@ -38,13 +49,27 @@ from __future__ import annotations
 # the live UK template list.
 _UK_GYM_TEMPLATE_IDS: frozenset[str] = frozenset({"Kn7vBp56MLSxreXPXwpNWk"})
 
-# INT gym onboarding templates, selected by name from the live INT template
-# list pending verification against a real signed INT document (S1-45/S1-46):
-# "NEW FITNESS FACILITY CLIENT & BULLET...Non-UK" and "NEW CONSUMER CLIENT &
-# BULLET...".
-_INT_GYM_TEMPLATE_IDS: frozenset[str] = frozenset(
-    {"rQ9jQ6f4dcP2jjmCfF3H6Y", "jqJJFqN5sFnwZypr3owPRV"}
-)
+# INT gym onboarding template: "NEW FITNESS FACILITY CLIENT & BULLET - Digital
+# Marketing Partnership". Confirmed twice over - by name against the live INT
+# template list, and independently by Bullet (Steve, 18/09/2026, "INT Gym
+# Agreement Template ID").
+#
+# ONE ID, NOT TWO (S1-49, 21/09/2026). `jqJJFqN5sFnwZypr3owPRV` was also
+# allowlisted here, selected by NAME alone from the live template list. Queried
+# live on 21/09 it resolves to "NEW CONSUMER CLIENT & BULLET - Digital
+# Marketing Partnership" - a different CATEGORY of agreement, not an
+# unconfirmed gym one. It was set to PROCEED, so a signed consumer-client
+# document would have provisioned the full gym fan-out: a real sub-account in a
+# live agency for a document that is not a gym onboarding. That is precisely
+# the unanticipated-document-type case rule 1 of this gate exists to refuse,
+# sitting inside the allowlist itself.
+#
+# It is removed rather than left pending, because an allowlist is only
+# fail-safe for ids that are ABSENT; a present-but-unverified id inherits none
+# of that safety. Do NOT re-add it on the strength of the id existing - it
+# exists, and it is the wrong kind. Re-add only if Bullet confirms that a
+# consumer-client engagement is a gym onboarding that should fan out.
+_INT_GYM_TEMPLATE_IDS: frozenset[str] = frozenset({"rQ9jQ6f4dcP2jjmCfF3H6Y"})
 
 # Keyed by PandaDoc account label ("uk"/"int" - see `pandadoc.accounts`).
 # `.get(account, frozenset())` is the fail-closed default for an unrecognised

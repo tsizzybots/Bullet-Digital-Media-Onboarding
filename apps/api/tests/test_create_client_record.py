@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -36,8 +37,15 @@ from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bullet_api.crons.reconcile_pandadoc import reconcile_pandadoc
+from bullet_api.integrations.pandadoc_client import (
+    FakePandaDocClient as FakeReconcilePandaDocClient,
+)
+from bullet_api.integrations.pandadoc_client import PandaDocDocument
 from bullet_api.integrations.slack import FakeSlackNotifier, SlackPostError
 from bullet_api.pandadoc.client import FakePandaDocClient, PandaDocNotFound
+from bullet_api.webhooks.pandadoc import persist_and_emit_signed_documents
+from bullet_api.webhooks.pandadoc_core import SignedDocument
 from bullet_api.worker import CLIENT_CREATED_EVENT, PANDADOC_SIGNED_EVENT, FakeEventEmitter
 from bullet_api.worker.client_record import (
     LEGAL_ENTITY_PLACEHOLDER,
@@ -645,6 +653,7 @@ async def test_replay_backfills_a_null_identity_key(async_session: AsyncSession)
         document_id=document_id,
         document=_detail_body(document_id),
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -684,6 +693,7 @@ async def test_replay_does_not_overwrite_an_existing_identity_key(
         document_id=document_id,
         document=_detail_body(document_id),
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -721,6 +731,7 @@ async def test_dedup_key_falls_back_to_email_when_key_is_null(
         document_id=document_id,
         document=_detail_body(document_id, postal_code="N/A", client_email="Mixed@Example.com"),
         emitter=emitter,
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -765,6 +776,7 @@ async def test_identity_key_uses_legal_entity_when_no_business_name(
         document_id=document_id,
         document=document,
         emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -798,6 +810,7 @@ async def test_placeholder_legal_entity_yields_no_identity_key(
         document_id=document_id,
         document=document,
         emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
     )
 
     row = await async_session.execute(
@@ -885,8 +898,11 @@ async def test_unrecognised_template_is_ignored_not_created(async_session: Async
     slack = FakeSlackNotifier()
 
     result = await create_client_record_core(
-
-
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
         slack=slack,
     )
 
@@ -923,15 +939,27 @@ async def test_missing_template_id_is_ignored_with_distinct_reason(
     document_id = f"doc_{uuid.uuid4().hex[:12]}"
     event_id = await _seed_onboarding_event(async_session, document_id)
     document = _detail_body(document_id, template_id=None)
+    slack = FakeSlackNotifier()
 
     result = await create_client_record_core(
-
-
-        slack=FakeSlackNotifier(),
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=document,
+        emitter=FakeEventEmitter(),
+        slack=slack,
     )
 
     assert result.client_id is None
     assert result.ignored_reason == "agreement_type: missing pandadoc_template_id"
+
+    # The card is explicit that an ABSENT id must ALERT, not just be dropped:
+    # a missing id can mean a real gym document with an unusual payload shape,
+    # and a client falling through unnoticed is the worse failure. Asserted
+    # here because the alert was previously unpinned on this path - only the
+    # unrecognised-id path checked it, so deleting the post left this green.
+    assert len(slack.posted) == 1
+    assert "missing pandadoc_template_id" in slack.posted[0]
 
 
 @pytest.mark.db
@@ -1063,3 +1091,103 @@ async def test_slack_transport_failure_on_ignored_path_also_raises_and_rolls_bac
         {"id": event_id},
     )
     assert event_row.one().ignored_reason is None
+
+
+@pytest.mark.db
+async def test_a_rejected_document_stays_rejected_via_the_replay_path(
+    async_session: AsyncSession,
+) -> None:
+    """The gate holds for a document that arrived via POST /admin/pandadoc/replay.
+
+    S1-38 design rule 2: gate in the WORKER, because there are THREE intake
+    paths, not one. This drives the replay path's own intake function rather
+    than hand-seeding the event, so a change that let replay build its event
+    differently would surface here.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    await persist_and_emit_signed_documents(
+        [SignedDocument(document_id=document_id, event={})],
+        async_session,
+        FakeEventEmitter(),
+        account="uk",
+    )
+    event_id = (
+        await async_session.execute(
+            text("SELECT id FROM onboarding_events WHERE external_id = :d"),
+            {"d": document_id},
+        )
+    ).scalar_one()
+
+    result = await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id, template_id="U9oZQVdWU7A7Y6A6qLrcmE"),
+        emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
+    )
+
+    assert result.client_id is None
+    assert result.created is False
+    assert result.ignored_reason == "agreement_type: unrecognised template 'U9oZQVdWU7A7Y6A6qLrcmE'"
+    count = await async_session.execute(
+        text("SELECT count(*) FROM clients WHERE pandadoc_document_id = :d"),
+        {"d": document_id},
+    )
+    assert count.scalar_one() == 0
+
+
+@pytest.mark.db
+async def test_a_rejected_document_stays_rejected_via_the_reconcile_path(
+    async_session: AsyncSession,
+) -> None:
+    """The gate holds for a document that arrived via the nightly reconcile cron.
+
+    The cron does NOT call `persist_and_emit_signed_documents` - it replicates
+    the insert and emit so it can interleave a per-document Slack alert. That
+    replication is exactly why this path needs its own test: the 10/08 lesson
+    was that disabling the webhook left the cron ingesting freely, so a gate
+    proven only on the webhook is not proven at all.
+    """
+    document_id = f"doc_{uuid.uuid4().hex[:12]}"
+    await reconcile_pandadoc(
+        async_session,
+        pandadoc_client=FakeReconcilePandaDocClient(
+            docs=[
+                PandaDocDocument(
+                    document_id=document_id,
+                    name="Rebrand Agreement",
+                    status="document.completed",
+                    date_completed=None,
+                    raw={},
+                )
+            ]
+        ),
+        emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
+        lookback_days=7,
+        now=datetime.now(UTC),
+    )
+    event_id = (
+        await async_session.execute(
+            text("SELECT id FROM onboarding_events WHERE external_id = :d"),
+            {"d": document_id},
+        )
+    ).scalar_one()
+
+    result = await create_client_record_core(
+        async_session,
+        onboarding_event_id=event_id,
+        document_id=document_id,
+        document=_detail_body(document_id, template_id="U9oZQVdWU7A7Y6A6qLrcmE"),
+        emitter=FakeEventEmitter(),
+        slack=FakeSlackNotifier(),
+    )
+
+    assert result.client_id is None
+    assert result.ignored_reason is not None
+    count = await async_session.execute(
+        text("SELECT count(*) FROM clients WHERE pandadoc_document_id = :d"),
+        {"d": document_id},
+    )
+    assert count.scalar_one() == 0
